@@ -1,0 +1,153 @@
+# `rusty_remind_me`
+
+> High-performance, persistent long-term memory engine and Model Context Protocol (MCP) server written in Rust, built on the **Rusty Mill** ecosystem.
+
+`rusty_remind_me` is a native Rust port of `remind-me`. It equips AI assistants (such as Claude Desktop, Antigravity, Cursor, OpenAI Codex, and custom LLM agents) with persistent, searchable memory using SQLite FTS5 full-text search, ACT-R inspired memory vitality decay, Reciprocal Rank Fusion (RRF) search ranking, a structured Knowledge Graph entity system, and automated markdown wiki compilation.
+
+---
+
+## Key Features
+
+- **Hybrid Search Engine**: FTS5 BM25 keyword matching combined with Reciprocal Rank Fusion (RRF) rank scoring.
+- **ACT-R Memory Vitality Model**: Time-based exponential decay, write-time priors by category/source, and bridge protection (decay rate halved for frequently accessed memories).
+- **Forward-Compatible Model Context Protocol (MCP) Server**: Stdio JSON-RPC MCP server with dynamic protocol version negotiation (supporting `2024-11-05` through upcoming 2026 releases), resources, prompts, dynamic tool change notifications (`listChanged`), and tool execution.
+- **Automated Client Setup**: Built-in `configure` command & scripts for 1-click MCP setup across **Claude Desktop**, **Antigravity**, **Cursor**, and **Codex**.
+- **REST API Server**: Async HTTP daemon (`rusty_http` / `tokio`) exposing endpoints for health checks, memory storage, FTS5 retrieval, and stats.
+- **Knowledge Graph Entities**: Canonical entity deduplication, alias resolution, and 1-hop relation linking.
+- **Markdown Wiki Synthesis**: Topic-based wiki page compilation and queryable topic search.
+- **Rusty Mill Integration**: Zero-dependency philosophy built on `c:\dev\Rusty_Mill` crates (`rusty_tokio`, `rusty-db`, `rusty_json`, `rusty-search`, `rusty_http`, `rusty_lines`, `rusty_term`, `rusty_time`, `rusty_config`).
+
+---
+
+## Workspace Structure
+
+`rusty_remind_me` is organized as a Cargo workspace containing four modular crates:
+
+```
+rusty_remind_me/
+├── Cargo.toml                  # Workspace manifest linking to ../Rusty_Mill crates
+├── README.md                   # User & Developer guide
+├── ARCHITECTURE.md             # Technical design & schema documentation
+├── CONTRIBUTING.md             # Development & testing guidelines
+├── scripts/
+│   ├── configure_mcp.ps1       # PowerShell auto-configuration script for Windows
+│   └── configure_mcp.py        # Cross-platform Python auto-configuration script
+└── crates/
+    ├── remind_me_core/         # Domain models, SQLite/FTS5 database, ACT-R decay, RRF ranking
+    ├── remind_me_mcp/          # Stdio JSON-RPC MCP protocol engine & tool handlers
+    ├── remind_me_api/          # Async REST HTTP server daemon (`rusty_http` + `tokio`)
+    └── remind_me_cli/          # Unified `rusty-remind-me` binary executable
+```
+
+---
+
+## Automated Client Setup (Claude Desktop, Antigravity, Cursor, Codex)
+
+You can automatically configure all installed AI client applications (Claude Desktop, Antigravity, Cursor, Codex / Generic MCP) to use `rusty_remind_me` as their memory backend:
+
+### Option A: Via Built-in CLI Command
+```bash
+cargo run --bin rusty-remind-me -- configure
+```
+
+### Option B: Via PowerShell Script (Windows)
+```powershell
+.\scripts\configure_mcp.ps1
+```
+
+### Option C: Via Python Script (Cross-Platform)
+```bash
+python scripts/configure_mcp.py
+```
+
+Each setup option safely merges the `"rusty-remind-me"` MCP server configuration into:
+- **Claude Desktop**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Antigravity**: `%USERPROFILE%\.gemini\antigravity\mcp_config.json`
+- **Cursor**: `%USERPROFILE%\.cursor\mcp.json`
+- **Codex / Generic**: `%USERPROFILE%\.mcp\config.json`
+
+---
+
+## Command Line Interface (CLI)
+
+The compiled binary `rusty-remind-me` provides subcommands for interactive management, MCP stdio protocol hosting, and REST API daemon mode:
+
+### 1. Stdio MCP Server (Default)
+Starts the stdio JSON-RPC MCP server for integration with MCP clients (Claude Desktop, Antigravity, Cursor, etc.):
+```bash
+rusty-remind-me server
+# OR simply run without arguments:
+rusty-remind-me
+```
+
+### 2. Auto-Configuration
+Configures all installed MCP client applications:
+```bash
+rusty-remind-me configure
+```
+
+### 3. REST API Server Daemon
+Starts the async HTTP REST server listening on the specified port (default: 8080):
+```bash
+rusty-remind-me api 8080
+```
+
+### 4. Adding Memories
+Stores a new memory note, fact, or preference in SQLite with automatic FTS5 indexing:
+```bash
+rusty-remind-me add "User prefers dark mode and Rust for low-level server development"
+```
+
+### 5. Searching Memories
+Executes an FTS5 BM25 search with RRF rank fusion and ACT-R vitality scoring:
+```bash
+rusty-remind-me search "dark mode Rust"
+```
+
+### 6. Fetching Memory by ID
+Retrieves a specific memory record by its primary key:
+```bash
+rusty-remind-me get mem_4b307c2bd6ec4deb8c891a4b28cc592a
+```
+
+### 7. Knowledge Graph Entity Management
+Upserts an entity with optional category/kind classification:
+```bash
+rusty-remind-me entity "Bailey Robertson" "person"
+```
+
+### 8. Markdown Wiki Synthesis
+Creates or updates a structured wiki topic page:
+```bash
+rusty-remind-me wiki-write architecture "System Architecture" "Rusty Remind Me is a high performance memory engine written in Rust."
+```
+
+Reads a wiki page by slug:
+```bash
+rusty-remind-me wiki-read architecture
+```
+
+### 9. System Statistics
+Prints total memory counts and database metrics:
+```bash
+rusty-remind-me stats
+```
+
+---
+
+## REST API Endpoints
+
+When running `rusty-remind-me api [port]`, the HTTP server exposes the following endpoints:
+
+| Method | Endpoint | Description | Request Body | Response |
+| ------ | -------- | ----------- | ------------ | -------- |
+| `GET` | `/health` | Server health check | N/A | `{"status": "ok", "version": "0.1.0"}` |
+| `GET` | `/stats` | Memory count & statistics | N/A | `{"total_memories": 42}` |
+| `POST` | `/api/v1/memories` | Store a new memory | `MemoryAddInput` JSON | Created `Memory` JSON |
+| `POST` | `/api/v1/search` | Search memories | `MemorySearchInput` JSON | Array of `MemorySearchResult` JSON |
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.

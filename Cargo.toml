@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/remind_me_core",
+    "crates/remind_me_mcp",
+    "crates/remind_me_api",
+    "crates/remind_me_cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["rusty_remind_me contributors"]
+
+[workspace.dependencies]
+remind_me_core = { path = "crates/remind_me_core" }
+remind_me_mcp = { path = "crates/remind_me_mcp" }
+remind_me_api = { path = "crates/remind_me_api" }
+
+# Rusty Mill ecosystem dependencies
+rusty_tokio = { path = "../Rusty_Mill/rusty_tokio" }
+rusty-db = { path = "../Rusty_Mill/rusty_db/rusty_db" }
+rusty-db-sqlite = { path = "../Rusty_Mill/rusty_db/crates/rusty-db-sqlite" }
+rusty-db-core = { path = "../Rusty_Mill/rusty_db/crates/rusty-db-core" }
+rusty_json = { path = "../Rusty_Mill/rusty_json" }
+rusty_http = { path = "../Rusty_Mill/rusty_http" }
+rusty_request = { path = "../Rusty_Mill/rusty_request" }
+rusty-search = { path = "../Rusty_Mill/rusty_search/crates/rusty-search" }
+rusty-search-core = { path = "../Rusty_Mill/rusty_search/crates/rusty-search-core" }
+rusty_regx = { path = "../Rusty_Mill/rusty_regx" }
+rusty_time = { path = "../Rusty_Mill/rusty_time" }
+rusty_config = { path = "../Rusty_Mill/rusty_config" }
+rusty_lines = { path = "../Rusty_Mill/rusty_lines" }
+rusty_term = { path = "../Rusty_Mill/rusty_term" }
+rusty_std = { path = "../Rusty_Mill/rusty_std" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+sha256 = "1.5"
+dirs = "5.0"

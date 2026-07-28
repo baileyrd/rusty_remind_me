@@ -1,0 +1,12 @@
+C:\dev\rusty_remind_me\target\debug\deps\platform-0e617ba0a8c5cedf.d: C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\lib.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\error.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\events.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\fs.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\net.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\process.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\security.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\term.rs
+
+C:\dev\rusty_remind_me\target\debug\deps\libplatform-0e617ba0a8c5cedf.rmeta: C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\lib.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\error.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\events.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\fs.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\net.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\process.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\security.rs C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\term.rs
+
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\lib.rs:
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\error.rs:
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\events.rs:
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\fs.rs:
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\net.rs:
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\process.rs:
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\security.rs:
+C:\Users\baile\.cargo\git\checkouts\rustils-e0814a25c79b5f67\dbf5702\crates\platform\src\term.rs:

@@ -1,0 +1,27 @@
+[package]
+name = "remind_me_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusty_tokio.workspace = true
+rusty-db.workspace = true
+rusty-db-sqlite.workspace = true
+rusty-db-core.workspace = true
+rusty_json.workspace = true
+rusty-search.workspace = true
+rusty_regx.workspace = true
+rusty_time.workspace = true
+rusty_config.workspace = true
+rusty_std.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sha256.workspace = true
