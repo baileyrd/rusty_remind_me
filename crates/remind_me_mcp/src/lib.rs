@@ -1,7 +1,7 @@
 use remind_me_core::{
-    db::queries, entity, stats, vitality, wiki, wiki_import, AnnotateInput, Database, EntityInput,
-    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, UpdateOutcome,
-    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    backup, db::queries, entity, stats, vitality, wiki, wiki_import, AnnotateInput, Database,
+    EntityInput, MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput,
+    UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -243,6 +243,14 @@ impl McpServer {
                                         "recursive": { "type": "boolean", "default": true }
                                     },
                                     "required": ["dir"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_backup",
+                                "description": "Create a WAL-safe online backup of the memory database, beside the database file. Older backups beyond the retention count are pruned.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
                                 }
                             },
                             {
@@ -552,6 +560,14 @@ impl McpServer {
                             }
                         }
                     }
+                    "remind_me_backup" => match backup::create_backup(&conn, "manual") {
+                        Ok(outcome) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Backup error: {}", e) }] })
+                        }
+                    },
                     "remind_me_annotate" => {
                         let input: Result<AnnotateInput, _> = serde_json::from_value(args);
                         match input {
@@ -789,6 +805,42 @@ mod tests {
         // than a silent clamp to zero.
         let bad_limit = call(&server, "remind_me_list", json!({ "limit": -3 }));
         assert_eq!(bad_limit["isError"], true);
+    }
+
+    #[test]
+    fn test_backup_tool_is_registered_and_takes_no_parameters() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tool = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_backup")
+            .expect("remind_me_backup not in tools/list");
+
+        assert!(
+            tool["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .is_empty(),
+            "backup takes no caller-supplied destination"
+        );
+    }
+
+    #[test]
+    fn test_backup_of_an_in_memory_database_reports_why() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let result = call(&server, "remind_me_backup", json!({}));
+        assert_eq!(result["isError"], true);
+        assert!(
+            text_of(&result).contains("in memory"),
+            "expected an explanation, got: {}",
+            text_of(&result)
+        );
     }
 
     #[test]

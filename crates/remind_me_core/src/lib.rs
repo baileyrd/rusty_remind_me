@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod db;
 pub mod entity;
 pub mod models;
