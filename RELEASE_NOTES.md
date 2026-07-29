@@ -2,6 +2,20 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Tag filtering uses the normalized index (#10)
+
+### Changed
+- `list_memories` filters tags against `memory_tags` rather than scanning
+  `json_each(memories.tags)` per row. `idx_memory_tags_tag` now serves the
+  lookup instead of parsing JSON for every candidate.
+
+### Notes
+Behaviour-preserving by construction: every existing ALL-of tag test passes
+untouched. Correctness now rests on the `memories_tags_ai` / `_au` / `_ad`
+triggers keeping the index in step with the JSON column, so there is a new test
+covering the case where they could drift — editing a memory's tags and checking
+the removed tag stops matching while the added one starts.
+
 ## 2026-07-29 — Real migration ladder; schema now matches the reference (#2)
 
 ### Fixed

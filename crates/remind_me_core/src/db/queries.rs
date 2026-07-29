@@ -116,12 +116,16 @@ pub fn get_memory_by_id(conn: &Connection, id: &str) -> Result<Option<Memory>> {
 
 /// Build the shared `WHERE` clause and its bindings for [`list_memories`].
 ///
-/// Tag matching is ALL-of, one `EXISTS` per requested tag. It runs over
-/// `json_each(m.tags)` rather than a normalized tag table because the target has
-/// no `memory_tags` table yet. Keeping the predicate in SQL (rather than
-/// filtering parsed rows in Rust) is what lets `COUNT`, `LIMIT` and `OFFSET`
-/// stay correct — the reference hit exactly this pagination bug as `DATA-02`.
-/// When `memory_tags` lands this can become a join without changing callers.
+/// Tag matching is ALL-of, one `EXISTS` per requested tag, against the
+/// normalized `memory_tags` index. That table is kept in step with the JSON
+/// `tags` column by the `memories_tags_ai` / `_au` / `_ad` triggers, so the two
+/// representations cannot drift.
+///
+/// The predicate stays in SQL rather than filtering parsed rows in Rust, which
+/// is what lets `COUNT`, `LIMIT` and `OFFSET` stay correct — the reference hit
+/// exactly that pagination bug as `DATA-02`. This previously scanned
+/// `json_each(m.tags)` for the same reason, before `memory_tags` existed;
+/// `idx_memory_tags_tag` now serves it without parsing JSON per row.
 fn list_filters(input: &MemoryListInput) -> (String, Vec<Value>) {
     let mut conditions = vec!["m.deleted_at IS NULL".to_string()];
     let mut bindings: Vec<Value> = Vec::new();
@@ -135,8 +139,10 @@ fn list_filters(input: &MemoryListInput) -> (String, Vec<Value>) {
         bindings.push(Value::Text(source.clone()));
     }
     for tag in input.tags.iter().flatten() {
-        conditions
-            .push("EXISTS (SELECT 1 FROM json_each(m.tags) je WHERE je.value = ?)".to_string());
+        conditions.push(
+            "EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND mt.tag = ?)"
+                .to_string(),
+        );
         bindings.push(Value::Text(tag.clone()));
     }
 
