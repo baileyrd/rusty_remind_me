@@ -1047,5 +1047,21 @@ pub fn connectors() -> Vec<ConnectorInfo> {
             suffixes: Vec::new(),
             file_import_kind: false,
         },
+        // Same rationale as "dbs" above: listed so a caller browsing this
+        // list learns what "parsing a drawer" means (frontmatter-restore or
+        // opaque), without implying `remind_me_import_chat` can dispatch to
+        // it. The real ingestion path (`remind_me_import_mempalace`) keeps
+        // its own bespoke per-drawer dedup/paging loop, reading Chroma's
+        // metadata segment directly rather than a file.
+        ConnectorInfo {
+            kind: "mempalace".to_string(),
+            description: "A MemPalace ChromaDB store. Reads its metadata segment directly, \
+                          read-only. A drawer carrying remind_me's own frontmatter has its \
+                          category/tags/created restored; everything else is stored opaquely, \
+                          tagged with wing and room. Use remind_me_import_mempalace."
+                .to_string(),
+            suffixes: Vec::new(),
+            file_import_kind: false,
+        },
     ]
 }

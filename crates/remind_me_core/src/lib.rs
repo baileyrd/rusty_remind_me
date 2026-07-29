@@ -8,6 +8,7 @@ pub mod export;
 pub mod fts;
 pub mod import_paths;
 pub mod importer;
+pub mod mempalace_import;
 pub mod models;
 pub mod normalize;
 pub mod retrieval;

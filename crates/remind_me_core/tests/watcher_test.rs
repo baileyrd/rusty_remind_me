@@ -428,7 +428,8 @@ fn the_connector_registry_lists_both_parsers() {
         vec![
             "chat".to_string(),
             "document".to_string(),
-            "dbs".to_string()
+            "dbs".to_string(),
+            "mempalace".to_string(),
         ]
     );
     assert!(listed.iter().all(|c| !c.description.is_empty()));
@@ -441,14 +442,24 @@ fn the_connector_registry_lists_both_parsers() {
 fn a_connector_that_is_not_a_file_parser_says_so() {
     let listed = connectors();
 
-    let dbs = listed.iter().find(|c| c.kind == "dbs").unwrap();
-    // Listed for discovery, not for dispatch: `remind_me_import_dbs` reads SQL
-    // rather than parsing a file, so passing "dbs" as `kind` to
-    // remind_me_import_chat would go nowhere. That is the question a caller
-    // reading this list is asking, so the flag answers it.
-    assert!(!dbs.file_import_kind);
-    assert!(dbs.suffixes.is_empty());
-    for parser in listed.iter().filter(|c| c.kind != "dbs") {
+    // Listed for discovery, not for dispatch: `remind_me_import_dbs` and
+    // `remind_me_import_mempalace` read SQL rather than parsing a file, so
+    // passing either as `kind` to `remind_me_import_chat` would go nowhere.
+    // That is the question a caller reading this list is asking, so the flag
+    // answers it.
+    let bulk_importers = ["dbs", "mempalace"];
+    for kind in bulk_importers {
+        let connector = listed.iter().find(|c| c.kind == kind).unwrap();
+        assert!(
+            !connector.file_import_kind,
+            "{kind} should not be dispatchable"
+        );
+        assert!(connector.suffixes.is_empty());
+    }
+    for parser in listed
+        .iter()
+        .filter(|c| !bulk_importers.contains(&c.kind.as_str()))
+    {
         assert!(
             parser.file_import_kind,
             "{} should be dispatchable",

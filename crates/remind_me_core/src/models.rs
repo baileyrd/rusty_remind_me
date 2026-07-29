@@ -774,6 +774,42 @@ pub struct DbsImportInput {
     pub dry_run: bool,
 }
 
+/// Inclusive bounds on how many MemPalace drawers one call pulls.
+pub const MEMPALACE_IMPORT_LIMIT_MIN: usize = 1;
+pub const MEMPALACE_IMPORT_LIMIT_MAX: usize = 2000;
+
+fn default_mempalace_limit() -> usize {
+    500
+}
+
+/// Input model for `remind_me_import_mempalace`.
+///
+/// No path field: unlike [`DbsImportInput`], the store location is operator
+/// configuration (`REMIND_ME_MEMPALACE_PATH`), not a per-call argument — see
+/// `docs/adr/0001-mempalace-chroma-sqlite-read.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MempalaceImportInput {
+    /// Restrict to one wing (project), or empty for all.
+    #[serde(default)]
+    pub wing: String,
+    /// Restrict to one room within the wing, or empty for all.
+    #[serde(default)]
+    pub room: String,
+    #[serde(default = "default_mempalace_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    /// Category for a drawer with no restorable frontmatter category.
+    #[serde(default)]
+    pub category: String,
+    /// Extra tags added to every imported memory.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Report what would be imported without writing anything.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 /// Counts from one import.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImportStats {
