@@ -47,8 +47,11 @@ pub struct Memory {
     pub superseded_by: Option<String>,
     pub decay_rate: f64,
     pub vitality: f64,
+    /// Write-time importance prior. Now a real column, so `effective_vitality`
+    /// no longer has to treat the stored `vitality` as a stand-in.
+    pub base_weight: f64,
     pub access_count: i64,
-    pub last_accessed_at: String,
+    pub accessed_at: String,
 }
 
 /// Input model for adding a memory.

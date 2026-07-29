@@ -1,6 +1,6 @@
 //! Coverage for `remind_me_vitality_report`.
 //!
-//! Age is simulated by backdating `last_accessed_at` directly, because nothing
+//! Age is simulated by backdating `accessed_at` directly, because nothing
 //! in the crate updates that column after insert and there is no clock to move.
 
 use chrono::{Duration, Utc};
@@ -30,7 +30,7 @@ fn add(conn: &Connection, content: &str, category: &str) -> String {
 fn age_by_days(conn: &Connection, id: &str, days: i64) {
     let when = (Utc::now() - Duration::days(days)).to_rfc3339();
     conn.execute(
-        "UPDATE memories SET last_accessed_at = ?, created_at = ? WHERE id = ?",
+        "UPDATE memories SET accessed_at = ?, created_at = ? WHERE id = ?",
         rusqlite::params![when, when, id],
     )
     .unwrap();

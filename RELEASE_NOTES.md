@@ -2,6 +2,55 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Real migration ladder; schema now matches the reference (#2)
+
+### Fixed
+- **The `user_version` stamp is no longer a lie.** The schema previously created
+  7 tables and then stamped 19. `remind_me` reads that number on open and skips
+  migrating anything already at 19, so a database written here was permanently
+  missing 14 tables — the stamp defeated the interoperability it exists for.
+  Version is now written step by step, as each migration completes.
+- **Databases already carrying the false stamp are detected and repaired.** They
+  cannot be identified by version alone, so the schema itself is inspected; if
+  the stamp does not match reality the ladder is replayed from zero. Every step
+  is idempotent, so replaying only fills gaps.
+
+### Added
+- 19 ordered migrations mirroring the reference's, producing **exact parity**:
+  all 21 tables, all 26 `memories` columns *in the reference's order*, and all
+  11 triggers.
+- 9 columns the schema lacked: `node_id`, `client`, `base_weight`, `status`,
+  `memory_type`, `source_capture_id`, `doc_id`, `chunk_index`, and `accessed_at`.
+- `memory_tags` with its three sync triggers, plus a backfill from the existing
+  JSON `tags` column.
+- The `sync_outbox` triggers. This crate has no sync layer, but `remind_me` reads
+  that table to decide what to propagate and will not re-add the triggers to a
+  database already stamped 19 — without them, records written here would look
+  migrated while silently never syncing.
+- 10 tests, including reference-parity assertions and a repair test that builds
+  the old 7-table schema, stamps it 19, and checks it heals.
+
+### Changed
+- **`memories.last_accessed_at` is now `accessed_at`**, matching the reference.
+  Existing databases are *renamed*, not given a second column — a rename keeps
+  the values, where adding one would silently reset every memory's access time.
+- **`base_weight` is a real column.** `effective_vitality` reads it directly
+  instead of treating stored `vitality` as a stand-in, which retires the hazard
+  documented in #6: that substitution was exact only while nothing wrote to
+  `vitality` after insert, and would have double-counted the frequency boost the
+  moment access tracking landed.
+- `search_memories` now derives its `SELECT` list from `MEMORY_COLUMNS` rather
+  than spelling it out, after the hand-written list silently omitted
+  `base_weight`.
+
+### Notes
+`memories_vec` is not created. The reference makes it only when the `sqlite-vec`
+extension loads, so it is not part of the base schema — the earlier gap analysis
+listing it as a plain missing table was wrong.
+
+`status` and `memory_type` exist as columns but nothing reads them yet; the
+decay priors here still key off `category`. Wiring them is #17's business.
+
 ## 2026-07-29 — Database backup (#8)
 
 ### Added
