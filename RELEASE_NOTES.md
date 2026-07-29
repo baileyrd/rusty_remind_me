@@ -2,6 +2,34 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Bound the sync outbox (#59)
+
+### Fixed
+- **`sync_outbox` grew on every write and nothing drained it.** The outbox
+  triggers arrived with the generated schema and fire correctly, but this crate
+  has no sync engine, so every row leaked — each carrying a full JSON snapshot
+  of the memory. Worse, `memories_outbox_au` fires on `UPDATE`, and since #41
+  every search that returns results updates `memories` to record access, so the
+  table grew on **reads** as well as writes.
+
+### Notes
+The fix applies the reference's own retention rule rather than a new one: rows
+already marked sent are echo-suppressed and never pushed, so they go
+immediately; the rest are kept for `REMIND_ME_OUTBOX_RETENTION_DAYS` (default
+30) so an intermittently-reachable remote can still catch up, then dropped along
+with their per-remote send markers.
+
+Copying the policy matters because a database can be shared with `remind_me`,
+which opens the same file and prunes on the same rule — so anything this deletes
+is something the reference would have deleted anyway. A tighter rule would
+silently drop changes the reference still intended to push.
+
+The reference prunes on each sync cycle. This crate has no sync cycle, so it
+prunes on open. That bounds a long-lived database but **not** a single process
+that stays up past the retention window; whatever implements sync should call
+`sync::prune_outbox` per cycle, which is the arrangement the reference already
+has.
+
 ## 2026-07-29 — Access recording (#41)
 
 ### Fixed

@@ -22,5 +22,12 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     // connection has to register them before running a query that uses one.
     vitality::register_sql_functions(conn)?;
 
-    migrations::apply(conn)
+    migrations::apply(conn)?;
+
+    // The outbox triggers came in with the generated schema and fire on every
+    // write, but nothing here drains them. Applying the reference's own
+    // retention rule on open keeps that from growing without bound.
+    crate::sync::prune_outbox(conn)?;
+
+    Ok(())
 }
