@@ -2,6 +2,33 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Retrieval feedback (#14)
+
+### Added
+- `remind_me_feedback` — mark a memory helpful or unhelpful, in two modes that
+  the reference selects by whether a `query` is supplied:
+  - **without `query`** — a global judgement. `base_weight` scales by ±15%,
+    clamped to 0.1..=3.0, and vitality is recomputed.
+  - **with `query`** — contextual. The event is logged to `memory_feedback` with
+    normalised query tokens, and `base_weight` is left alone.
+- `vitality::tokenize_query`, the coarse lowercase/alphanumeric tokenisation the
+  contextual mode clusters queries by.
+- 14 tests, including the clamps at both ends, append-only logging, and delete
+  cleanup.
+
+### Notes
+The two modes are the point, not an embellishment. A memory can be a poor answer
+to one question and exactly right for another; demoting it globally on the
+first's feedback would punish the second. Issue #14 said feedback should not
+mutate vitality at all — that is true only of the contextual mode.
+
+`access_count` is untouched in both modes: it feeds `sqrt(access_count + 1)`,
+where a "negative access" has no meaning.
+
+Cleanup on delete is `delete_memory`'s job, not the database's — `memory_feedback`
+has no foreign key, because the reference omits it so sync can deliver rows out
+of order.
+
 ## 2026-07-29 — Wiki search, and an FTS sanitizer both searches now use (#15)
 
 ### Added

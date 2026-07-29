@@ -225,6 +225,16 @@ pub struct AnnotateResult {
     pub errors: Vec<AnnotationError>,
 }
 
+/// Input model for `remind_me_feedback`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackInput {
+    pub memory_id: String,
+    pub signal: crate::vitality::FeedbackSignal,
+    /// The search query this feedback relates to. Supplying it makes the
+    /// feedback contextual rather than a global judgement on the memory.
+    pub query: Option<String>,
+}
+
 /// Search result item containing memory and diagnostic ranking scores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchResult {
