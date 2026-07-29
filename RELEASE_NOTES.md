@@ -2,6 +2,33 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Memory classification, and one owner for decay_rate (#17)
+
+### Added
+- `remind_me_reclassify` — applies `memory_type` classifications in batches of
+  1–100, setting each memory's `decay_rate` to match its new type. Unknown ids
+  are reported in `not_found` rather than failing the batch.
+- `remind_me_reclassify_batch` — returns still-unclassified memories with
+  500-character snippets, plus `total_unclassified` so a caller can tell whether
+  another round is worth requesting.
+- `memory_type` and the `unclassified` default are now actually used. The schema
+  reset added the column; this is the code that reads and writes it.
+
+### Fixed
+- **`decay_rate` had two writers with different sources of truth.** #3 made
+  `update_memory` recompute it from `category`; `reclassify` derives it from
+  `memory_type`. With both, classifying a memory as `decision` (slow decay) and
+  then editing its category to `action_item` (fast decay) silently overrode the
+  classification. `update_memory` no longer touches `decay_rate` — matching the
+  reference, whose update path does not mention the column at all.
+
+### Notes
+Issue #17 asked for `decay_rate` *and* vitality to be recomputed, and for the
+recompute to share a helper with #3's category path. Both were wrong:
+classification does not touch vitality or `base_weight` — it says what a memory
+*is*, not how much it has been used — and there is no shared helper because
+`category` was never the right source for decay.
+
 ## 2026-07-29 — Retrieval feedback (#14)
 
 ### Added

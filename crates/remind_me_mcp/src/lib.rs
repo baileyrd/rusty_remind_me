@@ -1,7 +1,8 @@
 use remind_me_core::{
     backup, db::queries, entity, stats, vitality, wiki, wiki_import, AnnotateInput, Database,
     EntityInput, FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
-    MemoryUpdateInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    MemoryUpdateInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -243,6 +244,39 @@ impl McpServer {
                                         "recursive": { "type": "boolean", "default": true }
                                     },
                                     "required": ["dir"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_reclassify",
+                                "description": "Apply memory_type classifications. Updates each memory's decay rate to match its new type.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "classifications": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "maxItems": 100,
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "memory_id": { "type": "string" },
+                                                    "memory_type": { "type": "string" }
+                                                },
+                                                "required": ["memory_id", "memory_type"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["classifications"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_reclassify_batch",
+                                "description": "Fetch a batch of still-unclassified memories, with content snippets, to classify and feed back through remind_me_reclassify.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "batch_size": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+                                    }
                                 }
                             },
                             {
@@ -579,6 +613,45 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki import error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_reclassify" => {
+                        let input: Result<ReclassifyInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(rc) => {
+                                let count = rc.classifications.len();
+                                if !(RECLASSIFY_BATCH_MIN..=RECLASSIFY_BATCH_MAX).contains(&count) {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("`classifications` must hold {}..={} items, got {}", RECLASSIFY_BATCH_MIN, RECLASSIFY_BATCH_MAX, count) }] })
+                                } else {
+                                    match queries::reclassify_memories(&conn, &rc) {
+                                        Ok(outcome) => {
+                                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                                        }
+                                        Err(e) => {
+                                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Reclassify error: {}", e) }] })
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid reclassify input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_reclassify_batch" => {
+                        let input: Result<ReclassifyBatchInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(batch) => match queries::unclassified_batch(&conn, &batch) {
+                                Ok(result) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Reclassify batch error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid batch input: {}", e) }] })
                             }
                         }
                     }
