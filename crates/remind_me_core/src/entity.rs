@@ -127,7 +127,7 @@ pub fn get_entity_by_id(conn: &Connection, id: &str) -> Result<Option<Entity>> {
     }
 }
 
-fn dedup_preserving_order<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
+pub(crate) fn dedup_preserving_order<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     items
         .into_iter()
@@ -236,6 +236,191 @@ pub fn resolve_entity(conn: &Connection, query: &str) -> Result<Option<Entity>> 
         }
     }
     Ok(alias_hit)
+}
+
+/// A memory whose subject or object equals an entity's canonical name.
+///
+/// SPO fields are written verbatim by the caller (part 1 of annotation), so
+/// the match against the canonical name is case-insensitive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityFact {
+    pub id: String,
+    pub content: String,
+    pub subject: Option<String>,
+    pub predicate: Option<String>,
+    pub object: Option<String>,
+    pub category: String,
+    pub created_at: String,
+}
+
+/// A memory linked to an entity via `memory_entities`, trimmed for display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityLinkedMemory {
+    pub id: String,
+    /// First 300 characters of the content, matching the reference.
+    pub content_snippet: String,
+    pub category: String,
+    pub created_at: String,
+}
+
+/// The full lookup payload for one entity: its row, its facts, and the
+/// memories that mention it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityProfile {
+    pub entity: Entity,
+    pub facts: Vec<EntityFact>,
+    pub memories: Vec<EntityLinkedMemory>,
+    /// Every memory linked to this entity, not just the page in `memories` —
+    /// so a caller can tell whether raising `limit` would surface more.
+    pub total_linked_memories: usize,
+}
+
+/// Build the full lookup payload for an entity: row + facts + memories.
+///
+/// Shared by the `remind_me_entity` MCP tool's lookup path and `GET
+/// /api/entity`, so a dashboard and an LLM client see identical data.
+///
+/// Facts are non-superseded, non-deleted memories whose SPO subject or object
+/// equals the entity's canonical name. Linked memories come from
+/// `memory_entities` via an inner join, so a dangling link — one delivered by
+/// sync before the memory it points at — is invisible rather than a null-row
+/// crash. Superseded and deleted memories are excluded from both (`DI-02`).
+///
+/// Returns `None` when the entity is unknown, so a caller can answer with 404
+/// rather than an empty-but-200 profile.
+pub fn entity_profile(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Option<EntityProfile>> {
+    let Some(entity) = resolve_entity(conn, query)? else {
+        return Ok(None);
+    };
+
+    let canonical = normalize_entity_name(&entity.name);
+    let mut stmt = conn.prepare(
+        "SELECT id, content, subject, predicate, object, category, created_at
+           FROM memories
+          WHERE superseded_by IS NULL AND deleted_at IS NULL
+            AND (lower(subject) = ? OR lower(object) = ?)
+          ORDER BY created_at DESC
+          LIMIT ?",
+    )?;
+    let facts = stmt
+        .query_map(params![canonical, canonical, limit as i64], |row| {
+            Ok(EntityFact {
+                id: row.get("id")?,
+                content: row.get("content")?,
+                subject: row.get("subject")?,
+                predicate: row.get("predicate")?,
+                object: row.get("object")?,
+                category: row.get("category")?,
+                created_at: row.get("created_at")?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut stmt = conn.prepare(
+        "SELECT m.id, substr(m.content, 1, 300) AS content_snippet, m.category, m.created_at
+           FROM memory_entities me
+           JOIN memories m ON m.id = me.memory_id
+          WHERE me.entity_id = ? AND m.superseded_by IS NULL AND m.deleted_at IS NULL
+          ORDER BY m.created_at DESC
+          LIMIT ?",
+    )?;
+    let memories = stmt
+        .query_map(params![entity.id, limit as i64], |row| {
+            Ok(EntityLinkedMemory {
+                id: row.get("id")?,
+                content_snippet: row.get("content_snippet")?,
+                category: row.get("category")?,
+                created_at: row.get("created_at")?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let total_linked_memories: usize = conn.query_row(
+        "SELECT count(*)
+           FROM memory_entities me
+           JOIN memories m ON m.id = me.memory_id
+          WHERE me.entity_id = ? AND m.superseded_by IS NULL AND m.deleted_at IS NULL",
+        params![entity.id],
+        |row| row.get::<_, i64>(0),
+    )? as usize;
+
+    Ok(Some(EntityProfile {
+        entity,
+        facts,
+        memories,
+        total_linked_memories,
+    }))
+}
+
+/// One row of [`list_entities`], with its mention count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityListItem {
+    pub id: String,
+    pub name: String,
+    pub kind: Option<String>,
+    pub aliases: Vec<String>,
+    pub updated_at: String,
+    /// Linked-memory count via `memory_entities`.
+    pub mention_count: i64,
+}
+
+/// A page of [`list_entities`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityListResult {
+    pub total: usize,
+    pub count: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+    pub entities: Vec<EntityListItem>,
+}
+
+/// List entities, most-mentioned first.
+///
+/// There is no MCP-tool equivalent — `remind_me_entity` is lookup-by-name, and
+/// browsing everything by list is specifically a dashboard need — so this is
+/// used only by `GET /api/entities`.
+pub fn list_entities(conn: &Connection, limit: usize, offset: usize) -> Result<EntityListResult> {
+    let total: i64 = conn.query_row("SELECT count(*) FROM entities", [], |row| row.get(0))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.name, e.kind, e.aliases, e.updated_at,
+                count(me.memory_id) AS mention_count
+           FROM entities e
+      LEFT JOIN memory_entities me ON me.entity_id = e.id
+       GROUP BY e.id
+       ORDER BY mention_count DESC, e.name ASC
+          LIMIT ? OFFSET ?",
+    )?;
+    let entities = stmt
+        .query_map(params![limit as i64, offset as i64], |row| {
+            let aliases_json: String = row.get("aliases")?;
+            Ok(EntityListItem {
+                id: row.get("id")?,
+                name: row.get("name")?,
+                kind: row.get("kind")?,
+                aliases: serde_json::from_str(&aliases_json).unwrap_or_default(),
+                updated_at: row.get("updated_at")?,
+                mention_count: row.get("mention_count")?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+    let count = entities.len();
+    Ok(EntityListResult {
+        total: total.max(0) as usize,
+        count,
+        offset,
+        limit,
+        has_more: total.max(0) as usize > offset + count,
+        entities,
+    })
 }
 
 /// Maximum relation edges a traversal returns, across all hops.

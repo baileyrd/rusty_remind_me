@@ -100,8 +100,7 @@ fn configure_mcp_clients() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let db_path = env::var("REMIND_ME_DB_PATH").unwrap_or_else(|_| "remind_me.db".to_string());
 
@@ -119,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let port = args.get(2).cloned().unwrap_or_else(|| "8080".to_string());
                 let addr = format!("127.0.0.1:{}", port);
                 let api_server = ApiServer::new(db);
-                api_server.run(&addr).await?;
+                api_server.run(&addr)?;
             }
             "search" => {
                 if args.len() < 3 {

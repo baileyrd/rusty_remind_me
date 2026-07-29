@@ -9,6 +9,4 @@ remind_me_core.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
-async-trait.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
+rusqlite.workspace = true

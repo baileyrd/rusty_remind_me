@@ -3,8 +3,8 @@
 use remind_me_core::db::queries;
 use remind_me_core::wiki::WikiDeleteOutcome;
 use remind_me_core::wiki_fs::{
-    extract_summary, extract_title, get_meta, parse_wikilinks, Wiki, WikiCompile,
-    COMPILE_WATERMARK_KEY, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
+    extract_summary, extract_title, get_meta, parse_wikilinks, pending_compile_count, Wiki,
+    WikiCompile, COMPILE_WATERMARK_KEY, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
 };
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
@@ -596,6 +596,60 @@ fn the_brief_lists_pages_that_already_exist() {
         }
         other => panic!("expected a brief, got {:?}", other),
     }
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// pending_compile_count
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_fresh_store_has_nothing_pending() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+
+    assert_eq!(pending_compile_count(&conn).unwrap(), 0);
+}
+
+#[test]
+fn pending_count_is_not_capped_by_a_brief_limit() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let (w, root) = wiki("uncapped");
+    for i in 0..5 {
+        add(&conn, &format!("memory {}", i));
+    }
+    // A reconcile (triggered by any Wiki call) does not itself advance the
+    // watermark — only compile(mark_integrated: true) does.
+    w.list_pages(&conn).unwrap();
+
+    // compile() truncates its own `pending` count to the brief's limit...
+    match w.compile(&conn, 2, false).unwrap() {
+        WikiCompile::Brief { pending, .. } => assert_eq!(pending, 2),
+        other => panic!("expected a brief, got {:?}", other),
+    }
+    // ...but the true count, which the status route needs, is not.
+    assert_eq!(pending_compile_count(&conn).unwrap(), 5);
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn marking_integrated_moves_the_watermark_and_drops_the_pending_count() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let (w, root) = wiki("watermark");
+    add(&conn, "a raw memory");
+    assert_eq!(pending_compile_count(&conn).unwrap(), 1);
+
+    w.compile(&conn, 20, true).unwrap();
+
+    assert_eq!(pending_compile_count(&conn).unwrap(), 0);
+
+    // A memory written after the watermark is pending again.
+    add(&conn, "a later memory");
+    assert_eq!(pending_compile_count(&conn).unwrap(), 1);
 
     std::fs::remove_dir_all(&root).unwrap();
 }

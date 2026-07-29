@@ -1,10 +1,11 @@
 use crate::expansion::{self, MemorySearchResponse};
 use crate::fts::sanitize_fts_query;
 use crate::models::{
-    AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, ExtractBatchInput,
-    ExtractBatchResult, Memory, MemoryAddInput, MemoryListInput, MemoryListResult,
-    MemorySearchInput, MemorySearchResult, MemoryUpdateInput, ReclassifyBatchInput,
-    ReclassifyBatchResult, ReclassifyInput, ReclassifyResult, RetrievalStrategy, UnannotatedMemory,
+    AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, BulkDeleteResult,
+    BulkTagInput, BulkTagResult, ExtractBatchInput, ExtractBatchResult, Memory, MemoryAddInput,
+    MemoryListInput, MemoryListResult, MemorySearchInput, MemorySearchResult, MemoryUpdateInput,
+    ReclassifyBatchInput, ReclassifyBatchResult, ReclassifyInput, ReclassifyResult,
+    RetrievalStrategy, SearchPageInput, SearchPageResult, TagMode, UnannotatedMemory,
     UnclassifiedMemory, UpdateOutcome, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, LIST_LIMIT_MAX,
     LIST_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNCLASSIFIED,
 };
@@ -299,6 +300,63 @@ pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Delete several memories by id in one request.
+///
+/// Applies the exact same per-memory logic as [`delete_memory`] to each id
+/// independently — reused, not reimplemented, so the two paths cannot drift —
+/// and one missing id does not fail the rest of the batch.
+pub fn bulk_delete(conn: &Connection, ids: &[String]) -> Result<BulkDeleteResult> {
+    let mut result = BulkDeleteResult::default();
+    for id in ids {
+        if delete_memory(conn, id)? {
+            result.deleted.push(id.clone());
+        } else {
+            result.not_found.push(id.clone());
+        }
+    }
+    Ok(result)
+}
+
+/// Add, remove, or replace tags on several memories in one request.
+///
+/// A missing id is recorded in `not_found` and the rest of the batch still
+/// applies, matching [`bulk_delete`]'s per-item error handling.
+pub fn bulk_tag(conn: &Connection, input: &BulkTagInput) -> Result<BulkTagResult> {
+    let now = Utc::now().to_rfc3339();
+    let mut result = BulkTagResult::default();
+
+    for id in &input.ids {
+        let Some(memory) = get_memory_by_id(conn, id)? else {
+            result.not_found.push(id.clone());
+            continue;
+        };
+
+        let new_tags = match input.mode {
+            TagMode::Set => crate::entity::dedup_preserving_order(input.tags.iter().cloned()),
+            TagMode::Remove => memory
+                .tags
+                .into_iter()
+                .filter(|t| !input.tags.contains(t))
+                .collect(),
+            TagMode::Add => crate::entity::dedup_preserving_order(
+                memory.tags.into_iter().chain(input.tags.iter().cloned()),
+            ),
+        };
+
+        conn.execute(
+            "UPDATE memories SET tags = ?, updated_at = ? WHERE id = ?",
+            params![
+                serde_json::to_string(&new_tags).unwrap_or_else(|_| "[]".to_string()),
+                now,
+                id
+            ],
+        )?;
+        result.updated.push(id.clone());
+    }
+
+    Ok(result)
+}
+
 /// Apply a batch of annotations: SPO triple fields and entity mentions.
 ///
 /// Per-item error handling, matching the reference: an unknown `memory_id` is
@@ -539,6 +597,171 @@ pub fn search_memories(
 
     let final_results = trim_by_token_budget(ranked, input.token_budget);
     Ok(final_results)
+}
+
+/// Category/tag conditions shared by both branches of [`search_paginated`].
+///
+/// Deliberately narrower than [`list_filters`]: the reference's `api_search`
+/// supports `category` and `tags`, not `source` — this mirrors that exactly
+/// rather than silently offering a superset.
+fn search_page_filters(input: &SearchPageInput) -> (String, Vec<Value>) {
+    let mut sql = String::new();
+    let mut bindings: Vec<Value> = Vec::new();
+
+    if let Some(category) = input.category.as_ref().filter(|c| !c.is_empty()) {
+        sql.push_str(" AND m.category = ?");
+        bindings.push(Value::Text(category.clone()));
+    }
+    for tag in input.tags.iter().flatten() {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND mt.tag = ?)",
+        );
+        bindings.push(Value::Text(tag.clone()));
+    }
+
+    (sql, bindings)
+}
+
+/// Paginated full-text search behind `GET /api/memories/search`.
+///
+/// Distinct from [`search_memories`]: that function serves the MCP tool's
+/// ranked, token-budgeted response; this one serves a `total`/`has_more`
+/// pagination envelope, matching [`list_memories`]'s shape so a client pages
+/// through search results the same way it pages through a list.
+///
+/// `input.entity` — an entity name already extracted from the query text via
+/// [`crate::fts::extract_entity_token`] — narrows results to memories linked
+/// to that entity (via `memory_entities`) or whose structured subject/object
+/// equals its canonical name (`FT-04`). An entity name this store has never
+/// seen is not an error: it is a real empty page, reported with `message`
+/// rather than a 404, since the free-text portion of the query (if any) was
+/// still a well-formed request.
+///
+/// With no free text left after stripping the `entity:` token, matching
+/// memories are listed newest-first instead of FTS-ranked — there is nothing
+/// for BM25 to rank.
+///
+/// Superseded memories are excluded unconditionally in both branches. The
+/// reference only applies that exclusion on the entity-scoped path (its
+/// plain-FTS branch has no `superseded_by` filter at all); this crate's
+/// non-paginated `search_memories` has excluded superseded rows unconditionally
+/// since the dormancy-filtering fix, and reproducing the reference's
+/// inconsistency here would mean two search entry points disagreeing about
+/// whether a stale, superseded chunk is a result.
+pub fn search_paginated(conn: &Connection, input: &SearchPageInput) -> Result<SearchPageResult> {
+    let limit = input.limit.clamp(LIST_LIMIT_MIN, LIST_LIMIT_MAX);
+    let offset = input.offset;
+    let (filter_sql, filter_bindings) = search_page_filters(input);
+
+    let mut entity_sql = String::new();
+    let mut entity_bindings: Vec<Value> = Vec::new();
+    if let Some(entity_query) = &input.entity {
+        let Some(entity) = crate::entity::resolve_entity(conn, entity_query)? else {
+            return Ok(SearchPageResult {
+                total: 0,
+                count: 0,
+                offset,
+                limit,
+                has_more: false,
+                memories: Vec::new(),
+                message: Some(format!("No entity found matching {:?}.", entity_query)),
+            });
+        };
+        let canonical = crate::entity::normalize_entity_name(&entity.name);
+        entity_sql.push_str(
+            " AND (EXISTS (SELECT 1 FROM memory_entities me \
+               WHERE me.memory_id = m.id AND me.entity_id = ?) \
+               OR lower(m.subject) = ? OR lower(m.object) = ?)",
+        );
+        entity_bindings = vec![
+            Value::Text(entity.id),
+            Value::Text(canonical.clone()),
+            Value::Text(canonical),
+        ];
+    }
+
+    let match_expr = sanitize_fts_query(&input.query);
+
+    let (total, memories) = if !match_expr.is_empty() {
+        let mut bindings = vec![Value::Text(match_expr)];
+        bindings.extend(filter_bindings.iter().cloned());
+        bindings.extend(entity_bindings.iter().cloned());
+
+        let total: i64 = conn.query_row(
+            &format!(
+                "SELECT count(*) FROM memories m
+                   JOIN memories_fts fts ON m.rowid = fts.rowid
+                  WHERE memories_fts MATCH ? AND m.superseded_by IS NULL
+                    AND m.deleted_at IS NULL{}{}",
+                filter_sql, entity_sql
+            ),
+            params_from_iter(bindings.iter()),
+            |row| row.get(0),
+        )?;
+
+        let mut page_bindings = bindings;
+        page_bindings.push(Value::Integer(limit as i64));
+        page_bindings.push(Value::Integer(offset as i64));
+        let sql = format!(
+            "SELECT {}
+               FROM memories m JOIN memories_fts fts ON m.rowid = fts.rowid
+              WHERE memories_fts MATCH ? AND m.superseded_by IS NULL AND m.deleted_at IS NULL{}{}
+              ORDER BY bm25(memories_fts) LIMIT ? OFFSET ?",
+            prefixed_memory_columns("m"),
+            filter_sql,
+            entity_sql
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(page_bindings.iter()), parse_memory_row)?;
+        let mut memories = Vec::new();
+        for row in rows {
+            memories.push(row?);
+        }
+        (total.max(0) as usize, memories)
+    } else {
+        let mut bindings = filter_bindings;
+        bindings.extend(entity_bindings.iter().cloned());
+
+        let total: i64 = conn.query_row(
+            &format!(
+                "SELECT count(*) FROM memories m
+                  WHERE m.superseded_by IS NULL AND m.deleted_at IS NULL{}{}",
+                filter_sql, entity_sql
+            ),
+            params_from_iter(bindings.iter()),
+            |row| row.get(0),
+        )?;
+
+        let mut page_bindings = bindings;
+        page_bindings.push(Value::Integer(limit as i64));
+        page_bindings.push(Value::Integer(offset as i64));
+        let sql = format!(
+            "SELECT {} FROM memories m
+              WHERE m.superseded_by IS NULL AND m.deleted_at IS NULL{}{}
+              ORDER BY m.created_at DESC LIMIT ? OFFSET ?",
+            prefixed_memory_columns("m"),
+            filter_sql,
+            entity_sql
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(page_bindings.iter()), parse_memory_row)?;
+        let mut memories = Vec::new();
+        for row in rows {
+            memories.push(row?);
+        }
+        (total.max(0) as usize, memories)
+    };
+
+    let count = memories.len();
+    Ok(SearchPageResult {
+        total,
+        count,
+        offset,
+        limit,
+        has_more: total > offset + count,
+        memories,
+        message: None,
+    })
 }
 
 /// Search, reinforce co-retrieval, and attach whichever expansions were asked

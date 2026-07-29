@@ -2,6 +2,76 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — The HTTP API grows from 2 routes to 19 (#48)
+
+### Added
+- **17 new HTTP routes**, taking `remind_me_api` from `/health` and `/stats`
+  to near-parity with the reference's REST surface: memory CRUD and search
+  (`/api/memories`, `/api/memories/{id}`, `/api/memories/search`), three
+  bulk operations with no MCP-tool equivalent (`/api/memories/bulk/delete`,
+  `/bulk/tag`, `/bulk/reclassify`), the entity graph
+  (`/api/entity`, `/api/entities`, `/api/entity/traverse`), import/export
+  (`/api/import`, `/api/export`), vitality (`/api/vitality`), and the
+  read-only wiki surface (`/api/wiki`, `/wiki/search`, `/wiki/load`,
+  `/wiki/status`, `/wiki/{slug}`).
+- New, tested `remind_me_core` functions backing routes with no MCP-tool
+  equivalent: `queries::{bulk_delete, bulk_tag, search_paginated}`,
+  `entity::{entity_profile, list_entities}`, `wiki_fs::pending_compile_count`,
+  `fts::extract_entity_token`, `import_paths::validate_import_database`.
+- `remind_me_api` is now a synchronous `std::net` server, one connection at a
+  time — the same shape `webhook.rs` (#56) established, and for the same
+  reason: every handler takes the database lock, so a thread per connection
+  would not finish requests faster. The `tokio` dependency is gone from both
+  `remind_me_api` and the CLI.
+
+### Auth posture — stated explicitly, not inherited silently
+The reference always runs authenticated (an auto-generated, persisted key).
+This crate does not reproduce that — auto-generating a secret needs a vetted
+random source and a place to persist it, and improvising one for a security
+token is worse than not having the feature yet. Instead:
+
+- **`REMIND_ME_API_KEY` unset**: `GET` routes stay open (this crate's
+  existing pre-#48 behaviour for `/stats`, carried forward explicitly).
+  Every mutating route is refused with 401 — adding write routes is the part
+  that actually changes this surface's risk profile, so it does not default
+  open.
+- **Set**: every `/api/*` request, read or write, requires
+  `Authorization: Bearer <key>`, compared via the same
+  `remind_me_core::webhook::constant_time_eq` the webhook endpoint uses —
+  one bearer-auth implementation, not two to drift apart.
+- **`GET /health`** is always public, matching the reference's own
+  rationale: a liveness probe has to work whether or not auth is configured.
+- Every mutating request additionally needs a JSON `Content-Type` (415
+  otherwise) — the reference's CSRF hardening, kept regardless of the auth
+  posture above.
+
+CORS is not implemented: nothing in this crate serves the dashboard HTML the
+reference's CORS policy exists to protect a browser tab talking to.
+
+### Notes
+`GET /api/memories/search` extracts an `entity:NAME` token from `q`
+(`FT-04`), narrowing results to memories linked to that entity or matching it
+structurally — matching the reference's own HTTP-side syntax. The MCP
+`remind_me_search` tool does not yet support this (a separate, still-open
+gap); the extraction itself is a shared, tested function specifically so
+whatever fixes that reuses it instead of writing a second parser.
+
+Superseded memories are excluded unconditionally from paginated search, in
+both its FTS and entity-scoped branches. The reference only excludes them on
+the entity-scoped path — reproducing that would mean two search entry points
+in this crate disagreeing about whether a stale, superseded chunk is a
+result, which the #24/#41 fixes elsewhere exist specifically to prevent.
+
+`GET /api/memories` and the paginated search route share this crate's
+existing `LIST_LIMIT_MAX` (100) rather than the reference's 200 — one core
+function (`list_memories`), one bound, across MCP and HTTP.
+
+`/api/import` and `/api/export` share containment (`SE-02`) with the MCP
+import/export tools rather than duplicating it: the HTTP handler resolves a
+path only to decide file-vs-directory or read-vs-write, and the actual,
+authoritative check runs inside `importer::import_chat`/`import_directory`
+and `export::export_memories`, the same functions the MCP tools call.
+
 ## 2026-07-29 — Import a dbs archive (#52)
 
 ### Added
