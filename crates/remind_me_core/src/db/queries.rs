@@ -1,7 +1,7 @@
 use crate::models::{
-    Memory, MemoryAddInput, MemoryListInput, MemoryListResult, MemorySearchInput,
-    MemorySearchResult, MemoryUpdateInput, RetrievalStrategy, UpdateOutcome, LIST_LIMIT_MAX,
-    LIST_LIMIT_MIN,
+    AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, Memory, MemoryAddInput,
+    MemoryListInput, MemoryListResult, MemorySearchInput, MemorySearchResult, MemoryUpdateInput,
+    RetrievalStrategy, UpdateOutcome, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
 };
 use crate::retrieval::{choose_rrf_weights, rank_rrf, trim_by_token_budget};
 use crate::vitality::{
@@ -80,6 +80,11 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
             now_iso,
         ],
     )?;
+
+    // `MemoryAddInput::entities` was previously parsed and then dropped, so a
+    // caller supplying entity mentions got a silent no-op. Same path as
+    // `annotate_memories` so both behave identically.
+    crate::entity::apply_entity_mentions(conn, &id, &input.entities)?;
 
     get_memory_by_id(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
@@ -239,6 +244,67 @@ pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
         params![memory_id],
     )?;
     Ok(affected > 0)
+}
+
+/// Apply a batch of annotations: SPO triple fields and entity mentions.
+///
+/// Per-item error handling, matching the reference: an unknown `memory_id` is
+/// recorded in `errors` and the rest of the batch still applies. An
+/// all-or-nothing transaction would mean one stale id from an extraction pass
+/// discards up to 99 good annotations.
+///
+/// Only the SPO fields actually supplied are written; omitted ones keep their
+/// current value. `updated_at` moves whenever an annotation is applied, even if
+/// it only added entity mentions.
+pub fn annotate_memories(conn: &Connection, input: &AnnotateInput) -> Result<AnnotateResult> {
+    let now = Utc::now().to_rfc3339();
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+
+    for annotation in &input.annotations {
+        if get_memory_by_id(conn, &annotation.memory_id)?.is_none() {
+            errors.push(AnnotationError {
+                memory_id: annotation.memory_id.clone(),
+                error: "memory not found".to_string(),
+            });
+            continue;
+        }
+
+        let mut sets: Vec<&str> = Vec::new();
+        let mut bindings: Vec<Value> = Vec::new();
+        for (column, value) in [
+            ("subject = ?", &annotation.subject),
+            ("predicate = ?", &annotation.predicate),
+            ("object = ?", &annotation.object),
+        ] {
+            if let Some(v) = value {
+                sets.push(column);
+                bindings.push(Value::Text(v.clone()));
+            }
+        }
+
+        sets.push("updated_at = ?");
+        bindings.push(Value::Text(now.clone()));
+        bindings.push(Value::Text(annotation.memory_id.clone()));
+
+        conn.execute(
+            &format!("UPDATE memories SET {} WHERE id = ?", sets.join(", ")),
+            params_from_iter(bindings.iter()),
+        )?;
+
+        let entities_linked = crate::entity::apply_entity_mentions(
+            conn,
+            &annotation.memory_id,
+            &annotation.entities,
+        )?;
+
+        results.push(AnnotationApplied {
+            memory_id: annotation.memory_id.clone(),
+            entities_linked,
+        });
+    }
+
+    Ok(AnnotateResult { results, errors })
 }
 
 pub fn search_memories(
