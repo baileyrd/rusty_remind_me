@@ -1,6 +1,6 @@
 use remind_me_core::{
     db::queries, entity, wiki, wiki_import, Database, EntityInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, UpdateOutcome,
+    MemorySearchInput, MemoryUpdateInput, UpdateOutcome, WikiDeleteOutcome,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -198,6 +198,30 @@ impl McpServer {
                                         "recursive": { "type": "boolean", "default": true }
                                     },
                                     "required": ["dir"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_wiki_list",
+                                "description": "List every wiki page, most recently updated first.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            },
+                            {
+                                "name": "remind_me_wiki_delete",
+                                "description": "Delete a wiki page by title or slug.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {
+                                            "type": "string",
+                                            "description": "Page title or slug",
+                                            "minLength": 1,
+                                            "maxLength": 200
+                                        }
+                                    },
+                                    "required": ["title"]
                                 }
                             },
                             {
@@ -464,6 +488,36 @@ impl McpServer {
                             }
                         }
                     }
+                    "remind_me_wiki_list" => match wiki::list_wiki_pages(&conn) {
+                        Ok(pages) => {
+                            let body = json!({ "count": pages.len(), "pages": pages });
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki list error: {}", e) }] })
+                        }
+                    },
+                    "remind_me_wiki_delete" => {
+                        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        if title.is_empty() {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": "`title` is required" }] })
+                        } else {
+                            match wiki::delete_wiki_page(&conn, title) {
+                                Ok(WikiDeleteOutcome::Deleted) => {
+                                    json!({ "content": [{ "type": "text", "text": format!("Wiki page '{}' deleted", title) }] })
+                                }
+                                Ok(WikiDeleteOutcome::NotFound) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki page '{}' not found", title) }] })
+                                }
+                                Ok(WikiDeleteOutcome::Reserved) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("'{}' is a reserved system page and cannot be deleted", title) }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki delete error: {}", e) }] })
+                                }
+                            }
+                        }
+                    }
                     "remind_me_stats" => {
                         let count: i64 = conn
                             .query_row(
@@ -642,6 +696,84 @@ mod tests {
         // than a silent clamp to zero.
         let bad_limit = call(&server, "remind_me_list", json!({ "limit": -3 }));
         assert_eq!(bad_limit["isError"], true);
+    }
+
+    #[test]
+    fn test_wiki_tools_are_registered() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let req = json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+
+        for expected in ["remind_me_wiki_list", "remind_me_wiki_delete"] {
+            assert!(names.contains(&expected), "{} not in tools/list", expected);
+        }
+    }
+
+    #[test]
+    fn test_wiki_tools_round_trip_over_jsonrpc() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        call(
+            &server,
+            "remind_me_wiki_write",
+            json!({ "slug": "vlan-setup", "title": "VLAN Setup", "content": "body" }),
+        );
+
+        let listed = call(&server, "remind_me_wiki_list", json!({}));
+        let page: Value = serde_json::from_str(&text_of(&listed)).unwrap();
+        assert_eq!(page["count"], 1);
+        assert_eq!(page["pages"][0]["slug"], "vlan-setup");
+
+        // Address it by human title rather than slug.
+        let deleted = call(
+            &server,
+            "remind_me_wiki_delete",
+            json!({ "title": "VLAN Setup" }),
+        );
+        assert!(
+            deleted.get("isError").is_none(),
+            "delete failed: {:?}",
+            deleted
+        );
+
+        let after = call(&server, "remind_me_wiki_list", json!({}));
+        assert_eq!(
+            serde_json::from_str::<Value>(&text_of(&after)).unwrap()["count"],
+            0
+        );
+    }
+
+    #[test]
+    fn test_wiki_delete_surfaces_errors() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let missing = call(&server, "remind_me_wiki_delete", json!({ "title": "nope" }));
+        assert_eq!(missing["isError"], true);
+
+        let blank = call(&server, "remind_me_wiki_delete", json!({ "title": "" }));
+        assert_eq!(blank["isError"], true);
+
+        call(
+            &server,
+            "remind_me_wiki_write",
+            json!({ "slug": "index", "title": "Index", "content": "body" }),
+        );
+        let reserved = call(
+            &server,
+            "remind_me_wiki_delete",
+            json!({ "title": "index" }),
+        );
+        assert_eq!(reserved["isError"], true);
+        assert!(text_of(&reserved).contains("reserved"));
     }
 
     #[test]
