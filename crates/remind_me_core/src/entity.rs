@@ -109,8 +109,9 @@ fn dedup_preserving_order<I: IntoIterator<Item = String>>(items: I) -> Vec<Strin
 /// same entity is a no-op rather than an error.
 pub fn link_memory_entity(conn: &Connection, memory_id: &str, entity_id: &str) -> Result<bool> {
     let inserted = conn.execute(
-        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
-        params![memory_id, entity_id],
+        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, created_at)
+         VALUES (?, ?, ?)",
+        params![memory_id, entity_id, Utc::now().to_rfc3339()],
     )?;
     Ok(inserted > 0)
 }

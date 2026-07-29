@@ -15,8 +15,11 @@ pub struct WikiPage {
     pub slug: String,
     pub title: String,
     pub content: String,
-    pub topic: String,
-    pub created_at: String,
+    /// One-line summary shown in the wiki index.
+    pub summary: String,
+    /// Source-file modification time, used by the reconcile pass. Zero for a
+    /// page that has never been backed by a file.
+    pub mtime: f64,
     pub updated_at: String,
 }
 
@@ -29,37 +32,42 @@ pub enum WikiDeleteOutcome {
     Reserved,
 }
 
-const WIKI_COLUMNS: &str = "slug, title, content, topic, created_at, updated_at";
+const WIKI_COLUMNS: &str = "slug, title, content, summary, mtime, updated_at";
 
 fn parse_wiki_row(row: &Row) -> Result<WikiPage> {
     Ok(WikiPage {
         slug: row.get("slug")?,
         title: row.get("title")?,
         content: row.get("content")?,
-        topic: row.get("topic")?,
-        created_at: row.get("created_at")?,
+        summary: row.get("summary")?,
+        mtime: row.get("mtime")?,
         updated_at: row.get("updated_at")?,
     })
 }
 
+/// Write or replace a wiki page.
+///
+/// `summary` is the one-line description shown in the index. The schema has no
+/// `topic` column — that was a target-only extension, dropped when the schema
+/// was regenerated from `remind_me`.
 pub fn write_wiki_page(
     conn: &Connection,
     slug: &str,
     title: &str,
     content: &str,
-    topic: &str,
+    summary: &str,
 ) -> Result<WikiPage> {
     let now = Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT INTO wiki_pages (slug, title, content, topic, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        "INSERT INTO wiki_pages (slug, title, content, summary, mtime, updated_at)
+         VALUES (?, ?, ?, ?, 0, ?)
          ON CONFLICT(slug) DO UPDATE SET
             title = excluded.title,
             content = excluded.content,
-            topic = excluded.topic,
+            summary = excluded.summary,
             updated_at = excluded.updated_at",
-        params![slug, title, content, topic, now, now],
+        params![slug, title, content, summary, now],
     )?;
 
     get_wiki_page(conn, slug)?.ok_or(rusqlite::Error::QueryReturnedNoRows)

@@ -217,7 +217,7 @@ impl McpServer {
                                         "slug": { "type": "string" },
                                         "title": { "type": "string" },
                                         "content": { "type": "string" },
-                                        "topic": { "type": "string" }
+                                        "summary": { "type": "string", "description": "One-line summary shown in the wiki index" }
                                     },
                                     "required": ["slug", "title", "content"]
                                 }
@@ -497,11 +497,8 @@ impl McpServer {
                         let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
                         let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
                         let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                        let topic = args
-                            .get("topic")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("general");
-                        match wiki::write_wiki_page(&conn, slug, title, content, topic) {
+                        let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                        match wiki::write_wiki_page(&conn, slug, title, content, summary) {
                             Ok(page) => {
                                 json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
                             }

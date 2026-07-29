@@ -395,7 +395,7 @@ fn delete_purges_the_fts_row_and_hides_from_list() {
 }
 
 #[test]
-fn delete_cascades_entity_links() {
+fn delete_cleans_up_dependent_rows_explicitly() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     let input = MemoryAddInput {
@@ -407,35 +407,48 @@ fn delete_cascades_entity_links() {
         subject: None,
         predicate: None,
         object: None,
-        entities: vec![],
-    };
-    let id = queries::add_memory(&conn, input).unwrap().id;
-
-    let entity = remind_me_core::entity::upsert_entity(
-        &conn,
-        &remind_me_core::EntityInput {
+        entities: vec![remind_me_core::EntityInput {
             name: "Tasmania".into(),
             kind: Some("place".into()),
             aliases: vec![],
-        },
+        }],
+    };
+    let id = queries::add_memory(&conn, input).unwrap().id;
+
+    // Rows in the two tables that have no foreign key back to `memories`.
+    conn.execute(
+        "INSERT INTO memory_feedback
+            (id, memory_id, query, query_tokens, signal, magnitude, created_at)
+         VALUES ('fb_1', ?, 'q', '[]', 'helpful', 1.0, '2026-01-01T00:00:00+00:00')",
+        rusqlite::params![id],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
-        rusqlite::params![id, entity.id],
+        "INSERT INTO memory_associations (memory_id_a, memory_id_b, weight, updated_at)
+         VALUES (?, 'mem_other', 1, '2026-01-01T00:00:00+00:00')",
+        rusqlite::params![id],
     )
     .unwrap();
 
     queries::delete_memory(&conn, &id).unwrap();
 
-    let links: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM memory_entities WHERE memory_id = ?",
-            rusqlite::params![id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(links, 0, "memory_entities must cascade on delete");
+    // The schema carries no foreign keys on these — the reference omits them so
+    // sync can deliver a link before the memory it points at — so cleanup is
+    // `delete_memory`'s job, not the database's.
+    for (table, column) in [
+        ("memory_entities", "memory_id"),
+        ("memory_feedback", "memory_id"),
+        ("memory_associations", "memory_id_a"),
+    ] {
+        let left: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM {} WHERE {} = ?", table, column),
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{} rows must be cleaned up on delete", table);
+    }
 
     let entities: i64 = conn
         .query_row("SELECT count(*) FROM entities", [], |r| r.get(0))

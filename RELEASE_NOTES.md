@@ -2,6 +2,49 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Reset the schema to remind_me's current one (#29)
+
+### Changed
+- **The schema is now generated, not written.** `schema_tables.sql`,
+  `schema_indexes.sql` and `schema_triggers.sql` are dumped verbatim from a
+  `remind_me` database's `sqlite_master` and compiled in with `include_str!`.
+  They are not hand-edited; they are regenerated.
+- The hand-transcribed 19-step ladder is gone. This crate no longer replays
+  `remind_me`'s version history — it creates the current schema and reconciles
+  anything that differs, then stamps the version.
+
+### Fixed
+- Four tables diverged from the reference in columns *and* constraints:
+  `wiki_pages` (missing `summary`/`mtime`, carrying target-only
+  `topic`/`created_at` that were `NOT NULL` with no default — which would have
+  made `remind_me`'s inserts fail outright), `entities` (missing `node_id`,
+  carrying a `UNIQUE` the reference lacks), `memory_entities` (missing
+  `created_at`, carrying `ON DELETE CASCADE` foreign keys the reference
+  deliberately omits), and `entity_relations` (entirely different column names).
+- Parity is now **exact and verified**: 21 tables, 29 indexes, 11 triggers, DDL
+  identical after normalisation, checked against a database built by replaying
+  `remind_me`'s own migrations.
+
+### Removed
+- `wiki_pages.topic`. `remind_me_wiki_write` takes `summary` instead, which is
+  the column the reference actually has. `wiki_import` still parses `topic:`
+  front matter and reports it, but no longer persists it.
+- `memory_entities`' cascade. `delete_memory` now cleans up `memory_entities`,
+  `memory_feedback` and `memory_associations` explicitly, matching the
+  reference — which omits the foreign keys because sync can deliver a mention
+  link before the memory it points at, and a cascade would reject that.
+
+### Notes
+A legacy database is reconciled rather than abandoned: tables whose DDL differs
+are rebuilt carrying the intersection of old and new columns,
+`last_accessed_at` is renamed (not replaced) so access times survive, and
+`memory_tags` and both FTS indexes are backfilled for rows that predate the
+triggers maintaining them.
+
+The parity test now compares **every** table, index and trigger by normalised
+DDL. The previous one compared table names and `memories` columns, which is
+exactly the shape of the gap it failed to catch.
+
 ## 2026-07-29 — Tag filtering uses the normalized index (#10)
 
 ### Changed
