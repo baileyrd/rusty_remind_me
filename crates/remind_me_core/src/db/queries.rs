@@ -253,14 +253,34 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
 /// `DELETE`. The `deleted_at` column and the `deleted_at IS NULL` read filters
 /// stay in place for when sync lands.
 ///
-/// Cleanup rides on the schema: the `memories_ad` trigger removes the FTS row
-/// and `memory_entities` cascades (`PRAGMA foreign_keys=ON` is set at open).
+/// The FTS row and `memory_tags` are handled by triggers. Everything else is
+/// cleaned up explicitly, because the reference's schema carries **no foreign
+/// keys** on `memory_entities`, `memory_feedback` or `memory_associations` —
+/// deliberately, since sync can deliver a link before the memory it points at,
+/// and a cascade would reject that. This crate previously relied on a cascade
+/// it had added itself; regenerating the schema from `remind_me` removed it.
 pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
     let affected = conn.execute(
         "DELETE FROM memories WHERE id = ? AND deleted_at IS NULL",
         params![memory_id],
     )?;
-    Ok(affected > 0)
+    if affected == 0 {
+        return Ok(false);
+    }
+
+    // Entities themselves survive — other memories may still mention them.
+    for table in ["memory_entities", "memory_feedback"] {
+        conn.execute(
+            &format!("DELETE FROM {} WHERE memory_id = ?", table),
+            params![memory_id],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM memory_associations WHERE memory_id_a = ? OR memory_id_b = ?",
+        params![memory_id, memory_id],
+    )?;
+
+    Ok(true)
 }
 
 /// Apply a batch of annotations: SPO triple fields and entity mentions.

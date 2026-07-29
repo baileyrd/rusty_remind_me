@@ -152,7 +152,12 @@ pub fn parse_front_matter(text: &str) -> (HashMap<String, String>, &str) {
 struct ParsedPage {
     slug: String,
     title: String,
+    /// dbs front-matter topic. Reported back to the caller but **not stored**:
+    /// `wiki_pages` has no `topic` column once the schema is generated from
+    /// `remind_me`. Kept because it is genuine metadata about the import.
     topic: String,
+    /// dbs front-matter summary, which does map onto `wiki_pages.summary`.
+    summary: String,
     content: String,
 }
 
@@ -182,11 +187,13 @@ fn parse_page(path: &Path, text: &str) -> ParsedPage {
         .unwrap_or_else(|| stem.clone());
     let slug = field("slug").unwrap_or_else(|| slugify(&title));
     let topic = field("topic").unwrap_or_else(|| "general".to_string());
+    let summary = field("summary").unwrap_or_default();
 
     ParsedPage {
         slug,
         title,
         topic,
+        summary,
         content: body.to_string(),
     }
 }
@@ -244,7 +251,7 @@ pub fn import_wiki_dir(
             }
         };
         let page = parse_page(&path, &text);
-        write_wiki_page(conn, &page.slug, &page.title, &page.content, &page.topic)?;
+        write_wiki_page(conn, &page.slug, &page.title, &page.content, &page.summary)?;
         report.imported.push(ImportedPage {
             path: path.display().to_string(),
             slug: page.slug,

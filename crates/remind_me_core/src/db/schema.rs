@@ -3,13 +3,10 @@ use rusqlite::{Connection, Result};
 
 pub use crate::db::migrations::SCHEMA_VERSION;
 
-/// Open-time schema setup: connection pragmas, the v0 base schema, then every
-/// pending migration.
+/// Open-time setup: connection pragmas, then schema creation and reconciliation.
 ///
-/// The version stamp is written by [`migrations::migrate`] as each step
-/// completes, never up front. Stamping a target version before the schema
-/// matches it is what previously made databases written here unreadable to
-/// `remind_me` — it trusts the number and skips migrating.
+/// See [`migrations`] for how the schema is defined — it is generated from
+/// `remind_me` rather than written here.
 pub fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -19,6 +16,5 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         ",
     )?;
 
-    migrations::create_base_schema(conn)?;
-    migrations::migrate(conn)
+    migrations::apply(conn)
 }

@@ -205,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let title = &args[3];
                 let content = &args[4];
                 let conn = db.conn();
-                let page = wiki::write_wiki_page(&conn, slug, title, content, "general")?;
+                let page = wiki::write_wiki_page(&conn, slug, title, content, "")?;
                 println!("Saved wiki page: {}", page.slug);
             }
             "wiki-read" => {
