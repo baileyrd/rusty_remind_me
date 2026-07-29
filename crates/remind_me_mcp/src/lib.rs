@@ -9,15 +9,16 @@
 #![recursion_limit = "512"]
 
 use remind_me_core::{
-    backup, capture, db::queries, entity, export, normalize, stats, status, vitality, wiki,
-    wiki_import, AnnotateInput, AutoCaptureInput, Database, DecomposeBatchInput, DecomposeInput,
-    EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput,
-    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
-    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
-    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN,
-    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
-    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    backup, capture, db::queries, entity, export, importer, normalize, stats, status, vitality,
+    wiki, wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
+    Database, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput, ExportInput,
+    ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
+    MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput,
+    ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
+    EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX,
+    IMPORT_MAX_LENGTH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
+    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -151,6 +152,41 @@ fn decompose_input_schema() -> Value {
             }
         },
         "required": ["capture_id", "facts"]
+    })
+}
+
+/// Input schema shared by the two import tools.
+///
+/// `directory` takes a folder and a `recursive` flag; `file_path` takes one
+/// file. Everything else is identical, so the shape is built once.
+fn import_input_schema(directory: bool) -> Value {
+    let mut properties = json!({
+        "category": { "type": "string", "default": "chat_import", "description": "Category for imported memories. A document import replaces the chat default with 'document'." },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "extract_mode": {
+            "type": "string",
+            "enum": EXTRACT_MODES,
+            "default": "assistant_messages",
+            "description": "Which turns to keep from a chat export"
+        },
+        "max_length": { "type": "integer", "default": 10000, "minimum": IMPORT_MAX_LENGTH_MIN, "maximum": IMPORT_MAX_LENGTH_MAX, "description": "Characters per memory; longer content is chunked" },
+        "kind": { "type": "string", "enum": ["auto", "chat", "document"], "default": "auto" }
+    });
+    let object = properties.as_object_mut().expect("just built an object");
+    if directory {
+        object.insert("directory".into(), json!({ "type": "string" }));
+        object.insert(
+            "recursive".into(),
+            json!({ "type": "boolean", "default": true, "description": "Search subdirectories" }),
+        );
+    } else {
+        object.insert("file_path".into(), json!({ "type": "string" }));
+    }
+
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": [if directory { "directory" } else { "file_path" }]
     })
 }
 
@@ -317,6 +353,16 @@ impl McpServer {
                                     },
                                     "required": ["name"]
                                 }
+                            },
+                            {
+                                "name": "remind_me_import_chat",
+                                "description": "Import a chat export or document file into memory. .json/.jsonl are chat exports; .md/.markdown/.txt are content-sniffed in auto mode — chat role markers import as chat, everything else as a document chunked per section. Deduplicates by file content hash. The path must be inside the allowed import roots.",
+                                "inputSchema": import_input_schema(false)
+                            },
+                            {
+                                "name": "remind_me_import_directory",
+                                "description": "Import every supported file in a directory. Same parsing and per-file dedup as remind_me_import_chat.",
+                                "inputSchema": import_input_schema(true)
                             },
                             {
                                 "name": "remind_me_server_status",
@@ -770,6 +816,40 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Extract batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_import_chat" => {
+                        let input: Result<ChatImportInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(import_input) => match importer::import_chat(&conn, &import_input) {
+                                Ok(outcome) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Import error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid import input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_import_directory" => {
+                        let input: Result<BulkImportDirInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(import_input) => {
+                                match importer::import_directory(&conn, &import_input) {
+                                    Ok(result) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Directory import error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid directory import input: {}", e) }] })
                             }
                         }
                     }

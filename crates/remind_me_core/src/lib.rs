@@ -5,6 +5,8 @@ pub mod entity;
 pub mod expansion;
 pub mod export;
 pub mod fts;
+pub mod import_paths;
+pub mod importer;
 pub mod models;
 pub mod normalize;
 pub mod retrieval;

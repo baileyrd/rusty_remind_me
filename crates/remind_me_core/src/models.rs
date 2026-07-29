@@ -663,3 +663,136 @@ pub struct ExportResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 }
+
+/// How to parse an imported file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportKind {
+    /// Detect: `.json`/`.jsonl` are chat; markdown and text are sniffed for
+    /// chat role markers.
+    #[default]
+    Auto,
+    Chat,
+    /// Per-section or per-paragraph chunking. `.md`/`.markdown`/`.txt` only.
+    Document,
+}
+
+/// Message extraction strategies a chat import accepts.
+pub const EXTRACT_MODES: [&str; 5] = [
+    "assistant_messages",
+    "user_messages",
+    "all_messages",
+    "conversations",
+    "summaries",
+];
+
+/// Inclusive bounds on an import's chunk size.
+pub const IMPORT_MAX_LENGTH_MIN: usize = 100;
+pub const IMPORT_MAX_LENGTH_MAX: usize = 50_000;
+
+fn default_import_category() -> String {
+    "chat_import".to_string()
+}
+
+fn default_extract_mode() -> String {
+    "assistant_messages".to_string()
+}
+
+fn default_import_max_length() -> usize {
+    10_000
+}
+
+fn default_recursive() -> bool {
+    true
+}
+
+/// Input model for `remind_me_import_chat`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatImportInput {
+    pub file_path: String,
+    #[serde(default = "default_import_category")]
+    pub category: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_extract_mode")]
+    pub extract_mode: String,
+    #[serde(default = "default_import_max_length")]
+    pub max_length: usize,
+    #[serde(default)]
+    pub kind: ImportKind,
+}
+
+/// Input model for `remind_me_import_directory`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkImportDirInput {
+    pub directory: String,
+    #[serde(default = "default_import_category")]
+    pub category: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_extract_mode")]
+    pub extract_mode: String,
+    #[serde(default = "default_import_max_length")]
+    pub max_length: usize,
+    #[serde(default = "default_recursive")]
+    pub recursive: bool,
+    #[serde(default)]
+    pub kind: ImportKind,
+}
+
+/// Counts from one import.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImportStats {
+    pub memories_created: usize,
+    /// Messages (chat) or chunks (document) before per-message chunking.
+    pub raw_entries: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub entities_restored: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub links_restored: usize,
+    /// Links whose endpoints were not present, so could not be restored.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub links_skipped_dangling: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub relations_restored: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub relations_skipped_dangling: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// What happened to one imported file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ImportOutcome {
+    Imported {
+        import_id: String,
+        kind: ImportKind,
+        file: String,
+        #[serde(flatten)]
+        stats: ImportStats,
+    },
+    /// The same content has been imported before.
+    Skipped {
+        reason: String,
+        file: String,
+        import_id: String,
+    },
+    Failed {
+        file: String,
+        reason: String,
+    },
+}
+
+/// Outcome of a directory import.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BulkImportResult {
+    pub files_seen: usize,
+    pub files_imported: usize,
+    pub files_skipped: usize,
+    pub files_failed: usize,
+    pub memories_created: usize,
+    pub results: Vec<ImportOutcome>,
+}
