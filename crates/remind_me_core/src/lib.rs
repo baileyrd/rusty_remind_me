@@ -15,6 +15,7 @@ pub mod status;
 pub mod sync;
 pub mod vitality;
 pub mod watcher;
+pub mod webhook;
 pub mod wiki;
 pub mod wiki_fs;
 pub mod wiki_import;
