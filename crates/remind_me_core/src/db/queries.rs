@@ -1,3 +1,4 @@
+use crate::expansion::{self, MemorySearchResponse};
 use crate::fts::sanitize_fts_query;
 use crate::models::{
     AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, Memory, MemoryAddInput,
@@ -18,7 +19,7 @@ use rusqlite::{params, params_from_iter, Connection, Result, Row};
 /// Columns selected wherever a full [`Memory`] is parsed via [`parse_memory_row`].
 pub const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata, created_at, \
      updated_at, capture_id, subject, predicate, object, superseded_by, decay_rate, vitality, \
-     base_weight, access_count, accessed_at";
+     base_weight, access_count, accessed_at, doc_id, chunk_index";
 
 /// [`MEMORY_COLUMNS`] with each name qualified by `alias`, for queries that join.
 fn prefixed_memory_columns(alias: &str) -> String {
@@ -63,6 +64,8 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
         accessed_at: row
             .get::<_, Option<String>>("accessed_at")?
             .unwrap_or_else(|| created_at.clone()),
+        doc_id: row.get("doc_id")?,
+        chunk_index: row.get("chunk_index")?,
     })
 }
 
@@ -525,4 +528,45 @@ pub fn search_memories(
 
     let final_results = trim_by_token_budget(ranked, input.token_budget);
     Ok(final_results)
+}
+
+/// Search, reinforce co-retrieval, and attach whichever expansions were asked
+/// for.
+///
+/// Co-retrieval is recorded on **every** search that returns two or more
+/// results, whether or not `expand_co_retrieval` is set — surfacing is opt-in,
+/// recording is not. This does mean a search mutates, which is why the write is
+/// confined to this wrapper: [`search_memories`] stays a pure read for callers
+/// that only want results.
+///
+/// The three expansion sections sit *outside* the ranked list and never merge
+/// into it, so they do not consume `limit`. See [`crate::expansion`] for why
+/// keeping co-retrieval out of the ranking matters.
+pub fn search_with_expansions(
+    conn: &Connection,
+    input: &MemorySearchInput,
+) -> Result<MemorySearchResponse> {
+    let memories = search_memories(conn, input)?;
+    let ids: Vec<String> = memories.iter().map(|r| r.memory.id.clone()).collect();
+
+    expansion::record_co_retrieval(conn, &ids)?;
+
+    Ok(MemorySearchResponse {
+        related_via_entities: if input.expand_entities {
+            Some(expansion::expand_via_entities(conn, &ids)?)
+        } else {
+            None
+        },
+        related_via_neighbors: if input.include_neighbors {
+            Some(expansion::expand_via_neighbors(conn, &memories)?)
+        } else {
+            None
+        },
+        related_via_co_retrieval: if input.expand_co_retrieval {
+            Some(expansion::expand_via_co_retrieval(conn, &ids)?)
+        } else {
+            None
+        },
+        memories,
+    })
 }

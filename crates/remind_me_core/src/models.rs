@@ -52,6 +52,11 @@ pub struct Memory {
     pub base_weight: f64,
     pub access_count: i64,
     pub accessed_at: String,
+    /// Source document this memory was chunked out of, and its position in it.
+    /// Both NULL unless an importer produced the row — which is why
+    /// `include_neighbors` finds nothing for a manually added memory.
+    pub doc_id: Option<String>,
+    pub chunk_index: Option<i64>,
 }
 
 /// Input model for adding a memory.
@@ -99,10 +104,19 @@ pub struct MemorySearchInput {
     pub min_vitality: f64,
     #[serde(default)]
     pub verbose: bool,
+    /// Surface 1-hop entity-graph neighbours of the results.
     #[serde(default)]
     pub expand_entities: bool,
+    /// Surface sibling chunks of the same source document. Only fires for
+    /// import-produced memories — anything else has no `doc_id`.
     #[serde(default)]
     pub include_neighbors: bool,
+    /// Surface memories frequently retrieved alongside these.
+    ///
+    /// Only controls *surfacing*. Associations are reinforced on every search
+    /// regardless — see [`crate::expansion::record_co_retrieval`].
+    #[serde(default)]
+    pub expand_co_retrieval: bool,
 }
 
 fn default_limit() -> usize {

@@ -2,6 +2,53 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Search expansions (#35)
+
+### Added
+- `expand_co_retrieval` on `MemorySearchInput` — it was missing entirely.
+- All three expansions now do something. They are returned in their own
+  sections, each capped at 5 items with 300-character snippets:
+  - `expand_entities` → other memories mentioning the same entities, with the
+    linking entity names;
+  - `include_neighbors` → sibling chunks of the same source document, within one
+    chunk position;
+  - `expand_co_retrieval` → memories retrieved alongside these before, strongest
+    association first.
+- `Memory` gained `doc_id` and `chunk_index`, which the schema had but the model
+  did not read.
+- Co-retrieval is now recorded. Every search returning two or more results
+  reinforces the association between each pair.
+
+### Fixed
+- **`expand_entities` and `include_neighbors` were inert.** Both were declared
+  on `MemorySearchInput` and read nowhere, so setting either changed nothing.
+- **`memory_associations` had no writer**, so the co-retrieval graph was empty
+  by construction.
+
+### Notes
+Expansions sit **outside** the ranked results and never merge into them, so
+they do not consume `limit` — their own caps and snippet length bound their
+cost instead.
+
+For co-retrieval the one-way flow is the point: search results → recorded
+associations → surfaced as suggestions, never as a ranking input. Letting a
+weight reach the ranking would build a loop where whatever came back together
+once comes back together forever; keeping it out means no decay maths is needed
+to counteract one. There is a test asserting a maxed-out association leaves
+result order untouched.
+
+Pairs are sorted before insert, so `(a,b)` and `(b,a)` are one row — the
+question #12 deferred. Without that every weight would split across two rows and
+read back at half strength. Weight accumulates as a count clamped at 50, and
+only the first 10 results of a search participate in pairing, which bounds one
+search to 45 writes.
+
+**Searching now writes.** `search_with_expansions` records associations;
+`search_memories` remains a pure read for callers that only want results.
+
+`include_neighbors` returns nothing until importers land, since only an importer
+writes `doc_id` — except `normalize_apply`, which inherits it.
+
 ## 2026-07-29 — Import normalization (#18)
 
 ### Added

@@ -139,6 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     verbose: false,
                     expand_entities: false,
                     include_neighbors: false,
+                    expand_co_retrieval: false,
                 };
                 let conn = db.conn();
                 let results = queries::search_memories(&conn, &search_input)?;
