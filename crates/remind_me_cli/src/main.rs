@@ -18,16 +18,32 @@ fn get_target_config_paths() -> Vec<(PathBuf, &'static str)> {
         let appdata = env::var("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join("AppData").join("Roaming"));
-        targets.push((appdata.join("Claude").join("claude_desktop_config.json"), "Claude Desktop"));
+        targets.push((
+            appdata.join("Claude").join("claude_desktop_config.json"),
+            "Claude Desktop",
+        ));
     }
     #[cfg(not(target_os = "windows"))]
     {
-        targets.push((home.join(".config").join("Claude").join("claude_desktop_config.json"), "Claude Desktop"));
+        targets.push((
+            home.join(".config")
+                .join("Claude")
+                .join("claude_desktop_config.json"),
+            "Claude Desktop",
+        ));
     }
 
-    targets.push((home.join(".gemini").join("antigravity").join("mcp_config.json"), "Antigravity"));
+    targets.push((
+        home.join(".gemini")
+            .join("antigravity")
+            .join("mcp_config.json"),
+        "Antigravity",
+    ));
     targets.push((home.join(".cursor").join("mcp.json"), "Cursor"));
-    targets.push((home.join(".mcp").join("config.json"), "Codex / Generic MCP Client"));
+    targets.push((
+        home.join(".mcp").join("config.json"),
+        "Codex / Generic MCP Client",
+    ));
 
     targets
 }
@@ -67,7 +83,7 @@ fn configure_mcp_clients() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if !data.get("mcpServers").map_or(false, |v| v.is_object()) {
+        if !data.get("mcpServers").is_some_and(|v| v.is_object()) {
             data["mcpServers"] = json!({});
         }
 
@@ -170,7 +186,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let name = args[2].clone();
                 let kind = args.get(3).cloned();
                 let conn = db.conn();
-                let ent = entity::upsert_entity(&conn, &EntityInput { name, kind, aliases: vec![] })?;
+                let ent = entity::upsert_entity(
+                    &conn,
+                    &EntityInput {
+                        name,
+                        kind,
+                        aliases: vec![],
+                    },
+                )?;
                 println!("{}", serde_json::to_string_pretty(&ent)?);
             }
             "wiki-write" => {
@@ -222,8 +245,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "stats" => {
                 let conn = db.conn();
-                let count: i64 = conn.query_row("SELECT count(*) FROM memories WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "total_memories": count }))?);
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "total_memories": count }))?
+                );
             }
             cmd => {
                 eprintln!("Unknown subcommand: {}. Available: configure, api, server, search, add, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);

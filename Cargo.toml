@@ -19,21 +19,16 @@ remind_me_mcp = { path = "crates/remind_me_mcp" }
 remind_me_api = { path = "crates/remind_me_api" }
 
 # Rusty Mill ecosystem dependencies
-rusty_tokio = { path = "../Rusty_Mill/rusty_tokio" }
-rusty-db = { path = "../Rusty_Mill/rusty_db/rusty_db" }
-rusty-db-sqlite = { path = "../Rusty_Mill/rusty_db/crates/rusty-db-sqlite" }
-rusty-db-core = { path = "../Rusty_Mill/rusty_db/crates/rusty-db-core" }
-rusty_json = { path = "../Rusty_Mill/rusty_json" }
-rusty_http = { path = "../Rusty_Mill/rusty_http" }
-rusty_request = { path = "../Rusty_Mill/rusty_request" }
-rusty-search = { path = "../Rusty_Mill/rusty_search/crates/rusty-search" }
-rusty-search-core = { path = "../Rusty_Mill/rusty_search/crates/rusty-search-core" }
-rusty_regx = { path = "../Rusty_Mill/rusty_regx" }
-rusty_time = { path = "../Rusty_Mill/rusty_time" }
-rusty_config = { path = "../Rusty_Mill/rusty_config" }
-rusty_lines = { path = "../Rusty_Mill/rusty_lines" }
-rusty_term = { path = "../Rusty_Mill/rusty_term" }
-rusty_std = { path = "../Rusty_Mill/rusty_std" }
+#
+# Intentionally not declared. Every crate in this workspace previously listed
+# the `rusty_*` crates as `../Rusty_Mill/...` path dependencies, but no source
+# file referenced any of them — the workspace failed to load because those
+# paths do not exist, without a single call site depending on them.
+#
+# Upstream, Rusty Mill is ~40 standalone repositories (`baileyrd/rusty_db`,
+# `baileyrd/rusty_json`, ...) rather than the monorepo the old paths assumed,
+# so re-adopting a crate means adding it as a git dependency at the point it
+# gains a real call site — not declaring the whole suite up front.
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,6 +1,10 @@
-use crate::models::{Memory, MemoryAddInput, MemorySearchInput, MemorySearchResult, RetrievalStrategy};
+use crate::models::{
+    Memory, MemoryAddInput, MemorySearchInput, MemorySearchResult, RetrievalStrategy,
+};
 use crate::retrieval::{choose_rrf_weights, rank_rrf, trim_by_token_budget};
-use crate::vitality::{calculate_vitality, get_decay_rate, get_source_prior, get_type_prior, VITALITY_FLOOR};
+use crate::vitality::{
+    calculate_vitality, get_decay_rate, get_source_prior, get_type_prior, VITALITY_FLOOR,
+};
 use chrono::Utc;
 use rusqlite::{params, Connection, Result, Row};
 
@@ -9,7 +13,8 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
 
     let meta_json: String = row.get("metadata")?;
-    let metadata: serde_json::Value = serde_json::from_str(&meta_json).unwrap_or(serde_json::Value::Null);
+    let metadata: serde_json::Value =
+        serde_json::from_str(&meta_json).unwrap_or(serde_json::Value::Null);
 
     Ok(Memory {
         id: row.get("id")?,
@@ -87,7 +92,10 @@ pub fn get_memory_by_id(conn: &Connection, id: &str) -> Result<Option<Memory>> {
     }
 }
 
-pub fn search_memories(conn: &Connection, input: &MemorySearchInput) -> Result<Vec<MemorySearchResult>> {
+pub fn search_memories(
+    conn: &Connection,
+    input: &MemorySearchInput,
+) -> Result<Vec<MemorySearchResult>> {
     let weights = choose_rrf_weights(&input.query, RetrievalStrategy::Auto);
 
     let mut sql = String::from(

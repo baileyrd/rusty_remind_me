@@ -52,17 +52,19 @@ impl ApiServer {
                 let method = parts[0];
                 let path = parts[1];
 
-                let body = request_str
-                    .split("\r\n\r\n")
-                    .nth(1)
-                    .unwrap_or("")
-                    .trim();
+                let body = request_str.split("\r\n\r\n").nth(1).unwrap_or("").trim();
 
                 let (status_code, response_body) = match (method, path) {
                     ("GET", "/health") => (200, json!({ "status": "ok", "version": "0.1.0" })),
                     ("GET", "/stats") => {
                         let conn = db.conn();
-                        let count: i64 = conn.query_row("SELECT count(*) FROM memories WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
+                        let count: i64 = conn
+                            .query_row(
+                                "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
+                                [],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or(0);
                         (200, json!({ "total_memories": count }))
                     }
                     ("POST", "/api/v1/memories") => {

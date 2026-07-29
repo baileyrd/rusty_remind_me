@@ -1,33 +1,23 @@
 use serde::{Deserialize, Serialize};
 
 /// Output format for search operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseFormat {
+    #[default]
     Markdown,
     Json,
 }
 
-impl Default for ResponseFormat {
-    fn default() -> Self {
-        Self::Markdown
-    }
-}
-
 /// RRF retrieval strategy profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalStrategy {
+    #[default]
     Auto,
     Balanced,
     KeywordFavored,
     SemanticFavored,
-}
-
-impl Default for RetrievalStrategy {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// An entity mentioned by a memory (Knowledge Graph).

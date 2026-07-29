@@ -36,7 +36,9 @@ pub fn write_wiki_page(
 }
 
 pub fn get_wiki_page(conn: &Connection, slug: &str) -> Result<Option<WikiPage>> {
-    let mut stmt = conn.prepare("SELECT slug, title, content, topic, created_at, updated_at FROM wiki_pages WHERE slug = ?")?;
+    let mut stmt = conn.prepare(
+        "SELECT slug, title, content, topic, created_at, updated_at FROM wiki_pages WHERE slug = ?",
+    )?;
     let mut rows = stmt.query_map(params![slug], |row| {
         Ok(WikiPage {
             slug: row.get("slug")?,
