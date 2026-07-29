@@ -67,7 +67,9 @@ pub struct ServerStatus {
     pub dashboard: SubsystemStatus,
     pub embeddings: SubsystemStatus,
     pub sync: SubsystemStatus,
-    pub watcher: SubsystemStatus,
+    /// Reported by the watcher itself now that one exists, rather than as an
+    /// absent subsystem.
+    pub watcher: crate::watcher::WatchStatus,
 }
 
 fn database_file(conn: &Connection) -> Result<Option<PathBuf>> {
@@ -127,6 +129,9 @@ pub fn server_status(conn: &Connection) -> Result<ServerStatus> {
         sync: SubsystemStatus::missing(
             "no sync engine in this crate; the outbox is written and pruned, never drained",
         ),
-        watcher: SubsystemStatus::missing("no folder watcher in this crate"),
+        watcher: match crate::watcher::Watcher::from_env() {
+            Some(w) => w.status(),
+            None => crate::watcher::disabled_status(),
+        },
     })
 }

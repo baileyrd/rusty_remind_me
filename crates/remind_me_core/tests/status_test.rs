@@ -148,12 +148,7 @@ fn absent_subsystems_are_named_with_a_reason() {
     // Reported as not-implemented with a reason, not as "stopped". A bare
     // false could not tell "this crate has no dashboard" apart from "the
     // dashboard is down".
-    for status in [
-        &report.dashboard,
-        &report.embeddings,
-        &report.sync,
-        &report.watcher,
-    ] {
+    for status in [&report.dashboard, &report.embeddings, &report.sync] {
         assert!(is_missing(status));
         if let SubsystemStatus::NotImplemented { reason } = status {
             assert!(!reason.is_empty(), "a reason must say something");
@@ -171,5 +166,9 @@ fn the_report_serialises_with_the_subsystem_state_tagged() {
     assert_eq!(json["mcp"]["state"], "active");
     assert_eq!(json["embeddings"]["state"], "not_implemented");
     assert!(json["embeddings"]["reason"].is_string());
+    // The watcher exists now, so it reports its own state rather than being
+    // listed as an absent subsystem.
+    assert_eq!(json["watcher"]["enabled"], false);
+    assert!(json["watcher"]["hint"].is_string());
     assert_eq!(json["schema_current"], true);
 }

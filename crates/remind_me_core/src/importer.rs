@@ -31,6 +31,7 @@ use crate::models::{
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Result};
+use serde::{Deserialize, Serialize};
 
 /// `source` assigned to memories from a chat export.
 pub const CHAT_SOURCE: &str = "chat_import";
@@ -910,4 +911,47 @@ fn collect_files(dir: &std::path::Path, recursive: bool, out: &mut Vec<std::path
             out.push(path);
         }
     }
+}
+
+/// A registered import parser.
+///
+/// Broader than the kinds [`ImportKind`] accepts: a connector can be
+/// registered purely so it is discoverable, while its actual ingestion runs
+/// through its own dedicated tool. `mempalace` is the reference's example —
+/// listed, but never reached through `remind_me_import_chat`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorInfo {
+    pub kind: String,
+    pub description: String,
+    /// Extensions this connector parses, empty when it does not read files.
+    pub suffixes: Vec<String>,
+    /// Whether `remind_me_import_chat`'s `kind` parameter accepts it.
+    pub file_import_kind: bool,
+}
+
+/// Every registered connector.
+///
+/// A fixed list rather than a runtime registry: this crate has no plugin
+/// mechanism, so a mutable registry would be indirection with exactly one
+/// possible set of contents. If connectors ever become pluggable, this is the
+/// function that grows a registry behind it.
+pub fn connectors() -> Vec<ConnectorInfo> {
+    vec![
+        ConnectorInfo {
+            kind: "chat".to_string(),
+            description: "Chat exports: JSON, JSONL, or markdown with role markers. \
+                          Extracts messages per `extract_mode` and chunks per message."
+                .to_string(),
+            suffixes: SUPPORTED_SUFFIXES.iter().map(|s| s.to_string()).collect(),
+            file_import_kind: true,
+        },
+        ConnectorInfo {
+            kind: "document".to_string(),
+            description: "Notes and documents. Chunks per Markdown section, carrying the \
+                          heading breadcrumb, or per paragraph for plain text."
+                .to_string(),
+            suffixes: DOCUMENT_SUFFIXES.iter().map(|s| s.to_string()).collect(),
+            file_import_kind: true,
+        },
+    ]
 }

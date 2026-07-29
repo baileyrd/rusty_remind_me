@@ -10,7 +10,7 @@
 
 use remind_me_core::{
     backup, capture, db::queries, entity, export, importer, normalize, stats, status, vitality,
-    wiki, wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput,
+    watcher, wiki, wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput,
     ChatImportInput, Database, DecomposeBatchInput, DecomposeInput, EntityInput,
     EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
     MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
@@ -375,6 +375,16 @@ impl McpServer {
                                 "name": "remind_me_import_directory",
                                 "description": "Import every supported file in a directory. Same parsing and per-file dedup as remind_me_import_chat.",
                                 "inputSchema": import_input_schema(true)
+                            },
+                            {
+                                "name": "remind_me_watch_status",
+                                "description": "Report the folder watcher: which directories are watched, which were refused for sitting outside the import roots, scan counts, and recent errors. Says what to configure when nothing is.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_list_connectors",
+                                "description": "List every registered import connector — the pluggable parsers behind remind_me_import_chat's `kind` parameter.",
+                                "inputSchema": { "type": "object", "properties": {} }
                             },
                             {
                                 "name": "remind_me_server_status",
@@ -885,6 +895,20 @@ impl McpServer {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid directory import input: {}", e) }] })
                             }
                         }
+                    }
+                    "remind_me_watch_status" => {
+                        let report = match watcher::Watcher::from_env() {
+                            Some(w) => w.status(),
+                            None => watcher::disabled_status(),
+                        };
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                    }
+                    "remind_me_list_connectors" => {
+                        let body = json!({
+                            "connectors": importer::connectors(),
+                            "file_import_kinds": ["chat", "document"],
+                        });
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
                     }
                     "remind_me_server_status" => match status::server_status(&conn) {
                         Ok(report) => {
