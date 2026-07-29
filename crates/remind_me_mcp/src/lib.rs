@@ -10,7 +10,7 @@
 
 use remind_me_core::{
     backup, capture, db::queries, dbs_import, entity, export, importer, mempalace_import,
-    normalize, stats, status, vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki,
+    normalize, stats, status, updater, vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki,
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database,
     DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput,
     ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
@@ -448,6 +448,21 @@ impl McpServer {
                                 "name": "remind_me_watch_status",
                                 "description": "Report the folder watcher: which directories are watched, which were refused for sitting outside the import roots, scan counts, and recent errors. Says what to configure when nothing is.",
                                 "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_check_update",
+                                "description": "Check whether this checkout is behind origin/main. Read-only: fetches from the remote and compares commits, never modifies anything.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_self_update",
+                                "description": "Pull the latest changes from origin/main (fast-forward only) and rebuild the workspace in release mode. Refuses a working tree with uncommitted changes unless force is set; force never bypasses the fast-forward-only pull, so a diverged local history is still refused either way. Always requires a restart to take effect on success.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "force": { "type": "boolean", "default": false, "description": "Skip the uncommitted-changes guard. Does not bypass the fast-forward-only pull." }
+                                    }
+                                }
                             },
                             {
                                 "name": "remind_me_webhook_status",
@@ -976,6 +991,19 @@ impl McpServer {
                         };
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                     }
+                    "remind_me_check_update" => {
+                        let status = updater::check_for_update();
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&status).unwrap() }] })
+                    }
+                    "remind_me_self_update" => {
+                        let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let result = updater::perform_update(force);
+                        if result.success {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                        } else {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                        }
+                    }
                     "remind_me_import_dbs" => {
                         let input: Result<DbsImportInput, _> = serde_json::from_value(args);
                         match input {
@@ -1460,6 +1488,19 @@ impl McpServer {
                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("Unknown tool: {}", tool_name) }] })
                     }
                 };
+
+                let mut result = result;
+                // Surfaces once, on whatever tool call happens to be first
+                // after startup, then clears — matching the reference's own
+                // one-shot startup notice, attached centrally here rather
+                // than duplicated per handler since this dispatch has a
+                // single point every tool call already passes through.
+                if let Some(notice) = updater::pop_update_notice() {
+                    if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut())
+                    {
+                        content.push(json!({ "type": "text", "text": notice }));
+                    }
+                }
 
                 Some(json!({
                     "jsonrpc": "2.0",
@@ -2060,6 +2101,44 @@ mod tests {
         // what would turn it on.
         assert!(report["start_error"].is_null());
         assert!(report["hint"].as_str().unwrap().contains("SECRET"));
+    }
+
+    #[test]
+    fn test_check_update_and_self_update_are_registered() {
+        // Not invoked here, unlike every other tool this file tests end to
+        // end: both discover their repository from the process's current
+        // working directory (docs/adr/0003-self-update-strategy.md), and
+        // remind_me_self_update would really run `git pull`/`cargo build
+        // --release --workspace` against whatever repo contains this test
+        // binary's cwd -- which, inside this workspace's own test suite, is
+        // this very checkout. That behavior is exercised instead in
+        // remind_me_core's updater.rs unit tests, against real but
+        // disposable git repos under a temp directory, never this sandbox's
+        // actual checkout.
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 15, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+
+        let check = tools
+            .iter()
+            .find(|t| t["name"] == "remind_me_check_update")
+            .expect("remind_me_check_update not in tools/list");
+        assert!(check["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+
+        let self_update = tools
+            .iter()
+            .find(|t| t["name"] == "remind_me_self_update")
+            .expect("remind_me_self_update not in tools/list");
+        assert_eq!(
+            self_update["inputSchema"]["properties"]["force"]["default"],
+            false
+        );
     }
 
     #[test]

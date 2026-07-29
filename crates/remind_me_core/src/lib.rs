@@ -15,6 +15,7 @@ pub mod retrieval;
 pub mod stats;
 pub mod status;
 pub mod sync;
+pub mod updater;
 pub mod vitality;
 pub mod watcher;
 pub mod webhook;

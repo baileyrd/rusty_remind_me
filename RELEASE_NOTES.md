@@ -2,6 +2,69 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — `remind_me_check_update` and `remind_me_self_update` (#58)
+
+### Added
+- **`remind_me_check_update`** — read-only, no inputs. Fetches from
+  `origin` and compares `HEAD` against `origin/main`, reporting whether an
+  update is available, how many commits behind, and (up to 10) their
+  one-line messages. Ports the reference's `check_for_update()` directly —
+  nothing about this step depends on how the running binary was built or
+  installed.
+- **`remind_me_self_update(force: bool = false)`** — `git pull --ff-only`
+  (refusing a working tree with uncommitted changes unless `force` is set),
+  followed by `cargo build --release --workspace` in place of the
+  reference's `pip install -e .`. Always reports `restart_required: true`
+  on success. `force` only bypasses the dirty-tree guard, never the
+  fast-forward-only pull — a diverged local history is refused either way,
+  verified directly against the reference's `perform_update()` rather than
+  assumed. A build failure after a successful pull is rolled back
+  automatically (`git reset --hard` to the pre-pull commit); if the
+  rollback itself fails, the error names the exact manual recovery command.
+- A background startup check (`start_background_check`, called once from
+  the CLI's actual `server`/`mcp` entry point — deliberately not from
+  `McpServer::new`, which the test suite also uses to build a server per
+  test) that surfaces a one-shot notice on whatever tool call happens to
+  come first afterward, then clears. `REMIND_ME_AUTO_UPDATE_CHECK=false`
+  skips it; the two manual tools are unaffected either way.
+- `docs/adr/0003-self-update-strategy.md` — records the decision the issue
+  required before implementing: the reference's own mechanism (`git pull`
+  + `pip install -e .`, coherent because an editable install's source tree
+  *is* the running installation) has no equivalent for a compiled binary,
+  so self-update here means "pull and rebuild, then require a restart,"
+  not "fetch a prebuilt release binary and swap it" (no release pipeline
+  exists to fetch from) and not "check-only" (the issue names that as the
+  fallback if a real update path isn't worth porting — rebuilding is a
+  small addition on top of the git plumbing the read-only check already
+  needs). Also records why repository discovery walks up from the
+  process's current working directory rather than the executable's own
+  path, unlike the reference.
+
+### Notes
+Repository discovery requires running `remind_me_check_update`/
+`remind_me_self_update` from inside the repository (or a subdirectory of
+it) — a real, stated divergence from the reference, not a silent
+approximation. A `cargo install`ed binary has no fixed relationship to the
+source tree that produced it the way an editable pip install's package
+files always live inside the repo they came from, so there is no
+executable-path-based discovery to fall back to; self-update is only a
+coherent operation at all when it's clear which checkout it means.
+
+Tested against real, disposable git repositories under a temp directory
+(a local filesystem "origin" plus a clone of it — git treats a path remote
+exactly like any other, no network needed): up to date, behind by N
+commits with correct messages, an unreachable origin, a dirty tree refused
+without `force`, `force` still refusing a diverged (non-fast-forward)
+history, a successful pull-and-build, and a build failure's automatic
+rollback. The MCP-level test suite deliberately does not invoke either
+tool end to end — unlike every other tool tested there, both discover
+their repository from the test binary's own working directory, which
+inside this workspace's test suite is this very checkout; running
+`remind_me_self_update` for real there would rebuild the actual repository
+under test. Registration and input schemas are asserted instead, with the
+behavioral coverage living entirely in `updater.rs`'s own unit tests
+against disposable repos.
+
 ## 2026-07-29 — Import a MemPalace ChromaDB store (#53)
 
 ### Added
