@@ -9,13 +9,14 @@
 #![recursion_limit = "512"]
 
 use remind_me_core::{
-    backup, capture, db::queries, entity, export, importer, normalize, stats, status, vitality,
-    watcher, webhook::Webhook, wiki, wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput,
-    BulkImportDirInput, ChatImportInput, Database, DecomposeBatchInput, DecomposeInput,
-    EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput,
-    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
-    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
+    backup, capture, db::queries, dbs_import, entity, export, importer, normalize, stats, status,
+    vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki, wiki_import, AnnotateInput,
+    AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database, DbsImportInput,
+    DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput, ExportInput,
+    ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
+    MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput,
+    ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
     DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
     IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN,
     NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
@@ -397,6 +398,28 @@ impl McpServer {
                                 "name": "remind_me_import_directory",
                                 "description": "Import every supported file in a directory. Same parsing and per-file dedup as remind_me_import_chat.",
                                 "inputSchema": import_input_schema(true)
+                            },
+                            {
+                                "name": "remind_me_import_dbs",
+                                "description": "Bulk-import a daily-backup-system (dbs) archive. Reads its items/sources tables directly, read-only, and turns each live item into a memory with dbs's source and tags preserved as knowledge-graph entities rather than flattened into prose. Reruns are safe: unchanged items are skipped, and an item edited since its last import gets a fresh memory that supersedes the old one. Page a large archive with offset until has_more is false.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "db_path": { "type": "string", "description": "Path to the dbs SQLite archive, inside the allowed import roots" },
+                                        "source": { "type": "string", "description": "Restrict to one dbs source name (e.g. 'raindrop'). Omit for all." },
+                                        "item_type": { "type": "string", "description": "Restrict to one dbs item_kind (e.g. 'link'). Omit for all." },
+                                        "limit": {
+                                            "type": "integer",
+                                            "minimum": DBS_IMPORT_LIMIT_MIN,
+                                            "maximum": DBS_IMPORT_LIMIT_MAX,
+                                            "default": 500
+                                        },
+                                        "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Extra tags added to every imported memory" },
+                                        "dry_run": { "type": "boolean", "default": false, "description": "Report what would be imported without writing" }
+                                    },
+                                    "required": ["db_path"]
+                                }
                             },
                             {
                                 "name": "remind_me_watch_status",
@@ -929,6 +952,22 @@ impl McpServer {
                             None => watcher::disabled_status(),
                         };
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                    }
+                    "remind_me_import_dbs" => {
+                        let input: Result<DbsImportInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(import_input) => match dbs_import::pull_dbs(&conn, &import_input) {
+                                Ok(result) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("dbs import error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid dbs import input: {}", e) }] })
+                            }
+                        }
                     }
                     "remind_me_webhook_status" => {
                         let report = self.webhook.status();
@@ -1881,6 +1920,38 @@ mod tests {
         assert!(text_of(&reserved).contains("reserved"));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_import_dbs_is_registered_and_refuses_a_path_outside_the_roots() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 12, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tool = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_import_dbs")
+            .expect("remind_me_import_dbs not in tools/list");
+        assert_eq!(tool["inputSchema"]["required"][0], "db_path");
+        assert_eq!(tool["inputSchema"]["properties"]["limit"]["maximum"], 2000);
+
+        let result = call(
+            &server,
+            "remind_me_import_dbs",
+            json!({ "db_path": "/etc/hosts" }),
+        );
+
+        assert_eq!(result["isError"], true);
+        // Refused for containment, not for existence — the message must not
+        // reveal whether a path outside the roots is there.
+        assert!(
+            text_of(&result).contains("not in allowed import roots"),
+            "got {}",
+            text_of(&result)
+        );
     }
 
     #[test]

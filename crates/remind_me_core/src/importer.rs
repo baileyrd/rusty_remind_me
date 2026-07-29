@@ -1033,5 +1033,19 @@ pub fn connectors() -> Vec<ConnectorInfo> {
             suffixes: DOCUMENT_SUFFIXES.iter().map(|s| s.to_string()).collect(),
             file_import_kind: true,
         },
+        // Listed for discovery, not for dispatch. `remind_me_import_dbs` reads
+        // SQL rather than parsing a file, so it has its own entry point and
+        // its own per-item dedup loop — `file_import_kind: false` is what says
+        // "you cannot pass this as `kind` to remind_me_import_chat", which is
+        // the question a caller reading this list is actually asking.
+        ConnectorInfo {
+            kind: "dbs".to_string(),
+            description: "A daily-backup-system archive. Reads its items/sources tables \
+                          directly, read-only, preserving each item's source and tags as \
+                          knowledge-graph entities. Use remind_me_import_dbs."
+                .to_string(),
+            suffixes: Vec::new(),
+            file_import_kind: false,
+        },
     ]
 }

@@ -2,6 +2,67 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Import a dbs archive (#52)
+
+### Added
+- **`remind_me_import_dbs`** — bulk-imports a
+  [daily-backup-system](https://github.com/baileyrd/daily-backup-system)
+  archive: the SQLite database `dbs` collects a person's Reddit, YouTube,
+  Raindrop and GitHub-stars data into, under a uniform `items`/`sources`
+  schema. Each live item becomes a memory.
+- `import_paths::validate_import_database`, which applies the same
+  containment-then-existence rule to a database path as to any other import
+  source, minus the extension check — a `.sqlite3` is read with SQL, so its
+  suffix carries no meaning.
+- A `dbs` entry in the connector registry, listed for discovery with
+  `file_import_kind: false` — it is not something you can pass as `kind` to
+  `remind_me_import_chat`.
+- `dbs_imports` finally has a writer. It arrived with the generated schema and
+  had been unused since.
+
+### Notes
+**The point of this over the export route is structure.** `dbs export-notes`
+plus the folder watcher (#55) already handles the *content* — what it cannot
+carry is the shape: an item's source and tags arrive as prose in a note, and
+prose is not a graph. Here they become first-class entities (`FT-04`) linked to
+the memory, so "everything from raindrop" and "everything tagged rust" are
+traversals rather than searches. An implementation of this that did not write
+entities would have no reason to exist, so that is asserted directly rather
+than left implied.
+
+`item_kind` is deliberately **not** an entity. It becomes the memory's category
+and lands in metadata. There is no established "kind" entity type in this graph
+to reuse, and inventing one would put a second, incompatible taxonomy beside
+the existing ones.
+
+**The archive is opened read-only, and the test asserts that at the SQLite
+layer** rather than trusting this module never to attempt a write. It is
+someone's backup.
+
+**Dedup is on `(dbs_source, external_id)` — `dbs`'s own item identity —
+plus a content hash.** An item whose hash moved gets a *fresh* memory, with the
+previous one marked `superseded_by` it: history accumulates rather than being
+overwritten, mirroring the watcher's changed-file behaviour. Comparing hashes
+rather than timestamps is the point — `dbs` does not always move a timestamp on
+an edit, so an importer keying on `item_created_at` would miss it entirely.
+
+The memory id is **derived**, not minted: `sha256("dbs:source:external_id:hash")`
+truncated to 12 characters. Everything else in this crate mints `mem_<uuid>` so
+that storing the same content twice gives two memories; here the opposite is
+wanted. Two concurrent or retried imports of the same item version compute the
+same id, so `INSERT OR IGNORE` collapses them. Without that, both would read
+"not yet imported", both would insert under different ids, and `dbs_imports` —
+one row per `(source, external_id)` — would track only whichever wrote last,
+orphaning the other memory permanently.
+
+A memory's `created_at` is the item's own creation time, not the import's.
+Vitality decay reads that column, so importing a decade of archive must not
+make all of it look like it happened today.
+
+The whole page is one transaction. A half-applied import would leave
+`dbs_imports` claiming items no memory backs, and the next rerun would skip
+them — the archive would look imported when it was not.
+
 ## 2026-07-29 — Push ingestion over HTTP (#56)
 
 ### Added

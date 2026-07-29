@@ -164,6 +164,30 @@ pub fn validate_import_file(raw: &str) -> Result<PathBuf, ImportPathError> {
     Ok(resolved)
 }
 
+/// Resolve and validate a database file to import from.
+///
+/// The same containment-then-existence order as [`validate_import_file`], and
+/// for the same reason — a caller-supplied path is a caller-supplied path
+/// regardless of what is inside it. The extension check is the only thing
+/// dropped: a `dbs` archive is a `.sqlite3`/`.db` file, and the importer reads
+/// it with SQL rather than by parsing text, so the suffix carries no meaning
+/// here. What makes it a database is the file's contents, which the reader
+/// finds out when it opens it.
+pub fn validate_import_database(raw: &str) -> Result<PathBuf, ImportPathError> {
+    let resolved = resolve_lexically(&PathBuf::from(expand_home(raw.trim())));
+
+    if !is_contained(&resolved, &import_roots()) {
+        return Err(ImportPathError::OutsideRoots(resolved));
+    }
+    if !resolved.exists() {
+        return Err(ImportPathError::NotFound(resolved));
+    }
+    if !resolved.is_file() {
+        return Err(ImportPathError::NotAFile(resolved));
+    }
+    Ok(resolved)
+}
+
 /// Resolve and validate a directory to import from.
 pub fn validate_import_dir(raw: &str) -> Result<PathBuf, ImportPathError> {
     let resolved = resolve_lexically(&PathBuf::from(expand_home(raw.trim())));
