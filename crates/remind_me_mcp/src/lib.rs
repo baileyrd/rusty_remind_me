@@ -1,6 +1,6 @@
 use remind_me_core::{
-    db::queries, entity, wiki, wiki_import, Database, EntityInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, UpdateOutcome, WikiDeleteOutcome,
+    db::queries, entity, stats, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
+    MemoryListInput, MemorySearchInput, MemoryUpdateInput, UpdateOutcome, WikiDeleteOutcome,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -255,26 +255,26 @@ impl McpServer {
             "resources/read" => {
                 let req_id = id.unwrap_or(json!(1));
                 let conn = self.db.conn();
-                let count: i64 = conn
-                    .query_row(
-                        "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(0);
-                Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "contents": [
-                            {
-                                "uri": "memory://stats",
-                                "mimeType": "application/json",
-                                "text": serde_json::to_string_pretty(&json!({ "total_memories": count })).unwrap()
-                            }
-                        ]
-                    }
-                }))
+                match stats::collect(&conn) {
+                    Ok(s) => Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "contents": [
+                                {
+                                    "uri": "memory://stats",
+                                    "mimeType": "application/json",
+                                    "text": serde_json::to_string_pretty(&s).unwrap()
+                                }
+                            ]
+                        }
+                    })),
+                    Err(e) => Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": { "code": -32603, "message": format!("Stats error: {}", e) }
+                    })),
+                }
             }
             "prompts/list" => {
                 let req_id = id.unwrap_or(json!(1));
@@ -518,16 +518,14 @@ impl McpServer {
                             }
                         }
                     }
-                    "remind_me_stats" => {
-                        let count: i64 = conn
-                            .query_row(
-                                "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
-                                [],
-                                |r| r.get(0),
-                            )
-                            .unwrap_or(0);
-                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({ "total_memories": count })).unwrap() }] })
-                    }
+                    "remind_me_stats" => match stats::collect(&conn) {
+                        Ok(s) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&s).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Stats error: {}", e) }] })
+                        }
+                    },
                     _ => {
                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("Unknown tool: {}", tool_name) }] })
                     }

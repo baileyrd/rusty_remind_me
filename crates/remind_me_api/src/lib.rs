@@ -1,5 +1,5 @@
 use remind_me_core::db::queries;
-use remind_me_core::{Database, MemoryAddInput, MemorySearchInput};
+use remind_me_core::{stats, Database, MemoryAddInput, MemorySearchInput};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -58,14 +58,10 @@ impl ApiServer {
                     ("GET", "/health") => (200, json!({ "status": "ok", "version": "0.1.0" })),
                     ("GET", "/stats") => {
                         let conn = db.conn();
-                        let count: i64 = conn
-                            .query_row(
-                                "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
-                                [],
-                                |r| r.get(0),
-                            )
-                            .unwrap_or(0);
-                        (200, json!({ "total_memories": count }))
+                        match stats::collect(&conn) {
+                            Ok(s) => (200, json!(s)),
+                            Err(e) => (500, json!({ "error": e.to_string() })),
+                        }
                     }
                     ("POST", "/api/v1/memories") => {
                         match serde_json::from_str::<MemoryAddInput>(body) {
