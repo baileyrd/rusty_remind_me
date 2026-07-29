@@ -2,6 +2,79 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Multi-node sync: outbox drain and pull for `memories` (#57)
+
+### Added
+- **Sync client**: `sync::push_outbox` drains this node's `sync_outbox` to a
+  configured hub, paged (`BATCH_SIZE=200`), marking rows sent per-remote via
+  `sync_sends` — either the exact ids a modern hub reports processed, or
+  (a count-only legacy response) the whole page. `sync::pull_remote` pages
+  a hub's changes back (`PULL_PAGE_SIZE=500`, capped at `MAX_PULL_PAGES=100`
+  per cycle), applying each via the conflict-resolution engine below and
+  persisting a keyset `(updated_at, id)` cursor per remote in `sync_log`.
+- **Conflict resolution** (`sync::upsert_record`): last-write-wins on
+  `updated_at` — a *tied* timestamp means the incoming side loses, not a
+  no-op and not a win — with `tags` union-merged (dedup, order-preserving)
+  and `metadata` shallow-merged per key (the LWW winner's value wins on a
+  collision, never recursively), **both regardless of which side wins**.
+  A winning update never touches `created_at` (insert-only). Applying an
+  incoming record echo-suppresses only the outbox row that very write just
+  created, leaving a genuinely concurrent local edit to the same memory
+  untouched.
+- **This node's own peer server** (`sync::PeerServer`/`SyncPeer`): serves
+  `GET /health`, `POST /sync/push`, `GET /sync/pull` — the exact same
+  protocol this node's own client speaks to a hub, since hub and peer are
+  the same protocol against different endpoints, matching the reference.
+  Bearer-authenticated via `REMIND_ME_SYNC_SECRET`; off unless that secret
+  is configured, independent of whether this node is also configured to
+  sync outward.
+- **A background `SyncWorker`** runs push-then-pull-then-prune every
+  `REMIND_ME_SYNC_INTERVAL` seconds (default 60) against the configured
+  hub. Enabled only when `REMIND_ME_NODE_ID`, `REMIND_ME_HUB_URL`, and
+  `REMIND_ME_SYNC_SECRET` are all set — matching the reference's
+  `SYNC_ENABLED` exactly — and started once from the CLI's real server
+  entry point, not from `McpServer::new` (which the test suite also uses
+  to build a server per test).
+- `add_memory` now stamps `node_id`/`client` from
+  `REMIND_ME_NODE_ID`/`REMIND_ME_CLIENT` on every write, unconditionally —
+  not gated on sync being enabled, matching the reference exactly, so a
+  node that turns sync on later already knows which of its existing
+  memories were its own. `remind_me_update` does not re-stamp them, also
+  matching the reference.
+- `delete_memory` now tombstones (`deleted_at` + `updated_at` set) instead
+  of hard-deleting when sync is configured — a hard `DELETE` produces no
+  outbox row at all (the sync triggers only fire on INSERT/UPDATE), so it
+  would otherwise silently resurrect on the next pull elsewhere. A node
+  with sync disabled deletes immediately, exactly as before.
+- `remind_me_server_status` gained `sync_peer` and `sync` fields, merged in
+  by the MCP layer the same way `webhook`'s already is.
+- `docs/adr/0004-sync-protocol-and-conflict-resolution.md`.
+
+### Scope — this is the epic's own suggested first slice
+Per the issue's explicit instruction to split this epic, this PR is
+**`memories` only, hub sync only**: no knowledge-graph table sync, no
+Tailscale/static-peer discovery (the client only ever talks to one
+configured hub), no OAuth, and no `remind_me_revoke_clients` — each is its
+own follow-up issue, the same way `#59` was already split out of this epic
+for the outbox-growth defect.
+
+### Known limitation: tombstone propagation is schema-limited
+`delete_memory` correctly tombstones the local row when sync is enabled,
+but the currently-installed, generated `memories_outbox_au` trigger's
+payload (dumped from an earlier `remind_me` snapshot, not this crate's file
+to hand-edit) does not include `deleted_at` in its 23-column JSON snapshot
+— so a deletion does not yet propagate to another node, even though
+everything downstream of "the wire payload carries what this schema's own
+trigger actually writes" is implemented correctly. See ADR-0004's "Known
+limitation" section; a follow-up issue tracks the schema re-dump this
+actually needs.
+
+Re-embedding a synced memory is deliberately left to `remind_me_reindex`
+(`#49`) rather than done inline here — `upsert_record` never calls the
+embedder, so a synced memory has no vector until the next reindex, exactly
+like any other bulk-arrived memory (`dbs`, MemPalace, chat/document
+import).
+
 ## 2026-07-29 — Import a MemPalace ChromaDB store (#53)
 
 ### Added

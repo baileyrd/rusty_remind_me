@@ -9,8 +9,14 @@
 #![recursion_limit = "512"]
 
 use remind_me_core::{
-    backup, capture, db::queries, dbs_import, entity, export, importer, mempalace_import,
-    normalize, stats, status, vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki,
+    backup, capture,
+    db::queries,
+    dbs_import, entity, export, importer, mempalace_import, normalize, stats, status,
+    sync::{SyncPeer, SyncWorker},
+    vitality, watcher,
+    webhook::Webhook,
+    wiki,
+    wiki_fs::Wiki,
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database,
     DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput,
     ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
@@ -200,8 +206,12 @@ pub struct McpServer {
     /// thread, and that thread writes through the database. Listed after `db`
     /// it would still be sound — the thread holds its own `Arc` — but the
     /// connections would stay open until the thread noticed, which is the
-    /// shutdown ordering `SE-07` exists to pin down.
+    /// shutdown ordering `SE-07` exists to pin down. `sync_peer` and
+    /// `sync_worker` hold their own serving/background threads for the same
+    /// reason and are declared before `db` for the same reason.
     webhook: Webhook,
+    sync_peer: SyncPeer,
+    sync_worker: Option<SyncWorker>,
     db: Arc<Database>,
     wiki: Wiki,
 }
@@ -221,6 +231,12 @@ impl McpServer {
             // A no-op without `REMIND_ME_WEBHOOK_SECRET`, which is the ordinary
             // case — nothing binds a port unless someone asked for one.
             webhook: Webhook::from_env(Arc::clone(&db)),
+            // A no-op without `REMIND_ME_SYNC_SECRET` — accepting another
+            // node's push/pull is off by default exactly like the webhook.
+            sync_peer: SyncPeer::from_env(Arc::clone(&db)),
+            // `None` unless node id, hub URL, and secret are all configured —
+            // matching the reference's own `SYNC_ENABLED` gate exactly.
+            sync_worker: SyncWorker::from_env(Arc::clone(&db)),
             db,
             wiki,
         }
@@ -1023,13 +1039,24 @@ impl McpServer {
                     }
                     "remind_me_server_status" => match status::server_status(&conn) {
                         Ok(report) => {
-                            // The webhook's state lives on this struct, not on
-                            // the connection, so it is merged in here rather
-                            // than gathered by `server_status`. The dedicated
-                            // tool carries the same report in full.
+                            // The webhook's/sync peer's/sync worker's state
+                            // lives on these structs, not on the connection,
+                            // so they are merged in here rather than
+                            // gathered by `server_status`.
                             let mut report = serde_json::to_value(&report).unwrap_or(json!({}));
                             report["webhook"] =
                                 serde_json::to_value(self.webhook.status()).unwrap_or(json!({}));
+                            report["sync_peer"] =
+                                serde_json::to_value(self.sync_peer.status()).unwrap_or(json!({}));
+                            report["sync"] = serde_json::to_value(
+                                self.sync_worker
+                                    .as_ref()
+                                    .map(|w| w.status())
+                                    .unwrap_or_else(
+                                        remind_me_core::sync::sync_worker_disabled_status,
+                                    ),
+                            )
+                            .unwrap_or(json!({}));
                             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                         }
                         Err(e) => {
@@ -2077,6 +2104,8 @@ mod tests {
         // Merged in by the MCP layer rather than gathered from the connection,
         // because that is where the endpoint's state lives.
         assert_eq!(report["webhook"]["enabled"], false);
+        assert_eq!(report["sync_peer"]["enabled"], false);
+        assert_eq!(report["sync"]["enabled"], false);
         assert_eq!(report["schema_current"], true);
     }
 
