@@ -4,11 +4,11 @@ use chrono::Utc;
 use rusqlite::{params, Connection, Result, Row};
 use serde::{Deserialize, Serialize};
 
-/// System pages the reference refuses to delete (`wiki.RESERVED_SLUGS`).
+/// Generated system pages, refused by delete and excluded from listings.
 ///
-/// This crate has no on-disk wiki yet, so none of these exist to be deleted
-/// today. The guard is in place so behavior does not silently change when
-/// `wiki_load` / `wiki_compile` start generating them.
+/// `index.md` is regenerated on every write and `log.md` is append-only, so
+/// letting a caller overwrite either by hand would put the wiki permanently at
+/// odds with itself.
 pub const RESERVED_SLUGS: [&str; 3] = ["index", "log", "schema"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,11 +46,12 @@ fn parse_wiki_row(row: &Row) -> Result<WikiPage> {
     })
 }
 
-/// Write or replace a wiki page.
+/// Write a row straight into the index, bypassing the filesystem.
 ///
-/// `summary` is the one-line description shown in the index. The schema has no
-/// `topic` column — that was a target-only extension, dropped when the schema
-/// was regenerated from `remind_me`.
+/// **Not the public write path** — [`crate::wiki_fs::Wiki::write_page`] is,
+/// because files are the source of truth and a row written here would be erased
+/// by the next reconcile. Kept for tests that exercise the index in isolation.
+#[doc(hidden)]
 pub fn write_wiki_page(
     conn: &Connection,
     slug: &str,
