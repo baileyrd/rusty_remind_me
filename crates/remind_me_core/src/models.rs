@@ -225,6 +225,62 @@ pub struct AnnotateResult {
     pub errors: Vec<AnnotationError>,
 }
 
+/// One memory's classification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryClassification {
+    pub memory_id: String,
+    pub memory_type: String,
+}
+
+/// A batch of classifications to apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReclassifyInput {
+    pub classifications: Vec<MemoryClassification>,
+}
+
+/// Inclusive bounds the reference enforces on a classification batch.
+pub const RECLASSIFY_BATCH_MIN: usize = 1;
+pub const RECLASSIFY_BATCH_MAX: usize = 100;
+
+/// Outcome of a classification batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReclassifyResult {
+    pub updated: usize,
+    pub not_found: Vec<String>,
+    pub total: usize,
+}
+
+/// Request for a batch of memories still awaiting classification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReclassifyBatchInput {
+    #[serde(default = "default_reclassify_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_reclassify_batch_size() -> usize {
+    20
+}
+
+/// One unclassified memory, trimmed for review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnclassifiedMemory {
+    pub id: String,
+    /// First 500 characters of the content, matching the reference.
+    pub content_snippet: String,
+    pub category: String,
+    pub tags: Vec<String>,
+}
+
+/// A page of memories awaiting classification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReclassifyBatchResult {
+    pub memories: Vec<UnclassifiedMemory>,
+    pub total_unclassified: usize,
+}
+
+/// The value `memory_type` holds until something classifies it.
+pub const UNCLASSIFIED: &str = "unclassified";
+
 /// Input model for `remind_me_feedback`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackInput {

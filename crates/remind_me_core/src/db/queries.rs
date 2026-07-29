@@ -2,7 +2,9 @@ use crate::fts::sanitize_fts_query;
 use crate::models::{
     AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, Memory, MemoryAddInput,
     MemoryListInput, MemoryListResult, MemorySearchInput, MemorySearchResult, MemoryUpdateInput,
-    RetrievalStrategy, UpdateOutcome, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
+    ReclassifyBatchInput, ReclassifyBatchResult, ReclassifyInput, ReclassifyResult,
+    RetrievalStrategy, UnclassifiedMemory, UpdateOutcome, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
+    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNCLASSIFIED,
 };
 use crate::retrieval::{choose_rrf_weights, rank_rrf, trim_by_token_budget};
 use crate::vitality::{
@@ -190,12 +192,15 @@ pub fn list_memories(conn: &Connection, input: &MemoryListInput) -> Result<Memor
 
 /// Apply a partial update to a memory.
 ///
-/// `decay_rate` is recomputed when `category` changes, because in this crate it
-/// is a pure function of category ([`get_decay_rate`]) and would otherwise go
-/// stale. `vitality` and `access_count` are deliberately left alone: they encode
+/// Deliberately does **not** touch `decay_rate`. An earlier version recomputed
+/// it whenever `category` changed, which introduced a second writer: decay is
+/// derived from `memory_type`, and [`reclassify_memories`] owns it. With both
+/// writing, reclassifying a memory to `decision` and then editing its category
+/// to `action_item` would silently contradict the classification. The reference
+/// never touches `decay_rate` on update for exactly this reason.
+///
+/// `vitality`, `base_weight` and `access_count` are left alone too: they encode
 /// accrued retrieval history, and resetting them on an edit would discard it.
-/// The reference does not recompute either — its `base_weight` is seeded from
-/// `source` alone and is not category-derived.
 pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<UpdateOutcome> {
     if get_memory_by_id(conn, &input.memory_id)?.is_none() {
         return Ok(UpdateOutcome::NotFound);
@@ -211,8 +216,6 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
     if let Some(category) = &input.category {
         sets.push("category = ?");
         bindings.push(Value::Text(category.clone()));
-        sets.push("decay_rate = ?");
-        bindings.push(Value::Real(get_decay_rate(category)));
     }
     if let Some(tags) = &input.tags {
         sets.push("tags = ?");
@@ -343,6 +346,92 @@ pub fn annotate_memories(conn: &Connection, input: &AnnotateInput) -> Result<Ann
     }
 
     Ok(AnnotateResult { results, errors })
+}
+
+/// Apply memory-type classifications, updating the decay rate to match.
+///
+/// `decay_rate` is a pure function of `memory_type` ([`get_decay_rate`]), and
+/// this is the only place that writes it. Idempotent: reclassifying overwrites
+/// the previous type and rate.
+///
+/// Unknown ids are collected into `not_found` rather than failing the batch —
+/// a classification pass over stale ids should not discard its good work.
+/// Vitality and `base_weight` are untouched; classification says what a memory
+/// *is*, not how much it has been used.
+pub fn reclassify_memories(conn: &Connection, input: &ReclassifyInput) -> Result<ReclassifyResult> {
+    let now = Utc::now().to_rfc3339();
+    let mut updated = 0;
+    let mut not_found = Vec::new();
+
+    for classification in &input.classifications {
+        if get_memory_by_id(conn, &classification.memory_id)?.is_none() {
+            not_found.push(classification.memory_id.clone());
+            continue;
+        }
+
+        conn.execute(
+            "UPDATE memories SET memory_type = ?, decay_rate = ?, updated_at = ? WHERE id = ?",
+            params![
+                classification.memory_type,
+                get_decay_rate(&classification.memory_type),
+                now,
+                classification.memory_id
+            ],
+        )?;
+        updated += 1;
+    }
+
+    Ok(ReclassifyResult {
+        updated,
+        not_found,
+        total: input.classifications.len(),
+    })
+}
+
+/// Fetch memories still awaiting classification, with a snippet for review.
+///
+/// `total_unclassified` counts every remaining memory, not just this page, so a
+/// caller can tell whether another round is worth requesting.
+pub fn unclassified_batch(
+    conn: &Connection,
+    input: &ReclassifyBatchInput,
+) -> Result<ReclassifyBatchResult> {
+    let batch_size = input
+        .batch_size
+        .clamp(RECLASSIFY_BATCH_MIN, RECLASSIFY_BATCH_MAX);
+
+    let total_unclassified: i64 = conn.query_row(
+        "SELECT count(*) FROM memories WHERE memory_type = ? AND deleted_at IS NULL",
+        params![UNCLASSIFIED],
+        |r| r.get(0),
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, substr(content, 1, 500), category, tags
+           FROM memories
+          WHERE memory_type = ? AND deleted_at IS NULL
+          ORDER BY created_at, id
+          LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![UNCLASSIFIED, batch_size as i64], |row| {
+        let tags_json: String = row.get(3)?;
+        Ok(UnclassifiedMemory {
+            id: row.get(0)?,
+            content_snippet: row.get(1)?,
+            category: row.get(2)?,
+            tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+        })
+    })?;
+
+    let mut memories = Vec::new();
+    for row in rows {
+        memories.push(row?);
+    }
+
+    Ok(ReclassifyBatchResult {
+        memories,
+        total_unclassified: total_unclassified.max(0) as usize,
+    })
 }
 
 pub fn search_memories(

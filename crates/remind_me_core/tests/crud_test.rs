@@ -260,13 +260,11 @@ fn update_changes_only_the_supplied_fields() {
 }
 
 #[test]
-fn update_recomputes_decay_rate_when_category_changes() {
+fn update_leaves_decay_and_retrieval_history_alone() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
-    // "general" seeds decay 0.10; "decision" seeds 0.02.
     let id = add(&conn, "content", "general", "manual", &[]);
     let before = queries::get_memory_by_id(&conn, &id).unwrap().unwrap();
-    assert!((before.decay_rate - 0.10).abs() < 1e-9);
 
     let outcome = queries::update_memory(
         &conn,
@@ -284,11 +282,18 @@ fn update_recomputes_decay_rate_when_category_changes() {
         UpdateOutcome::Updated(m) => *m,
         other => panic!("expected Updated, got {:?}", other),
     };
-    assert!((updated.decay_rate - 0.02).abs() < 1e-9);
+    assert_eq!(updated.category, "decision");
+    assert!(
+        (updated.decay_rate - before.decay_rate).abs() < 1e-9,
+        "decay_rate is derived from memory_type and owned by reclassify; an \
+         earlier version recomputed it from category here, which meant an edit \
+         could silently contradict a classification"
+    );
     assert!(
         (updated.vitality - before.vitality).abs() < 1e-9,
         "vitality carries accrued history and must not be reset by an edit"
     );
+    assert!((updated.base_weight - before.base_weight).abs() < 1e-9);
     assert_eq!(updated.access_count, before.access_count);
 }
 
