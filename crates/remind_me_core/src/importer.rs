@@ -1,0 +1,913 @@
+//! File import: chat exports and documents into memories.
+//!
+//! This is how a vault gets populated with anything beyond hand-written
+//! memories. It also brings two shipped-but-inert features to life:
+//! `normalize_batch` selects `source IN ('document_import', 'chat_import')`,
+//! and `include_neighbors` keys on `doc_id`/`chunk_index` — none of which
+//! anything wrote before this.
+//!
+//! # Chat versus document
+//!
+//! `.json`/`.jsonl` are always chat exports. `.md`/`.markdown`/`.txt` are
+//! **content-sniffed** in `auto` mode: text carrying chat role markers
+//! (`## Human`, `**Assistant:**`) parses as chat, everything else as a
+//! document. A document is split per Markdown section with its heading
+//! breadcrumb carried into the chunk; plain text is paragraph-chunked.
+//!
+//! # Dedup
+//!
+//! Keyed on a hash of the file's raw bytes, recorded in `chat_imports`, so
+//! re-importing the same content is a no-op regardless of filename. The hash
+//! is checked **before** the file's text is read or parsed, so a re-import
+//! short-circuits without doing the work.
+
+use crate::entity::{upsert_entity, upsert_entity_relation};
+use crate::import_paths::{
+    suffix_of, validate_import_dir, validate_import_file, DOCUMENT_SUFFIXES, SUPPORTED_SUFFIXES,
+};
+use crate::models::{
+    BulkImportDirInput, BulkImportResult, ChatImportInput, EntityInput, ImportKind, ImportOutcome,
+    ImportStats, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
+};
+use chrono::Utc;
+use rusqlite::{params, Connection, OptionalExtension, Result};
+
+/// `source` assigned to memories from a chat export.
+pub const CHAT_SOURCE: &str = "chat_import";
+/// `source` assigned to memories from a document.
+pub const DOCUMENT_SOURCE: &str = "document_import";
+/// `category` a document import falls back to when the caller left the
+/// chat-shaped default in place.
+pub const DOCUMENT_CATEGORY: &str = "document";
+
+/// What parsing produced: chunk/section pairs, the pre-chunk entry count, the
+/// `source` to store under, and the resolved category.
+///
+/// Named rather than a tuple because the two counts and the two strings are
+/// easy to transpose.
+struct ParsedImport {
+    chunks: Vec<(String, Option<String>)>,
+    raw_entries: usize,
+    source: &'static str,
+    category: String,
+}
+
+/// Short content fingerprint used for dedup.
+fn hash_bytes(data: &[u8]) -> String {
+    sha256::digest(data)[..16].to_string()
+}
+
+/// Split text at natural boundaries, preferring the largest that fits.
+///
+/// Paragraph, then line, then sentence, then a hard cut. A window that is
+/// nothing but whitespace strips to empty and is dropped rather than stored —
+/// otherwise a long run of indentation becomes a blank memory.
+pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
+    if text.chars().count() <= max_len {
+        return if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![text.to_string()]
+        };
+    }
+
+    let mut chunks = Vec::new();
+    let mut rest = text.to_string();
+    while !rest.is_empty() {
+        if rest.chars().count() <= max_len {
+            if !rest.trim().is_empty() {
+                chunks.push(rest);
+            }
+            break;
+        }
+        // Byte offset of the character boundary `max_len` characters in, so
+        // every slice below lands on a character boundary.
+        let window_end = rest
+            .char_indices()
+            .nth(max_len)
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        let window = &rest[..window_end];
+
+        let cut = window
+            .rfind("\n\n")
+            .or_else(|| window.rfind('\n'))
+            .or_else(|| window.rfind(". "))
+            .map(|i| i + 1)
+            .unwrap_or(window_end);
+
+        let chunk = rest[..cut].trim().to_string();
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+        rest = rest[cut..].trim_start().to_string();
+    }
+    chunks
+}
+
+/// One `{role, content}` message pulled out of a chat export.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+fn text_of(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        // Claude exports carry content as a list of `{type, text}` blocks.
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Object(o) => o
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn push_message(out: &mut Vec<ChatMessage>, role: &str, content: String) {
+    if !content.trim().is_empty() {
+        out.push(ChatMessage {
+            role: role.to_string(),
+            content: content.trim().to_string(),
+        });
+    }
+}
+
+/// Pull messages out of whatever JSON shape the export uses.
+///
+/// Handles a bare `{role, content}`, a list of them, a `{messages: [...]}`
+/// wrapper, Claude's `chat_messages` with block content, and a list of
+/// conversations containing either.
+///
+/// Records carrying a `record_type` are **entity-graph records from an
+/// export**, not messages, and are skipped here — they are restored
+/// separately by [`restore_graph_records`].
+pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
+    let mut messages = Vec::new();
+
+    if let Some(object) = data.as_object() {
+        if object.contains_key("record_type") {
+            return messages;
+        }
+        if let Some(chat_messages) = object.get("chat_messages").and_then(|v| v.as_array()) {
+            for message in chat_messages {
+                let role = message
+                    .get("sender")
+                    .or_else(|| message.get("role"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let content = message
+                    .get("content")
+                    .or_else(|| message.get("text"))
+                    .map(text_of)
+                    .unwrap_or_default();
+                push_message(&mut messages, role, content);
+            }
+            return messages;
+        }
+        if let Some(inner) = object.get("messages") {
+            return extract_messages(inner);
+        }
+        if object.contains_key("role") || object.contains_key("sender") {
+            return extract_messages(&serde_json::Value::Array(vec![data.clone()]));
+        }
+    }
+
+    if let Some(items) = data.as_array() {
+        for item in items {
+            let Some(object) = item.as_object() else {
+                continue;
+            };
+            if object.contains_key("record_type") {
+                continue;
+            }
+            if object.contains_key("messages") || object.contains_key("chat_messages") {
+                messages.extend(extract_messages(item));
+            } else if object.contains_key("role") || object.contains_key("sender") {
+                let role = object
+                    .get("role")
+                    .or_else(|| object.get("sender"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let content = object
+                    .get("content")
+                    .or_else(|| object.get("text"))
+                    .map(text_of)
+                    .unwrap_or_default();
+                push_message(&mut messages, role, content);
+            }
+        }
+    }
+
+    messages
+}
+
+/// Reduce messages to the content strings a mode asks for.
+pub fn filter_messages(messages: &[ChatMessage], mode: &str) -> Vec<String> {
+    match mode {
+        "assistant_messages" => messages
+            .iter()
+            .filter(|m| matches!(m.role.as_str(), "assistant" | "bot"))
+            .map(|m| m.content.clone())
+            .collect(),
+        "user_messages" => messages
+            .iter()
+            .filter(|m| matches!(m.role.as_str(), "user" | "human"))
+            .map(|m| m.content.clone())
+            .collect(),
+        "all_messages" => messages
+            .iter()
+            .map(|m| format!("[{}] {}", m.role, m.content))
+            .collect(),
+        // The whole exchange as one memory, rather than one per turn.
+        "conversations" => {
+            if messages.is_empty() {
+                Vec::new()
+            } else {
+                vec![messages
+                    .iter()
+                    .map(|m| format!("**{}:** {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")]
+            }
+        }
+        "summaries" => messages
+            .iter()
+            .filter(|m| m.role.to_lowercase().contains("summary"))
+            .map(|m| m.content.clone())
+            .collect(),
+        _ => messages.iter().map(|m| m.content.clone()).collect(),
+    }
+}
+
+/// Does this line open or close a fenced code block?
+fn is_fence(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+/// Parse an ATX heading into (level, title).
+fn heading_of(line: &str) -> Option<(usize, String)> {
+    let trimmed = line.trim_end();
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = trimmed[hashes..].trim_start();
+    if rest.is_empty() || !trimmed[hashes..].starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some((hashes, rest.trim_end_matches('#').trim().to_string()))
+}
+
+/// Split chat role markers out of markdown text.
+///
+/// Recognises `## Human`, `**Assistant:**`, `User:` and friends. An empty
+/// result is what `auto` mode uses to decide a file is a document rather than
+/// a chat log, so this doubles as the sniffer.
+pub fn split_chat_markdown(text: &str) -> Vec<ChatMessage> {
+    const ROLES: [&str; 6] = ["human", "user", "assistant", "claude", "bot", "system"];
+
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+
+    for line in text.lines() {
+        let bare = line
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .trim_start_matches("**")
+            .trim_end_matches("**")
+            .trim_end_matches(':')
+            .trim_end_matches("**")
+            .trim();
+        let matched = ROLES
+            .iter()
+            .find(|role| bare.eq_ignore_ascii_case(role))
+            .map(|role| role.to_string());
+
+        match matched {
+            Some(role) => {
+                if let Some((previous, lines)) = current.take() {
+                    push_message(&mut messages, &previous, lines.join("\n"));
+                }
+                current = Some((role, Vec::new()));
+            }
+            None => {
+                if let Some((_, lines)) = current.as_mut() {
+                    lines.push(line.to_string());
+                }
+            }
+        }
+    }
+    if let Some((role, lines)) = current {
+        push_message(&mut messages, &role, lines.join("\n"));
+    }
+    messages
+}
+
+/// Whether markdown text carries chat structure.
+pub fn looks_like_chat_markdown(text: &str) -> bool {
+    !split_chat_markdown(text).is_empty()
+}
+
+/// Split markdown into `(heading breadcrumb, body)` sections.
+///
+/// The breadcrumb is the section's ancestor headings joined with ` > `, so
+/// nested context travels with the chunk. Headings inside fenced code blocks
+/// are not headings. Heading-only sections are dropped.
+pub fn split_markdown_sections(text: &str) -> Vec<(Option<String>, String)> {
+    let mut sections = Vec::new();
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut heading: Option<String> = None;
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_fence = false;
+
+    for line in text.lines() {
+        if is_fence(line) {
+            in_fence = !in_fence;
+            lines.push(line.to_string());
+            continue;
+        }
+        match if in_fence { None } else { heading_of(line) } {
+            Some((level, title)) => {
+                let body = lines.join("\n").trim().to_string();
+                if !body.is_empty() {
+                    sections.push((heading.clone(), body));
+                }
+                lines.clear();
+                while stack.last().is_some_and(|(l, _)| *l >= level) {
+                    stack.pop();
+                }
+                stack.push((level, title));
+                heading = Some(
+                    stack
+                        .iter()
+                        .map(|(_, t)| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" > "),
+                );
+            }
+            None => lines.push(line.to_string()),
+        }
+    }
+    let body = lines.join("\n").trim().to_string();
+    if !body.is_empty() {
+        sections.push((heading, body));
+    }
+    sections
+}
+
+/// Chunk a document into `(content, section heading)` pairs.
+///
+/// Markdown keeps its heading breadcrumb both prepended to the content — so
+/// search sees the context — and separate, for the memory's metadata. The
+/// prefix comes out of the chunk budget, floored so a pathological heading
+/// cannot reduce the body budget to nothing.
+pub fn parse_document(
+    text: &str,
+    suffix: &str,
+    max_length: usize,
+) -> Vec<(String, Option<String>)> {
+    let mut pairs = Vec::new();
+    if matches!(suffix, "md" | "markdown") {
+        for (heading, body) in split_markdown_sections(text) {
+            let prefix = heading
+                .as_ref()
+                .map(|h| format!("{}\n\n", h))
+                .unwrap_or_default();
+            let budget = max_length.saturating_sub(prefix.chars().count()).max(100);
+            for chunk in chunk_text(&body, budget) {
+                pairs.push((format!("{}{}", prefix, chunk), heading.clone()));
+            }
+        }
+    } else {
+        for chunk in chunk_text(text, max_length) {
+            pairs.push((chunk, None));
+        }
+    }
+    pairs
+}
+
+/// Parse a chat export into chunked content strings.
+fn parse_chat(
+    raw: &str,
+    suffix: &str,
+    extract_mode: &str,
+    max_length: usize,
+) -> (Vec<String>, usize) {
+    let mut contents: Vec<String> = Vec::new();
+
+    match suffix {
+        "json" => {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(raw) {
+                let conversations = data.as_array().is_some_and(|items| {
+                    items.first().and_then(|f| f.as_object()).is_some_and(|o| {
+                        o.contains_key("chat_messages") || o.contains_key("messages")
+                    })
+                });
+                if conversations {
+                    for conversation in data.as_array().unwrap() {
+                        let messages = extract_messages(conversation);
+                        contents.extend(filter_messages(&messages, extract_mode));
+                    }
+                } else {
+                    contents.extend(filter_messages(&extract_messages(&data), extract_mode));
+                }
+            }
+        }
+        "jsonl" => {
+            for line in raw.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                // A malformed line is skipped rather than failing the import —
+                // one bad line in a long export should not lose the rest.
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                if value.get("record_type").is_some() {
+                    continue;
+                }
+                contents.extend(filter_messages(&extract_messages(&value), extract_mode));
+            }
+        }
+        _ => {
+            let messages = split_chat_markdown(raw);
+            contents = if messages.is_empty() {
+                // No structure found: the whole file is one memory.
+                if raw.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![raw.trim().to_string()]
+                }
+            } else {
+                filter_messages(&messages, extract_mode)
+            };
+        }
+    }
+
+    // `raw_entries` counts messages before chunking, which is what a caller
+    // wants to know about a chat export; for documents chunking *is* the
+    // extraction unit, so the two counts coincide there.
+    let raw_entries = contents.len();
+    let chunks = contents
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .flat_map(|c| chunk_text(c, max_length))
+        .collect();
+    (chunks, raw_entries)
+}
+
+/// Entity-graph records carried by an export.
+fn extract_graph_records(raw: &str, suffix: &str) -> Vec<serde_json::Value> {
+    let mut records = Vec::new();
+    match suffix {
+        "json" => {
+            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str(raw) {
+                records.extend(items.into_iter().filter(|i| i.get("record_type").is_some()));
+            }
+        }
+        "jsonl" => {
+            for line in raw.lines() {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    if value.get("record_type").is_some() {
+                        records.push(value);
+                    }
+                }
+            }
+        }
+        // A document never carries graph records.
+        _ => {}
+    }
+    records
+}
+
+/// Restore exported entity-graph records.
+///
+/// Entities first, so a link's endpoint check sees rows restored moments
+/// earlier. Entities upsert with the usual alias union-merge and re-derive
+/// their deterministic id from the name.
+///
+/// **Links only restore when both endpoints exist.** A link references the
+/// *original* memory id, and a chat re-import assigns new ones, so a link is
+/// restorable only into a database that still holds the referenced memory.
+/// Dangling links are skipped and counted rather than silently dropped or
+/// forced — a restore that quietly invented endpoints would be worse than one
+/// that reports what it could not do.
+pub fn restore_graph_records(
+    conn: &Connection,
+    records: &[serde_json::Value],
+) -> Result<ImportStats> {
+    let mut stats = ImportStats::default();
+
+    for record in records {
+        if record.get("record_type").and_then(|v| v.as_str()) != Some("entity") {
+            continue;
+        }
+        let Some(name) = record.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if name.trim().is_empty() {
+            continue;
+        }
+        let aliases = match record.get("aliases") {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|a| a.as_str().map(str::to_string))
+                .collect(),
+            // Exported as a JSON string in some shapes.
+            Some(serde_json::Value::String(raw)) => {
+                serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        upsert_entity(
+            conn,
+            &EntityInput {
+                name: name.to_string(),
+                kind: record
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string),
+                aliases,
+            },
+        )?;
+        stats.entities_restored += 1;
+    }
+
+    let exists = |table: &str, column: &str, id: &str| -> Result<bool> {
+        let found: Option<i64> = conn
+            .query_row(
+                &format!("SELECT 1 FROM {} WHERE {} = ?", table, column),
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    };
+
+    for record in records {
+        match record.get("record_type").and_then(|v| v.as_str()) {
+            Some("memory_entity") => {
+                let (Some(memory_id), Some(entity_id)) = (
+                    record.get("memory_id").and_then(|v| v.as_str()),
+                    record.get("entity_id").and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                if !exists("memories", "id", memory_id)? || !exists("entities", "id", entity_id)? {
+                    stats.links_skipped_dangling += 1;
+                    continue;
+                }
+                if crate::entity::link_memory_entity(conn, memory_id, entity_id)? {
+                    stats.links_restored += 1;
+                }
+            }
+            Some("entity_relation") => {
+                let (Some(subject), Some(relation), Some(object)) = (
+                    record.get("subject_entity_id").and_then(|v| v.as_str()),
+                    record.get("relation").and_then(|v| v.as_str()),
+                    record.get("object_entity_id").and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                if !exists("entities", "id", subject)? || !exists("entities", "id", object)? {
+                    stats.relations_skipped_dangling += 1;
+                    continue;
+                }
+                if upsert_entity_relation(conn, subject, relation, object)? {
+                    stats.relations_restored += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(stats)
+}
+
+/// Import already-read content.
+///
+/// Shared by the file and directory entry points. `raw` has been read,
+/// `hash` computed, and the destination validated by the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn import_content(
+    conn: &Connection,
+    raw: &str,
+    suffix: &str,
+    filename: &str,
+    hash: &str,
+    category: &str,
+    tags: &[String],
+    extract_mode: &str,
+    max_length: usize,
+    kind: ImportKind,
+) -> Result<ImportOutcome> {
+    // Another caller may have imported the same content since the caller's
+    // early check.
+    if let Some(import_id) = existing_import(conn, hash)? {
+        return Ok(ImportOutcome::Skipped {
+            reason: "already_imported".to_string(),
+            file: filename.to_string(),
+            import_id,
+        });
+    }
+
+    // `.json`/`.jsonl` are always chat exports; markdown and text are sniffed
+    // in auto mode, so chat-shaped markdown keeps importing as chat.
+    let effective = match (suffix, kind) {
+        ("json" | "jsonl", _) => ImportKind::Chat,
+        (_, ImportKind::Auto) => {
+            if looks_like_chat_markdown(raw) {
+                ImportKind::Chat
+            } else {
+                ImportKind::Document
+            }
+        }
+        (_, explicit) => explicit,
+    };
+
+    let graph_records = extract_graph_records(raw, suffix);
+
+    let ParsedImport {
+        chunks,
+        raw_entries,
+        source,
+        category,
+    } = match effective {
+        ImportKind::Document => {
+            let chunks = parse_document(raw, suffix, max_length);
+            let raw_entries = chunks.len();
+            ParsedImport {
+                chunks,
+                raw_entries,
+                source: DOCUMENT_SOURCE,
+                // A document left under the chat-shaped default category gets
+                // the document one instead; an explicit category is respected.
+                category: if category.is_empty() || category == CHAT_SOURCE {
+                    DOCUMENT_CATEGORY.to_string()
+                } else {
+                    category.to_string()
+                },
+            }
+        }
+        _ => {
+            let (contents, raw_entries) = parse_chat(raw, suffix, extract_mode, max_length);
+            ParsedImport {
+                chunks: contents.into_iter().map(|c| (c, None)).collect(),
+                raw_entries,
+                source: CHAT_SOURCE,
+                category: category.to_string(),
+            }
+        }
+    };
+
+    let now = Utc::now().to_rfc3339();
+    let import_id = format!("imp_{}", uuid::Uuid::new_v4().simple());
+    let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+
+    let mut created = 0;
+    for (chunk_index, (content, section)) in chunks.iter().enumerate() {
+        let mut metadata = serde_json::json!({
+            "import_id": import_id,
+            "filename": filename,
+        });
+        if let Some(section) = section {
+            metadata["section"] = serde_json::json!(section);
+        }
+
+        // `doc_id`/`chunk_index` group every chunk of this file in source
+        // order, which is what lets neighbour expansion find a hit's siblings
+        // without re-parsing anything.
+        conn.execute(
+            "INSERT OR IGNORE INTO memories
+                (id, content, category, tags, source, metadata, created_at, updated_at,
+                 doc_id, chunk_index)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                format!("mem_{}", uuid::Uuid::new_v4().simple()),
+                content,
+                category,
+                tags_json,
+                source,
+                metadata.to_string(),
+                now,
+                now,
+                import_id,
+                chunk_index as i64,
+            ],
+        )?;
+        created += 1;
+    }
+
+    let mut stats = if graph_records.is_empty() {
+        ImportStats::default()
+    } else {
+        restore_graph_records(conn, &graph_records)?
+    };
+    stats.memories_created = created;
+    stats.raw_entries = raw_entries;
+
+    conn.execute(
+        "INSERT INTO chat_imports (import_id, filename, hash, imported_at, stats)
+         VALUES (?, ?, ?, ?, ?)",
+        params![
+            import_id,
+            filename,
+            hash,
+            now,
+            serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string())
+        ],
+    )?;
+
+    Ok(ImportOutcome::Imported {
+        import_id,
+        kind: effective,
+        file: filename.to_string(),
+        stats,
+    })
+}
+
+fn existing_import(conn: &Connection, hash: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT import_id FROM chat_imports WHERE hash = ?",
+        params![hash],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Import one already-validated file.
+///
+/// The dedup hash is computed from the file's bytes and checked **before** the
+/// text is read or parsed, so re-importing an unchanged file costs a hash and
+/// a lookup rather than a full parse.
+#[allow(clippy::too_many_arguments)]
+pub fn import_file(
+    conn: &Connection,
+    path: &std::path::Path,
+    category: &str,
+    tags: &[String],
+    extract_mode: &str,
+    max_length: usize,
+    kind: ImportKind,
+) -> Result<ImportOutcome> {
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let suffix = suffix_of(path);
+
+    if kind == ImportKind::Document && !DOCUMENT_SUFFIXES.contains(&suffix.as_str()) {
+        return Ok(ImportOutcome::Failed {
+            file: filename,
+            reason: format!(
+                "document import does not support .{}: use .md, .markdown or .txt",
+                suffix
+            ),
+        });
+    }
+
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Ok(ImportOutcome::Failed {
+                file: filename,
+                reason: e.to_string(),
+            })
+        }
+    };
+    let hash = hash_bytes(&bytes);
+
+    if let Some(import_id) = existing_import(conn, &hash)? {
+        return Ok(ImportOutcome::Skipped {
+            reason: "already_imported".to_string(),
+            file: filename,
+            import_id,
+        });
+    }
+
+    let raw = String::from_utf8_lossy(&bytes).to_string();
+    import_content(
+        conn,
+        &raw,
+        &suffix,
+        &filename,
+        &hash,
+        category,
+        tags,
+        extract_mode,
+        max_length,
+        kind,
+    )
+}
+
+/// Import one file named by a caller.
+///
+/// Validates the path against the import roots — containment before existence
+/// — then delegates to [`import_file`].
+pub fn import_chat(conn: &Connection, input: &ChatImportInput) -> Result<ImportOutcome> {
+    let path = match validate_import_file(&input.file_path) {
+        Ok(path) => path,
+        Err(e) => {
+            return Ok(ImportOutcome::Failed {
+                file: input.file_path.clone(),
+                reason: e.to_string(),
+            })
+        }
+    };
+    import_file(
+        conn,
+        &path,
+        &input.category,
+        &input.tags,
+        &input.extract_mode,
+        input
+            .max_length
+            .clamp(IMPORT_MAX_LENGTH_MIN, IMPORT_MAX_LENGTH_MAX),
+        input.kind,
+    )
+}
+
+/// Import every supported file in a directory.
+///
+/// Files are visited in sorted order so a run is reproducible. An
+/// unsupported extension is not an error — a notes folder holding a stray
+/// `.png` should import the markdown beside it rather than refusing the lot —
+/// so those are skipped silently and never counted as seen.
+pub fn import_directory(conn: &Connection, input: &BulkImportDirInput) -> Result<BulkImportResult> {
+    let root = match validate_import_dir(&input.directory) {
+        Ok(root) => root,
+        Err(e) => {
+            return Ok(BulkImportResult {
+                files_failed: 1,
+                results: vec![ImportOutcome::Failed {
+                    file: input.directory.clone(),
+                    reason: e.to_string(),
+                }],
+                ..Default::default()
+            })
+        }
+    };
+
+    let mut files = Vec::new();
+    collect_files(&root, input.recursive, &mut files);
+    files.sort();
+
+    let max_length = input
+        .max_length
+        .clamp(IMPORT_MAX_LENGTH_MIN, IMPORT_MAX_LENGTH_MAX);
+    let mut result = BulkImportResult::default();
+    for path in files {
+        result.files_seen += 1;
+        let outcome = import_file(
+            conn,
+            &path,
+            &input.category,
+            &input.tags,
+            &input.extract_mode,
+            max_length,
+            input.kind,
+        )?;
+        match &outcome {
+            ImportOutcome::Imported { stats, .. } => {
+                result.files_imported += 1;
+                result.memories_created += stats.memories_created;
+            }
+            ImportOutcome::Skipped { .. } => result.files_skipped += 1,
+            ImportOutcome::Failed { .. } => result.files_failed += 1,
+        }
+        result.results.push(outcome);
+    }
+    Ok(result)
+}
+
+fn collect_files(dir: &std::path::Path, recursive: bool, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if recursive {
+                collect_files(&path, recursive, out);
+            }
+        } else if SUPPORTED_SUFFIXES.contains(&suffix_of(&path).as_str()) {
+            out.push(path);
+        }
+    }
+}
