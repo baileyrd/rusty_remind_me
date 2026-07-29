@@ -3,6 +3,7 @@ pub mod capture;
 pub mod db;
 pub mod entity;
 pub mod expansion;
+pub mod export;
 pub mod fts;
 pub mod models;
 pub mod normalize;

@@ -610,3 +610,56 @@ pub struct DecomposeBatchResult {
     pub memories: Vec<UndecomposedCapture>,
     pub total_undecomposed: usize,
 }
+
+/// Serialisation format for an export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    /// One indented JSON array.
+    #[default]
+    Json,
+    /// One JSON record per line.
+    Jsonl,
+}
+
+/// Input model for `remind_me_export_memories`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExportInput {
+    #[serde(default)]
+    pub format: ExportFormat,
+    pub category: Option<String>,
+    /// A memory must carry *all* of these tags to be exported.
+    pub tags: Option<Vec<String>>,
+    /// Destination file. Must be inside the allowed export roots. When omitted,
+    /// the payload is returned inline.
+    pub file_path: Option<String>,
+    /// Include the entity graph as `record_type`-tagged records. Defaults to
+    /// true — a backup should be complete.
+    #[serde(default = "default_include_graph")]
+    pub include_graph: bool,
+}
+
+fn default_include_graph() -> bool {
+    true
+}
+
+/// Outcome of an export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportResult {
+    /// Memory records only; the graph counts are reported separately.
+    pub exported: usize,
+    pub format: ExportFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entities: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relations: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<usize>,
+    /// The payload, when no `file_path` was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
