@@ -1,11 +1,12 @@
 use crate::expansion::{self, MemorySearchResponse};
 use crate::fts::sanitize_fts_query;
 use crate::models::{
-    AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, Memory, MemoryAddInput,
-    MemoryListInput, MemoryListResult, MemorySearchInput, MemorySearchResult, MemoryUpdateInput,
-    ReclassifyBatchInput, ReclassifyBatchResult, ReclassifyInput, ReclassifyResult,
-    RetrievalStrategy, UnclassifiedMemory, UpdateOutcome, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
-    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNCLASSIFIED,
+    AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, ExtractBatchInput,
+    ExtractBatchResult, Memory, MemoryAddInput, MemoryListInput, MemoryListResult,
+    MemorySearchInput, MemorySearchResult, MemoryUpdateInput, ReclassifyBatchInput,
+    ReclassifyBatchResult, ReclassifyInput, ReclassifyResult, RetrievalStrategy, UnannotatedMemory,
+    UnclassifiedMemory, UpdateOutcome, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, LIST_LIMIT_MAX,
+    LIST_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNCLASSIFIED,
 };
 use crate::retrieval::{choose_rrf_weights, rank_rrf, trim_by_token_budget};
 use crate::vitality::{
@@ -580,4 +581,72 @@ pub fn search_with_expansions(
     crate::vitality::record_accesses(conn, &ids)?;
 
     Ok(response)
+}
+
+/// Which memories still need a triple or entity mentions.
+///
+/// A memory qualifies when it is live, is **not a raw dialog**, has no SPO
+/// triple at all, and has no entity links at all.
+///
+/// Two parts of that are easy to get wrong. The `dialog` exclusion is not
+/// cosmetic: a captured transcript's facts are meant to come out through
+/// `decompose`, so without it every captured conversation would flood this
+/// backlog. And a memory needs to be missing *both* signals — one that has
+/// entities but no triple is already considered annotated, so an `OR` here
+/// would keep re-offering work that is done.
+fn unannotated_where() -> &'static str {
+    "m.superseded_by IS NULL
+     AND m.deleted_at IS NULL
+     AND m.category != 'dialog'
+     AND m.subject IS NULL AND m.predicate IS NULL AND m.object IS NULL
+     AND NOT EXISTS (SELECT 1 FROM memory_entities me WHERE me.memory_id = m.id)"
+}
+
+/// A page of memories awaiting extraction, newest first.
+///
+/// The read half of the annotation loop: `remind_me_annotate` writes triples
+/// and mentions, and this is what tells a caller which memories still need
+/// them. Without it, annotation could only be applied to memories the caller
+/// already happened to know about.
+pub fn unannotated_batch(
+    conn: &Connection,
+    input: &ExtractBatchInput,
+) -> Result<ExtractBatchResult> {
+    let batch_size = input.batch_size.clamp(EXTRACT_BATCH_MIN, EXTRACT_BATCH_MAX);
+    let predicate = unannotated_where();
+
+    let total: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM memories m WHERE {}", predicate),
+        [],
+        |r| r.get(0),
+    )?;
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT m.id, m.content, m.category, m.memory_type, m.tags
+           FROM memories m
+          WHERE {}
+          ORDER BY m.created_at DESC
+          LIMIT ?",
+        predicate
+    ))?;
+    let memories: Vec<UnannotatedMemory> = stmt
+        .query_map(params![batch_size as i64], |row| {
+            let content: String = row.get("content")?;
+            let tags_json: String = row.get("tags")?;
+            Ok(UnannotatedMemory {
+                id: row.get("id")?,
+                // By characters, not bytes — a multi-byte character on the
+                // boundary would panic a byte slice.
+                content_snippet: content.chars().take(500).collect(),
+                category: row.get("category")?,
+                memory_type: row.get("memory_type")?,
+                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+            })
+        })?
+        .collect::<Result<_>>()?;
+
+    Ok(ExtractBatchResult {
+        memories,
+        total_unannotated: total.max(0) as usize,
+    })
 }

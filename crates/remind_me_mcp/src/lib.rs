@@ -1,10 +1,11 @@
 use remind_me_core::{
     backup, capture, db::queries, entity, normalize, stats, vitality, wiki, wiki_import,
-    AnnotateInput, AutoCaptureInput, Database, EntityInput, EntityTraverseInput, FeedbackInput,
-    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
-    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN,
-    NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    AnnotateInput, AutoCaptureInput, Database, EntityInput, EntityTraverseInput, ExtractBatchInput,
+    FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput,
+    NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, EXTRACT_BATCH_MAX,
+    EXTRACT_BATCH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
+    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -258,6 +259,16 @@ impl McpServer {
                                         "kind": { "type": "string" }
                                     },
                                     "required": ["name"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_extract_batch",
+                                "description": "Fetch memories that have no structured triple and no entity mentions yet, so they can be annotated with remind_me_annotate. Raw captured dialogs are excluded — their facts come out through remind_me_decompose instead.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "batch_size": { "type": "integer", "default": 20, "minimum": EXTRACT_BATCH_MIN, "maximum": EXTRACT_BATCH_MAX }
+                                    }
                                 }
                             },
                             {
@@ -656,6 +667,18 @@ impl McpServer {
                             },
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_extract_batch" => {
+                        let input: ExtractBatchInput = serde_json::from_value(args)
+                            .unwrap_or(ExtractBatchInput { batch_size: 20 });
+                        match queries::unannotated_batch(&conn, &input) {
+                            Ok(batch) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&batch).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Extract batch error: {}", e) }] })
                             }
                         }
                     }
