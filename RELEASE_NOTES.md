@@ -2,6 +2,28 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Database backup (#8)
+
+### Added
+- `remind_me_backup` — a WAL-safe online backup written to `backups/` beside the
+  database file, with the oldest pruned beyond a retention count of 10.
+- Uses SQLite's online backup API via `rusqlite::backup`, not a file copy. The
+  database runs in WAL mode, so copying the `.db` alone would miss anything
+  still in the `-wal` and could capture a torn page mid-write.
+- 10 tests, including a point-in-time snapshot check, retention pruning the
+  oldest, and successive backups not colliding on filename.
+
+### Notes
+- The tool takes **no parameters**. The issue called for confining a
+  caller-supplied destination path; the reference has no such input, so there is
+  nothing to confine — the arbitrary-write concern does not arise. The internal
+  `label` is still slugged to filename-safe characters, with a test, so that
+  stays true if a label is ever plumbed through.
+- Backing up an in-memory database is refused with an explanation rather than a
+  raw SQLite error, since there is no on-disk location to write beside.
+- `rusqlite` gains its `backup` feature. Not a new dependency — a feature flag
+  on one already in the workspace.
+
 ## 2026-07-29 — Entity annotation, and three entity-layer bugs (#7)
 
 ### Added
