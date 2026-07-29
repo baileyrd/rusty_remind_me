@@ -2,6 +2,45 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Access recording (#41)
+
+### Fixed
+- **Nothing recorded retrieval, so two thirds of the vitality model were
+  inert.** `access_count` and `accessed_at` were read everywhere and written
+  nowhere, so every memory was permanently frozen at its insert-time values.
+  Concretely:
+  - the `sqrt(access_count + 1)` frequency boost was always 1.0 — a memory
+    retrieved a thousand times ranked exactly like one never retrieved;
+  - bridge protection keys on ten accesses, so it could never fire. #24's test
+    for it passed only because it set the column by hand;
+  - dormancy aged a memory from when it was *written*. A memory in daily use
+    decayed exactly as though abandoned on day one, and eventually dropped out
+    of default search.
+
+  That last one is the sharp edge: #24 made dormancy filtering real but left it
+  measuring the wrong clock. This is the other half.
+
+### Changed
+- Search now increments `access_count`, stamps `accessed_at`, and refreshes the
+  stored `vitality` and `status`. **`status` had no writer at all before this.**
+- Frequently retrieved memories now survive dormancy filtering where they
+  previously did not, so an active vault will return *more* by default than it
+  did after #24.
+
+### Notes
+Only direct hits are recorded. #35's expansion sections are a discovery aid
+surfaced by adjacency, not answers to the query, and recording them would
+inflate the vitality of every neighbour on every expanded search. Recording also
+runs after the expansions are built, so an expansion describes the store as the
+caller found it.
+
+`search_memories` stays a pure read; the write lives in `search_with_expansions`
+alongside co-retrieval reinforcement. `remind_me_get` does not record an access
+— matching the reference, where search is the only caller.
+
+One `SELECT` and one prepared `UPDATE` reused across rows, rather than a round
+trip per result.
+
 ## 2026-07-29 — Search expansions (#35)
 
 ### Added

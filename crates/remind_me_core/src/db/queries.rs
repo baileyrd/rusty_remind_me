@@ -551,7 +551,14 @@ pub fn search_with_expansions(
 
     expansion::record_co_retrieval(conn, &ids)?;
 
-    Ok(MemorySearchResponse {
+    // Direct hits only. Expansion results are a discovery aid surfaced by
+    // adjacency, not answers to the query, and recording them would inflate
+    // the vitality of every neighbour on every expanded search.
+    //
+    // Ordered after the expansions are built so they read the pre-access state:
+    // recording rewrites `vitality` and `accessed_at`, and an expansion should
+    // describe the store as the caller found it.
+    let response = MemorySearchResponse {
         related_via_entities: if input.expand_entities {
             Some(expansion::expand_via_entities(conn, &ids)?)
         } else {
@@ -568,5 +575,9 @@ pub fn search_with_expansions(
             None
         },
         memories,
-    })
+    };
+
+    crate::vitality::record_accesses(conn, &ids)?;
+
+    Ok(response)
 }
