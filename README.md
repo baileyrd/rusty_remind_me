@@ -13,7 +13,7 @@
 - **Forward-Compatible Model Context Protocol (MCP) Server**: Stdio JSON-RPC MCP server with dynamic protocol version negotiation (supporting `2024-11-05` through upcoming 2026 releases), resources, prompts, dynamic tool change notifications (`listChanged`), and tool execution.
 - **Automated Client Setup**: Built-in `configure` command & scripts for 1-click MCP setup across **Claude Desktop**, **Antigravity**, **Cursor**, and **Codex**.
 - **REST API Server**: Async HTTP daemon (`rusty_http` / `tokio`) exposing endpoints for health checks, memory storage, FTS5 retrieval, and stats.
-- **Knowledge Graph Entities**: Canonical entity deduplication, alias resolution, and 1-hop relation linking.
+- **Knowledge Graph Entities**: Canonical entity deduplication, alias resolution, and relation traversal up to 3 hops.
 - **Markdown Wiki Synthesis**: Topic-based wiki page compilation, queryable topic search, and
   bulk import of Markdown directories (`wiki-import`) — the ingestion path for
   [`dbs export-wiki`](https://github.com/baileyrd/Daily-Backup-System).

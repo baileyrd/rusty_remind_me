@@ -1,8 +1,9 @@
 use remind_me_core::{
     backup, db::queries, entity, stats, vitality, wiki, wiki_import, AnnotateInput, Database,
-    EntityInput, FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
-    MemoryUpdateInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    EntityInput, EntityTraverseInput, FeedbackInput, MemoryAddInput, MemoryListInput,
+    MemorySearchInput, MemoryUpdateInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, RECLASSIFY_BATCH_MAX,
+    RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -205,6 +206,20 @@ impl McpServer {
                                     "properties": {
                                         "name": { "type": "string" },
                                         "kind": { "type": "string" }
+                                    },
+                                    "required": ["name"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_entity_traverse",
+                                "description": "Multi-hop traversal of the typed entity-relation graph from a starting entity. Unlike remind_me_entity (one entity's direct facts) this follows entity_relations edges in both directions, so it answers questions that chain relations rather than co-mention.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string", "description": "Entity name or alias to start from (case/whitespace-insensitive)", "minLength": 1, "maxLength": 200 },
+                                        "hops": { "type": "integer", "default": 1, "minimum": 1, "maximum": 3, "description": "Maximum traversal depth. 1 = direct relations only." },
+                                        "relation": { "type": "string", "maxLength": 200, "description": "Optional: only follow edges whose relation label matches exactly" },
+                                        "cap": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100, "description": "Max number of relation edges to return" }
                                     },
                                     "required": ["name"]
                                 }
@@ -549,6 +564,24 @@ impl McpServer {
                             },
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_entity_traverse" => {
+                        let input: Result<EntityTraverseInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(traverse_input) => {
+                                match entity::traverse_from_name(&conn, &traverse_input) {
+                                    Ok(result) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Entity traverse error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity traverse input: {}", e) }] })
                             }
                         }
                     }

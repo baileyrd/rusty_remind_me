@@ -1,6 +1,7 @@
 use crate::models::EntityInput;
 use chrono::Utc;
-use rusqlite::{params, Connection, Result};
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +195,177 @@ pub fn get_entity_by_name(conn: &Connection, name: &str) -> Result<Option<Entity
     get_entity_by_id(conn, &entity_id(name))
 }
 
+/// Resolve a name *or alias* to its canonical entity row.
+///
+/// Two stages, mirroring the reference:
+///
+/// 1. **Derived-id lookup.** An indexed primary-key hit whenever the query is
+///    the entity's canonical name, in any casing or spacing.
+/// 2. **Fallback scan.** A canonical-name match first — defensive, since ids are
+///    derived from names, so this only fires for a row whose stored name has
+///    drifted from its id — then a match against the `aliases` array.
+///
+/// A canonical-name match anywhere in the scan beats an alias match found
+/// earlier, because an alias is a nickname and the canonical name is the thing
+/// itself. That is why the alias hit is held rather than returned immediately.
+pub fn resolve_entity(conn: &Connection, query: &str) -> Result<Option<Entity>> {
+    if let Some(entity) = get_entity_by_id(conn, &entity_id(query))? {
+        return Ok(Some(entity));
+    }
+
+    let normalized = normalize_entity_name(query);
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let mut stmt = conn.prepare(ENTITY_SELECT)?;
+    let rows = stmt.query_map([], parse_entity_row)?;
+    let mut alias_hit: Option<Entity> = None;
+    for row in rows {
+        let entity = row?;
+        if normalize_entity_name(&entity.name) == normalized {
+            return Ok(Some(entity));
+        }
+        if alias_hit.is_none()
+            && entity
+                .aliases
+                .iter()
+                .any(|a| normalize_entity_name(a) == normalized)
+        {
+            alias_hit = Some(entity);
+        }
+    }
+    Ok(alias_hit)
+}
+
+/// Maximum relation edges a traversal returns, across all hops.
+pub const RELATION_TRAVERSAL_CAP: usize = 20;
+/// Bounds on `hops`, matching the reference's `EntityTraverseInput`.
+pub const TRAVERSE_HOPS_MIN: u32 = 1;
+pub const TRAVERSE_HOPS_MAX: u32 = 3;
+
+/// One typed edge of the entity-relation graph, tagged with the hop that found
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationEdge {
+    pub subject_entity_id: String,
+    pub subject_name: String,
+    pub subject_kind: Option<String>,
+    pub relation: String,
+    pub object_entity_id: String,
+    pub object_name: String,
+    pub object_kind: Option<String>,
+    pub hop: u32,
+}
+
+/// Breadth-first walk of the typed entity-relation graph.
+///
+/// Follows `entity_relations` edges **in both directions**, so a traversal from
+/// "Bailey" surfaces relations Bailey is the subject of *and* relations naming
+/// Bailey as the object.
+///
+/// This is a different thing from expanding a search via `memory_entities`:
+/// that is 1-hop co-mention — two memories happen to name the same entity —
+/// whereas this follows typed subject/relation/object triples, which is what
+/// lets a question chain ("who introduced me to the person who recommended
+/// this") actually resolve.
+///
+/// # Termination
+///
+/// Each hop queries only the entities *newly discovered* by the previous hop;
+/// the seed set never re-enters a frontier. So an edge is never refetched once
+/// both its endpoints have been visited, and a cycle simply produces an empty
+/// next frontier. `seen_edges` exists for a narrower reason — one edge can be
+/// returned twice within a single hop when both its endpoints sit in the same
+/// frontier — not to bound the walk.
+pub fn traverse_entities(
+    conn: &Connection,
+    seed_entity_ids: &[String],
+    hops: u32,
+    relation: Option<&str>,
+    cap: usize,
+) -> Result<Vec<RelationEdge>> {
+    let mut seen_entities: std::collections::HashSet<String> =
+        seed_entity_ids.iter().cloned().collect();
+    let mut frontier: Vec<String> = seed_entity_ids.to_vec();
+    let mut seen_edges = std::collections::HashSet::new();
+    let mut edges = Vec::new();
+
+    for hop in 1..=hops {
+        if frontier.is_empty() || edges.len() >= cap {
+            break;
+        }
+
+        let placeholders = vec!["?"; frontier.len()].join(",");
+        let relation_clause = if relation.is_some() {
+            " AND r.relation = ?"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT r.id, r.subject_entity_id, r.relation, r.object_entity_id,
+                    s.name AS subject_name, s.kind AS subject_kind,
+                    o.name AS object_name, o.kind AS object_kind
+               FROM entity_relations r
+               JOIN entities s ON s.id = r.subject_entity_id
+               JOIN entities o ON o.id = r.object_entity_id
+              WHERE (r.subject_entity_id IN ({p}) OR r.object_entity_id IN ({p})){rel}
+              ORDER BY r.created_at",
+            p = placeholders,
+            rel = relation_clause
+        );
+
+        // The frontier is bound twice — once per side of the OR.
+        let mut bindings: Vec<Value> = frontier
+            .iter()
+            .chain(frontier.iter())
+            .map(|id| Value::Text(id.clone()))
+            .collect();
+        if let Some(label) = relation {
+            bindings.push(Value::Text(label.to_string()));
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let found: Vec<(String, RelationEdge)> = stmt
+            .query_map(params_from_iter(bindings), |row| {
+                Ok((
+                    row.get::<_, String>("id")?,
+                    RelationEdge {
+                        subject_entity_id: row.get("subject_entity_id")?,
+                        subject_name: row.get("subject_name")?,
+                        subject_kind: row.get("subject_kind")?,
+                        relation: row.get("relation")?,
+                        object_entity_id: row.get("object_entity_id")?,
+                        object_name: row.get("object_name")?,
+                        object_kind: row.get("object_kind")?,
+                        hop,
+                    },
+                ))
+            })?
+            .collect::<Result<_>>()?;
+        drop(stmt);
+
+        let mut next_frontier = Vec::new();
+        for (edge_id, edge) in found {
+            if !seen_edges.insert(edge_id) {
+                continue;
+            }
+            if edges.len() >= cap {
+                break;
+            }
+            for neighbour in [&edge.subject_entity_id, &edge.object_entity_id] {
+                if seen_entities.insert(neighbour.clone()) {
+                    next_frontier.push(neighbour.clone());
+                }
+            }
+            edges.push(edge);
+        }
+        frontier = next_frontier;
+    }
+
+    Ok(edges)
+}
+
 /// Rewrite entity ids that predate [`entity_id`]'s current derivation.
 ///
 /// Returns the number of rows rewritten. Idempotent: a database whose ids
@@ -278,4 +450,110 @@ pub fn renormalize_entity_ids(conn: &Connection) -> Result<usize> {
     }
 
     Ok(rewritten)
+}
+
+/// A summary of one entity, as it appears in a traversal payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityRef {
+    pub id: String,
+    pub name: String,
+    pub kind: Option<String>,
+}
+
+/// The payload of `remind_me_entity_traverse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityTraverseResult {
+    pub found: bool,
+    /// Echoed back when nothing resolved, so a caller can see what was tried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity: Option<EntityRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hops: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<RelationEdge>,
+    /// Every entity touched, the seed first. De-duplicated in discovery order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<EntityRef>,
+}
+
+/// Resolve the start node, walk the relation graph, and collect the entities
+/// touched.
+///
+/// `hops` and `cap` are **clamped** rather than rejected: the reference bounds
+/// them in its input schema, and a caller that ignores the schema should get a
+/// bounded walk rather than an error.
+///
+/// An unresolvable start node is `found: false` with a message, not an error —
+/// "no such entity" is an ordinary answer to this question.
+pub fn traverse_from_name(
+    conn: &Connection,
+    input: &crate::models::EntityTraverseInput,
+) -> Result<EntityTraverseResult> {
+    let seed = match resolve_entity(conn, &input.name)? {
+        Some(entity) => entity,
+        None => {
+            return Ok(EntityTraverseResult {
+                found: false,
+                query: Some(input.name.clone()),
+                message: Some(format!("No entity found matching {:?}.", input.name)),
+                entity: None,
+                hops: None,
+                edges: Vec::new(),
+                entities: Vec::new(),
+            })
+        }
+    };
+
+    let hops = input.hops.clamp(TRAVERSE_HOPS_MIN, TRAVERSE_HOPS_MAX);
+    let cap = input.cap.clamp(1, 100);
+    let edges = traverse_entities(
+        conn,
+        std::slice::from_ref(&seed.id),
+        hops,
+        input.relation.as_deref(),
+        cap,
+    )?;
+
+    let mut entities = vec![EntityRef {
+        id: seed.id.clone(),
+        name: seed.name.clone(),
+        kind: seed.kind.clone(),
+    }];
+    let mut seen: std::collections::HashSet<String> = [seed.id.clone()].into_iter().collect();
+    for edge in &edges {
+        for (id, name, kind) in [
+            (
+                &edge.subject_entity_id,
+                &edge.subject_name,
+                &edge.subject_kind,
+            ),
+            (&edge.object_entity_id, &edge.object_name, &edge.object_kind),
+        ] {
+            if seen.insert(id.clone()) {
+                entities.push(EntityRef {
+                    id: id.clone(),
+                    name: name.clone(),
+                    kind: kind.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(EntityTraverseResult {
+        found: true,
+        query: None,
+        message: None,
+        entity: Some(EntityRef {
+            id: seed.id,
+            name: seed.name,
+            kind: seed.kind,
+        }),
+        hops: Some(hops),
+        edges,
+        entities,
+    })
 }

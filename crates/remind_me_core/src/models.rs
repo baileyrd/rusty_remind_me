@@ -300,3 +300,27 @@ pub struct MemorySearchResult {
     pub vec_score: Option<f64>,
     pub vitality_score: Option<f64>,
 }
+
+/// Input model for `remind_me_entity_traverse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityTraverseInput {
+    /// Entity name **or alias** to start from; casing and spacing are ignored.
+    pub name: String,
+    /// Traversal depth. Clamped to 1..=3, matching the reference's bounds.
+    #[serde(default = "default_traverse_hops")]
+    pub hops: u32,
+    /// Only follow edges whose relation label matches this exactly.
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// Maximum edges returned across all hops. Clamped to 1..=100.
+    #[serde(default = "default_traverse_cap")]
+    pub cap: usize,
+}
+
+fn default_traverse_hops() -> u32 {
+    1
+}
+
+fn default_traverse_cap() -> usize {
+    crate::entity::RELATION_TRAVERSAL_CAP
+}

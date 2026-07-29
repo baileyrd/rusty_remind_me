@@ -2,6 +2,40 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Entity relation traversal (#16)
+
+### Added
+- `remind_me_entity_traverse` — walks the typed entity-relation graph outward
+  from a starting entity, in **both directions**, so a traversal from "Bailey"
+  surfaces relations Bailey is the subject of and relations naming Bailey as the
+  object. Takes `name`, `hops` (1–3), an exact `relation` filter, and `cap`
+  (1–100, default 20). The graph could be built before this and never queried.
+- Start-node resolution by canonical name **or alias**, ignoring casing and
+  spacing: a deterministic-id lookup first, then a scan that prefers a canonical
+  name match over an alias match.
+
+### Changed
+- README claimed "1-hop relation linking". The reference allows three, and so
+  does this.
+
+### Notes
+This is a different thing from search's `expand_entities`, which is 1-hop
+co-mention — two memories happening to name the same entity. Traversal follows
+typed subject/relation/object triples, which is what lets a chained question
+("who introduced me to the person who recommended this") resolve at all.
+
+Termination on cyclic graphs falls out of the breadth-first shape rather than
+needing a guard: each hop queries only the entities newly discovered by the
+previous one, so a cycle produces an empty next frontier and stops.
+
+`hops` and `cap` are clamped rather than rejected — a caller that ignores the
+schema gets a bounded walk instead of an error — and an unresolvable start node
+is `found: false` with a message, since "no such entity" is an ordinary answer.
+
+Nothing in this crate writes `entity_relations` yet; the tools that will
+(`decompose`, the relation half of `annotate`) are still to come, so on a store
+built only through `remind_me_add` every traversal returns no edges.
+
 ## 2026-07-29 — Entity ids now match remind_me's (#36)
 
 ### Fixed
