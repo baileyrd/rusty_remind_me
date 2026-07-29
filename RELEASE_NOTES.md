@@ -2,6 +2,37 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Entity ids now match remind_me's (#36)
+
+### Fixed
+- **Entity ids could never converge with `remind_me`'s.** An entity's id is a
+  content hash precisely so that two machines recording the same entity land on
+  the same row. Ours diverged from the reference on three counts at once — we
+  prefixed `ent_`, kept all 64 hex characters instead of the first 12, and
+  normalised the name by trimming only. The reference collapses internal
+  whitespace too, so `"Bailey  Robertson"` and `"Bailey Robertson"` were two
+  entities here and one there. An entity created in either system was invisible
+  to the other.
+
+### Changed
+- **Existing entity ids are rewritten on open.** `entities.id` and every
+  reference to it — `memory_entities.entity_id`, and both
+  `entity_relations` endpoint columns — are repointed. Nothing cascades here
+  (the reference declares no foreign key, so sync can deliver rows out of
+  order), so the rewrite is explicit; a link left behind would dangle silently.
+- Rows that now normalise to the same id are **merged** rather than colliding:
+  aliases union, the earliest `created_at` wins, an already-set `kind` is kept,
+  and duplicate `(memory_id, entity_id)` links collapse to one.
+
+### Notes
+Twelve hex characters is 48 bits of id space. That is narrower than what we had
+and is inherited from the reference rather than chosen — widening it would put
+us straight back to two populations of entities that never meet, which is the
+whole thing this fixes.
+
+`normalize_entity_name` and `entity_id` are now the single source for entity
+identity, so no write path can normalise differently.
+
 ## 2026-07-29 — Dormancy filtering actually filters (#24)
 
 ### Fixed

@@ -27,7 +27,9 @@
 //! 3. any column still missing from any table is added, diffed against a
 //!    pristine schema built in memory from the same SQL;
 //! 4. indexes and triggers are created, after the columns they reference exist;
-//! 5. `PRAGMA user_version` is stamped.
+//! 5. derived data is backfilled, and entity ids written by earlier builds of
+//!    this crate are rewritten to the reference's derivation;
+//! 6. `PRAGMA user_version` is stamped.
 //!
 //! Every phase is idempotent, so reopening is a no-op and a partially-migrated
 //! database converges.
@@ -326,6 +328,12 @@ pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_TRIGGERS)?;
 
     backfill_derived(conn, rebuilt_any)?;
+
+    // After the tables exist and before the version is stamped: entity ids are
+    // content-derived, and this crate used to derive them differently from the
+    // reference, so a database written by an earlier build needs rewriting to
+    // be readable by `remind_me` at all.
+    crate::entity::renormalize_entity_ids(conn)?;
 
     conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))
 }
