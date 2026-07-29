@@ -1,7 +1,7 @@
 use remind_me_core::{
     backup, db::queries, entity, stats, vitality, wiki, wiki_import, AnnotateInput, Database,
-    EntityInput, MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput,
-    UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    EntityInput, FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
+    MemoryUpdateInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -243,6 +243,19 @@ impl McpServer {
                                         "recursive": { "type": "boolean", "default": true }
                                     },
                                     "required": ["dir"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_feedback",
+                                "description": "Mark a memory helpful or unhelpful. Without `query` this is a global judgement that adjusts the memory's weight; with `query` it is recorded as feedback for similar future searches only.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" },
+                                        "signal": { "type": "string", "enum": ["helpful", "unhelpful"] },
+                                        "query": { "type": "string", "maxLength": 500 }
+                                    },
+                                    "required": ["memory_id", "signal"]
                                 }
                             },
                             {
@@ -569,6 +582,35 @@ impl McpServer {
                             }
                         }
                     }
+                    "remind_me_feedback" => {
+                        let input: Result<FeedbackInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(fb) => match vitality::record_feedback(
+                                &conn,
+                                &fb.memory_id,
+                                fb.signal,
+                                fb.query.as_deref(),
+                            ) {
+                                Ok(Some(v)) => {
+                                    let body = json!({
+                                        "memory_id": fb.memory_id,
+                                        "signal": fb.signal,
+                                        "vitality": v
+                                    });
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
+                                }
+                                Ok(None) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Memory `{}` not found", fb.memory_id) }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Feedback error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid feedback input: {}", e) }] })
+                            }
+                        }
+                    }
                     "remind_me_backup" => match backup::create_backup(&conn, "manual") {
                         Ok(outcome) => {
                             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
@@ -835,6 +877,58 @@ mod tests {
         // than a silent clamp to zero.
         let bad_limit = call(&server, "remind_me_list", json!({ "limit": -3 }));
         assert_eq!(bad_limit["isError"], true);
+    }
+
+    #[test]
+    fn test_feedback_tool_both_modes() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let added = call(&server, "remind_me_add", json!({ "content": "a fact" }));
+        let id = serde_json::from_str::<Value>(&text_of(&added)).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Global: no query, so the weight moves and the response reports it.
+        let global = call(
+            &server,
+            "remind_me_feedback",
+            json!({ "memory_id": id, "signal": "helpful" }),
+        );
+        assert!(global.get("isError").is_none(), "failed: {:?}", global);
+        let body: Value = serde_json::from_str(&text_of(&global)).unwrap();
+        assert_eq!(body["signal"], "helpful");
+        assert!(body["vitality"].as_f64().unwrap() > 1.0);
+
+        // Contextual: a query is supplied, so vitality is reported unchanged.
+        let contextual = call(
+            &server,
+            "remind_me_feedback",
+            json!({ "memory_id": id, "signal": "unhelpful", "query": "some question" }),
+        );
+        let after: Value = serde_json::from_str(&text_of(&contextual)).unwrap();
+        assert_eq!(after["vitality"], body["vitality"]);
+    }
+
+    #[test]
+    fn test_feedback_rejects_a_bad_signal_and_unknown_memory() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let bad = call(
+            &server,
+            "remind_me_feedback",
+            json!({ "memory_id": "mem_x", "signal": "maybe" }),
+        );
+        assert_eq!(bad["isError"], true, "signal is a closed set of two values");
+
+        let missing = call(
+            &server,
+            "remind_me_feedback",
+            json!({ "memory_id": "mem_nope", "signal": "helpful" }),
+        );
+        assert_eq!(missing["isError"], true);
     }
 
     #[test]

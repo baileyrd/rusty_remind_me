@@ -70,6 +70,128 @@ pub fn calculate_vitality(
     base_weight * frequency_boost * decay_factor
 }
 
+/// Fractional adjustment one feedback event applies to `base_weight`.
+pub const FEEDBACK_MAGNITUDE: f64 = 0.15;
+/// Ceiling and floor `base_weight` is clamped to, so repeated feedback on one
+/// memory cannot run away in either direction.
+pub const BASE_WEIGHT_MAX: f64 = 3.0;
+pub const BASE_WEIGHT_MIN: f64 = 0.1;
+
+/// A signed retrieval-quality signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeedbackSignal {
+    Helpful,
+    Unhelpful,
+}
+
+/// Coarse tokenisation for clustering queries by similarity.
+///
+/// Lowercase, alphanumeric, single characters dropped, de-duplicated and
+/// sorted. Deliberately crude — no stemming, stopwords or embeddings — because
+/// it only has to separate "close enough to be the same question" from "a
+/// different question", and must behave identically with or without an embedder
+/// configured.
+pub fn tokenize_query(query: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| t.chars().count() > 1)
+        .map(|t| t.to_string())
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+/// Record helpful/unhelpful feedback. Returns the memory's vitality, or `None`
+/// if no such memory exists.
+///
+/// Two modes, chosen by whether `query` is supplied — this is the reference's
+/// gap #6 design, not an embellishment:
+///
+/// - **No query:** a *global* judgement. `base_weight` is scaled up or down by
+///   [`FEEDBACK_MAGNITUDE`], clamped, and vitality is recomputed. Every future
+///   search sees it.
+/// - **With a query:** *contextual*. The event is logged to `memory_feedback`
+///   and `base_weight` is left alone, because a memory can be a poor answer to
+///   one question and the right answer to another — demoting it globally would
+///   punish the second for the first's feedback.
+///
+/// `access_count` is untouched in both modes. It feeds `sqrt(access_count + 1)`,
+/// where a "negative access" has no meaning.
+pub fn record_feedback(
+    conn: &Connection,
+    memory_id: &str,
+    signal: FeedbackSignal,
+    query: Option<&str>,
+) -> Result<Option<f64>> {
+    let mut stmt = conn.prepare(
+        // decay_rate is deliberately not selected: at zero elapsed days the
+        // decay factor is exp(0) = 1, so it drops out of the snapshot entirely.
+        "SELECT access_count, base_weight, vitality FROM memories
+         WHERE id = ? AND deleted_at IS NULL",
+    )?;
+    let mut rows = stmt.query([memory_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let access_count: i64 = row.get(0)?;
+    let base_weight: f64 = row.get(1)?;
+    let vitality: f64 = row.get(2)?;
+    drop(rows);
+    drop(stmt);
+
+    if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
+        conn.execute(
+            "INSERT INTO memory_feedback
+                (id, memory_id, query, query_tokens, signal, magnitude, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                format!("fb_{}", uuid::Uuid::new_v4().simple()),
+                memory_id,
+                query,
+                tokenize_query(query).join(" "),
+                match signal {
+                    FeedbackSignal::Helpful => "helpful",
+                    FeedbackSignal::Unhelpful => "unhelpful",
+                },
+                FEEDBACK_MAGNITUDE,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        return Ok(Some(vitality));
+    }
+
+    let new_base_weight = match signal {
+        FeedbackSignal::Helpful => (base_weight * (1.0 + FEEDBACK_MAGNITUDE)).min(BASE_WEIGHT_MAX),
+        FeedbackSignal::Unhelpful => {
+            (base_weight * (1.0 - FEEDBACK_MAGNITUDE)).max(BASE_WEIGHT_MIN)
+        }
+    };
+
+    // Snapshot recompute with zero elapsed days, matching how `add_memory` seeds
+    // the column: the stored value is a write-time snapshot and
+    // `effective_vitality` applies decay on read.
+    let new_vitality = new_base_weight * ((access_count as f64) + 1.0).sqrt();
+
+    conn.execute(
+        "UPDATE memories SET base_weight = ?, vitality = ?, status = ? WHERE id = ?",
+        rusqlite::params![
+            new_base_weight,
+            new_vitality,
+            if is_dormant(new_vitality) {
+                "dormant"
+            } else {
+                "active"
+            },
+            memory_id
+        ],
+    )?;
+
+    Ok(Some(new_vitality))
+}
+
 /// A memory's vitality *right now*, with real elapsed-days decay applied.
 ///
 /// The stored `vitality` column is a write-time snapshot: [`add_memory`] computes
