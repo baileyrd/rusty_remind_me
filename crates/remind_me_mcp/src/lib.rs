@@ -10,7 +10,7 @@
 
 use remind_me_core::{
     backup, capture, db::queries, dbs_import, entity, export, importer, mempalace_import,
-    normalize, stats, status, vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki,
+    normalize, stats, status, vectors, vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki,
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database,
     DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput,
     ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
@@ -447,6 +447,11 @@ impl McpServer {
                             {
                                 "name": "remind_me_watch_status",
                                 "description": "Report the folder watcher: which directories are watched, which were refused for sitting outside the import roots, scan counts, and recent errors. Says what to configure when nothing is.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_reindex",
+                                "description": "Rebuild vector embeddings for every memory that doesn't have one yet. Existing embeddings are preserved; only missing ones are generated. Run this after configuring REMIND_ME_EMBEDDING_BACKEND, or after a bulk import that ran before an embedder was available. Reports 'degraded' when no embedder is configured or reachable, rather than silently doing nothing.",
                                 "inputSchema": { "type": "object", "properties": {} }
                             },
                             {
@@ -976,6 +981,14 @@ impl McpServer {
                         };
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                     }
+                    "remind_me_reindex" => match vectors::reindex(&conn) {
+                        Ok(result) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Reindex error: {}", e) }] })
+                        }
+                    },
                     "remind_me_import_dbs" => {
                         let input: Result<DbsImportInput, _> = serde_json::from_value(args);
                         match input {
@@ -2060,6 +2073,34 @@ mod tests {
         // what would turn it on.
         assert!(report["start_error"].is_null());
         assert!(report["hint"].as_str().unwrap().contains("SECRET"));
+    }
+
+    #[test]
+    fn test_reindex_is_registered_and_reports_degraded_without_an_embedder() {
+        // No REMIND_ME_EMBEDDING_BACKEND in the test environment, so this
+        // must report degraded rather than silently doing nothing.
+        std::env::remove_var(remind_me_core::embedder::EMBEDDING_BACKEND_ENV);
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 14, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tool = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_reindex")
+            .expect("remind_me_reindex not in tools/list");
+        assert!(tool["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+
+        let report: Value =
+            serde_json::from_str(&text_of(&call(&server, "remind_me_reindex", json!({})))).unwrap();
+
+        assert_eq!(report["degraded"], true);
+        assert_eq!(report["embedded"], 0);
     }
 
     #[test]
