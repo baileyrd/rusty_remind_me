@@ -1,13 +1,13 @@
 use remind_me_core::{
-    backup, capture, db::queries, entity, normalize, stats, vitality, wiki, wiki_import,
+    backup, capture, db::queries, entity, export, normalize, stats, vitality, wiki, wiki_import,
     AnnotateInput, AutoCaptureInput, Database, DecomposeBatchInput, DecomposeInput, EntityInput,
-    EntityTraverseInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput,
-    ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX,
-    ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX,
-    DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, NORMALIZE_APPLY_MAX,
-    NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX,
-    RECLASSIFY_BATCH_MIN,
+    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
+    MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
+    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
+    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN,
+    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
+    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -306,6 +306,20 @@ impl McpServer {
                                         "kind": { "type": "string" }
                                     },
                                     "required": ["name"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_export_memories",
+                                "description": "Export memories to JSON or JSONL as a complete logical backup — every column, plus the entity graph. Embedding vectors are excluded as derived data. Writes to file_path when given (must be inside the allowed export roots), otherwise returns the payload inline.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "format": { "type": "string", "enum": ["json", "jsonl"], "default": "json" },
+                                        "category": { "type": "string", "description": "Filter: only export memories with this category" },
+                                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Filter: memory must have ALL of these tags" },
+                                        "file_path": { "type": "string", "description": "Destination file, inside the allowed export roots. Omit to return inline." },
+                                        "include_graph": { "type": "boolean", "default": true, "description": "Append entities, links and relations as record_type-tagged records" }
+                                    }
                                 }
                             },
                             {
@@ -741,6 +755,17 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Extract batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_export_memories" => {
+                        let input: ExportInput = serde_json::from_value(args).unwrap_or_default();
+                        match export::export_memories(&conn, &input) {
+                            Ok(result) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Export error: {}", e) }] })
                             }
                         }
                     }

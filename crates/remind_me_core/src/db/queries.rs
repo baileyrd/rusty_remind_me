@@ -23,7 +23,7 @@ pub const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata,
      base_weight, access_count, accessed_at, doc_id, chunk_index";
 
 /// [`MEMORY_COLUMNS`] with each name qualified by `alias`, for queries that join.
-fn prefixed_memory_columns(alias: &str) -> String {
+pub fn prefixed_memory_columns(alias: &str) -> String {
     MEMORY_COLUMNS
         .split(',')
         .map(|c| format!("{}.{}", alias, c.trim()))
