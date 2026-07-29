@@ -2,6 +2,34 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Vault vitality report (#6)
+
+### Added
+- `remind_me_vitality_report` — active/dormant counts, average vitality, a
+  vault health percentage, distribution buckets, and a per-category breakdown.
+  Defaults to JSON, unlike most tools, matching the reference.
+- `vitality::effective_vitality` — a memory's vitality *now*, with real
+  elapsed-days decay applied. The stored `vitality` column is a write-time
+  snapshot and never decays on its own.
+- `vitality::is_dormant`, and the `DI-04` **open-ended top bucket**: an accessed
+  memory scores above 1.0 (one access gives `sqrt(2) ≈ 1.41`), so a closed top
+  bucket would drop rows and the counts would not sum to the total. There is a
+  test asserting that sum.
+- 14 tests, including bridge protection, the floor boundary, and decay actually
+  moving a year-old memory into dormancy.
+
+### Notes
+**`base_weight` has no column in this crate**, where the reference has one.
+`effective_vitality` therefore reads the stored `vitality` as the base weight.
+That is exact today because nothing ever updates `vitality`, `access_count`, or
+`last_accessed_at` after insert — there is no access tracking — so the column
+still holds precisely the seeded value.
+
+Whoever adds access tracking must add a real `base_weight` column at the same
+time. Once `vitality` is rewritten to include the frequency boost, feeding it
+back in would apply that boost twice. The invariant is documented on the
+function.
+
 ## 2026-07-29 — Deeper remind_me_stats, one shared implementation (#5)
 
 ### Added

@@ -1,5 +1,5 @@
 use remind_me_core::{
-    db::queries, entity, stats, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
+    db::queries, entity, stats, vitality, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
     MemoryListInput, MemorySearchInput, MemoryUpdateInput, UpdateOutcome, WikiDeleteOutcome,
 };
 use serde_json::{json, Value};
@@ -198,6 +198,20 @@ impl McpServer {
                                         "recursive": { "type": "boolean", "default": true }
                                     },
                                     "required": ["dir"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_vitality_report",
+                                "description": "Vault health report: active/dormant counts, average vitality, distribution buckets, and a breakdown by category.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "response_format": {
+                                            "type": "string",
+                                            "enum": ["json", "markdown"],
+                                            "default": "json"
+                                        }
+                                    }
                                 }
                             },
                             {
@@ -488,6 +502,14 @@ impl McpServer {
                             }
                         }
                     }
+                    "remind_me_vitality_report" => match vitality::build_vitality_report(&conn) {
+                        Ok(report) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Vitality report error: {}", e) }] })
+                        }
+                    },
                     "remind_me_wiki_list" => match wiki::list_wiki_pages(&conn) {
                         Ok(pages) => {
                             let body = json!({ "count": pages.len(), "pages": pages });
@@ -694,6 +716,38 @@ mod tests {
         // than a silent clamp to zero.
         let bad_limit = call(&server, "remind_me_list", json!({ "limit": -3 }));
         assert_eq!(bad_limit["isError"], true);
+    }
+
+    #[test]
+    fn test_vitality_report_tool() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tool = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_vitality_report")
+            .expect("remind_me_vitality_report not in tools/list");
+        assert_eq!(
+            tool["inputSchema"]["properties"]["response_format"]["default"], "json",
+            "the reference defaults this tool to JSON, unlike most others"
+        );
+
+        call(&server, "remind_me_add", json!({ "content": "a memory" }));
+        let report = call(&server, "remind_me_vitality_report", json!({}));
+        assert!(
+            report.get("isError").is_none(),
+            "report failed: {:?}",
+            report
+        );
+
+        let body: Value = serde_json::from_str(&text_of(&report)).unwrap();
+        assert_eq!(body["total_memories"], 1);
+        assert_eq!(body["vault_health_score"], "100%");
+        assert!(body["vitality_buckets"].is_object());
     }
 
     #[test]

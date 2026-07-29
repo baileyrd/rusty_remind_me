@@ -12,7 +12,7 @@ use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, Result, Row};
 
 /// Columns selected wherever a full [`Memory`] is parsed via [`parse_memory_row`].
-const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata, created_at, \
+pub const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata, created_at, \
      updated_at, capture_id, subject, predicate, object, superseded_by, decay_rate, vitality, \
      access_count, last_accessed_at";
 
