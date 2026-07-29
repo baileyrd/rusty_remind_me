@@ -351,6 +351,16 @@ pub fn annotate_memories(conn: &Connection, input: &AnnotateInput) -> Result<Ann
             &annotation.entities,
         )?;
 
+        // After the mentions, never before: the edge is only recorded when both
+        // sides of the triple resolve to *known* entities, and the ones this
+        // annotation names were created a moment ago.
+        crate::entity::maybe_link_entity_relation(
+            conn,
+            annotation.subject.as_deref(),
+            annotation.predicate.as_deref(),
+            annotation.object.as_deref(),
+        )?;
+
         results.push(AnnotationApplied {
             memory_id: annotation.memory_id.clone(),
             entities_linked,
@@ -489,7 +499,7 @@ pub fn search_memories(
         "SELECT {}, bm25(memories_fts) as fts_rank
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
-         WHERE memories_fts MATCH ? AND m.deleted_at IS NULL",
+         WHERE memories_fts MATCH ? AND m.superseded_by IS NULL AND m.deleted_at IS NULL",
         prefixed_memory_columns("m")
     );
 

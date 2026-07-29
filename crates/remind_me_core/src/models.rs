@@ -530,3 +530,83 @@ pub struct ExtractBatchResult {
     pub memories: Vec<UnannotatedMemory>,
     pub total_unannotated: usize,
 }
+
+/// One atomic fact extracted from a capture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AtomicFact {
+    pub content: String,
+    /// Classification, if already known. Defaults to [`UNCLASSIFIED`].
+    #[serde(default)]
+    pub memory_type: Option<String>,
+    /// Merged with the parent capture's tags.
+    #[serde(default)]
+    pub extra_tags: Vec<String>,
+    pub subject: Option<String>,
+    pub predicate: Option<String>,
+    pub object: Option<String>,
+    #[serde(default)]
+    pub entities: Vec<EntityInput>,
+}
+
+/// A batch of facts to write against one capture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecomposeInput {
+    pub capture_id: String,
+    pub facts: Vec<AtomicFact>,
+}
+
+/// Inclusive bounds the reference enforces on a decomposition.
+pub const DECOMPOSE_FACTS_MIN: usize = 1;
+pub const DECOMPOSE_FACTS_MAX: usize = 50;
+
+/// `category` every decomposed fact is stored under.
+pub const FACT_CATEGORY: &str = "fact";
+/// `source` every decomposed fact is stored under.
+pub const DECOMPOSITION_SOURCE: &str = "decomposition";
+
+/// Outcome of a decomposition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecomposeResult {
+    pub created: usize,
+    pub fact_ids: Vec<String>,
+    pub capture_id: String,
+    /// The parent capture's tags, which every fact inherited.
+    pub parent_tags_inherited: Vec<String>,
+    pub entities_linked: usize,
+    pub relations_linked: usize,
+    /// Memories superseded because a fact contradicted them.
+    pub superseded_ids: Vec<String>,
+}
+
+/// Request for a batch of captures still awaiting decomposition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecomposeBatchInput {
+    #[serde(default = "default_decompose_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_decompose_batch_size() -> usize {
+    20
+}
+
+/// Inclusive bounds on a decomposition batch request.
+pub const DECOMPOSE_BATCH_MIN: usize = 1;
+pub const DECOMPOSE_BATCH_MAX: usize = 100;
+
+/// One capture awaiting decomposition, trimmed for review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndecomposedCapture {
+    pub id: String,
+    pub capture_id: String,
+    /// First 500 characters of the content.
+    pub content_snippet: String,
+    pub category: String,
+    pub tags: Vec<String>,
+}
+
+/// A page of captures awaiting decomposition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecomposeBatchResult {
+    pub memories: Vec<UndecomposedCapture>,
+    pub total_undecomposed: usize,
+}
