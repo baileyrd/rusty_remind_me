@@ -14,7 +14,16 @@ use rusqlite::{params, params_from_iter, Connection, Result, Row};
 /// Columns selected wherever a full [`Memory`] is parsed via [`parse_memory_row`].
 pub const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata, created_at, \
      updated_at, capture_id, subject, predicate, object, superseded_by, decay_rate, vitality, \
-     access_count, last_accessed_at";
+     base_weight, access_count, accessed_at";
+
+/// [`MEMORY_COLUMNS`] with each name qualified by `alias`, for queries that join.
+fn prefixed_memory_columns(alias: &str) -> String {
+    MEMORY_COLUMNS
+        .split(',')
+        .map(|c| format!("{}.{}", alias, c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 pub fn parse_memory_row(row: &Row) -> Result<Memory> {
     let tags_json: String = row.get("tags")?;
@@ -40,8 +49,9 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
         superseded_by: row.get("superseded_by")?,
         decay_rate: row.get("decay_rate")?,
         vitality: row.get("vitality")?,
+        base_weight: row.get("base_weight")?,
         access_count: row.get("access_count")?,
-        last_accessed_at: row.get("last_accessed_at")?,
+        accessed_at: row.get("accessed_at")?,
     })
 }
 
@@ -61,8 +71,8 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
     conn.execute(
         "INSERT INTO memories (
             id, content, category, tags, source, metadata, created_at, updated_at,
-            subject, predicate, object, decay_rate, vitality, access_count, last_accessed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            subject, predicate, object, decay_rate, vitality, base_weight, access_count, accessed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
         params![
             id,
             input.content,
@@ -77,6 +87,7 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
             input.object,
             decay_rate,
             initial_vitality,
+            base_weight,
             now_iso,
         ],
     )?;
@@ -313,14 +324,15 @@ pub fn search_memories(
 ) -> Result<Vec<MemorySearchResult>> {
     let weights = choose_rrf_weights(&input.query, RetrievalStrategy::Auto);
 
-    let mut sql = String::from(
-        "SELECT m.id, m.content, m.category, m.tags, m.source, m.metadata, m.created_at, m.updated_at,
-                m.capture_id, m.subject, m.predicate, m.object, m.superseded_by, m.decay_rate, m.vitality,
-                m.access_count, m.last_accessed_at,
-                bm25(memories_fts) as fts_rank
+    // Derived from MEMORY_COLUMNS rather than spelled out, so adding a column
+    // cannot leave this query selecting a stale subset — which is exactly how
+    // `base_weight` slipped past here once.
+    let mut sql = format!(
+        "SELECT {}, bm25(memories_fts) as fts_rank
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
-         WHERE memories_fts MATCH ? AND m.deleted_at IS NULL"
+         WHERE memories_fts MATCH ? AND m.deleted_at IS NULL",
+        prefixed_memory_columns("m")
     );
 
     if !input.include_dormant {

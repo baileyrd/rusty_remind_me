@@ -48,7 +48,7 @@ pub fn calculate_vitality(
     base_weight: f64,
     access_count: i64,
     decay_rate: f64,
-    last_accessed_at_iso: &str,
+    accessed_at_iso: &str,
     now: DateTime<Utc>,
 ) -> f64 {
     let effective_decay = if access_count >= BRIDGE_THRESHOLD {
@@ -57,7 +57,7 @@ pub fn calculate_vitality(
         decay_rate
     };
 
-    let last_access = DateTime::parse_from_rfc3339(last_accessed_at_iso)
+    let last_access = DateTime::parse_from_rfc3339(accessed_at_iso)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or(now);
 
@@ -77,26 +77,17 @@ pub fn calculate_vitality(
 /// own. Anything that treats the stored value as current will consider a
 /// year-old memory just as vital as one written this morning.
 ///
-/// # The `base_weight` this reads
-///
-/// The reference keeps `base_weight` in its own column. This crate has no such
-/// column, so the stored `vitality` is used as the base weight. That is exact
-/// today for a specific reason: `calculate_vitality(bw, 0, rate, now, now)`
-/// reduces to `bw`, and **nothing in this crate ever updates `vitality`,
-/// `access_count`, or `last_accessed_at` after the insert** — there is no access
-/// tracking yet. So the stored column still holds precisely the seeded base
-/// weight.
-///
-/// That invariant is load-bearing. Whoever adds access tracking must add a real
-/// `base_weight` column at the same time: once `vitality` is rewritten to
-/// include the frequency boost, feeding it back in here would apply the boost
-/// twice and inflate every score.
+/// Reads the real `base_weight` column, which the schema ladder added. An
+/// earlier version of this function used the stored `vitality` as a stand-in,
+/// which was exact only while nothing ever wrote to `vitality` after insert —
+/// a fragile arrangement that would have double-counted the frequency boost the
+/// moment access tracking landed. That hazard is now gone.
 pub fn effective_vitality(memory: &Memory, now: DateTime<Utc>) -> f64 {
     calculate_vitality(
-        memory.vitality,
+        memory.base_weight,
         memory.access_count,
         memory.decay_rate,
-        &memory.last_accessed_at,
+        &memory.accessed_at,
         now,
     )
 }
