@@ -423,10 +423,36 @@ fn the_connector_registry_lists_both_parsers() {
     let listed = connectors();
 
     let kinds: Vec<String> = listed.iter().map(|c| c.kind.clone()).collect();
-    assert_eq!(kinds, vec!["chat".to_string(), "document".to_string()]);
-    assert!(listed.iter().all(|c| c.file_import_kind));
+    assert_eq!(
+        kinds,
+        vec![
+            "chat".to_string(),
+            "document".to_string(),
+            "dbs".to_string()
+        ]
+    );
     assert!(listed.iter().all(|c| !c.description.is_empty()));
     // A document is prose, so it does not claim the chat-only formats.
     let document = listed.iter().find(|c| c.kind == "document").unwrap();
     assert!(!document.suffixes.contains(&"json".to_string()));
+}
+
+#[test]
+fn a_connector_that_is_not_a_file_parser_says_so() {
+    let listed = connectors();
+
+    let dbs = listed.iter().find(|c| c.kind == "dbs").unwrap();
+    // Listed for discovery, not for dispatch: `remind_me_import_dbs` reads SQL
+    // rather than parsing a file, so passing "dbs" as `kind` to
+    // remind_me_import_chat would go nowhere. That is the question a caller
+    // reading this list is asking, so the flag answers it.
+    assert!(!dbs.file_import_kind);
+    assert!(dbs.suffixes.is_empty());
+    for parser in listed.iter().filter(|c| c.kind != "dbs") {
+        assert!(
+            parser.file_import_kind,
+            "{} should be dispatchable",
+            parser.kind
+        );
+    }
 }

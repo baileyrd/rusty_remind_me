@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod capture;
 pub mod db;
+pub mod dbs_import;
 pub mod entity;
 pub mod expansion;
 pub mod export;

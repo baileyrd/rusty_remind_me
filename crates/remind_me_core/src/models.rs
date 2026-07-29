@@ -740,6 +740,40 @@ pub struct BulkImportDirInput {
     pub kind: ImportKind,
 }
 
+/// Inclusive bounds on how many `dbs` items one call pulls.
+pub const DBS_IMPORT_LIMIT_MIN: usize = 1;
+pub const DBS_IMPORT_LIMIT_MAX: usize = 2000;
+
+fn default_dbs_limit() -> usize {
+    500
+}
+
+/// Input model for `remind_me_import_dbs`.
+///
+/// `source` and `item_type` are empty rather than `Option` to match the
+/// reference's own model, where empty means "no filter".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbsImportInput {
+    /// Path to the `dbs` SQLite archive, inside the allowed import roots.
+    pub db_path: String,
+    /// Restrict to one `dbs` source name, or empty for all.
+    #[serde(default)]
+    pub source: String,
+    /// Restrict to one `dbs` `item_kind`, or empty for all.
+    #[serde(default)]
+    pub item_type: String,
+    #[serde(default = "default_dbs_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    /// Extra tags added to every imported memory.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Report what would be imported without writing anything.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 /// Counts from one import.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImportStats {
