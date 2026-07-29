@@ -38,13 +38,15 @@ graph TD
   - Hybrid Search Engine & RRF rank fusion algorithm (`retrieval.rs`).
   - Entity Knowledge Graph management (`entity.rs`).
   - Markdown Wiki compilation (`wiki.rs`).
+  - Markdown directory import into the wiki (`wiki_import.rs`) — YAML front
+    matter parsing with per-field fallbacks, idempotent upsert on `slug`.
 - **`remind_me_mcp`**: The Model Context Protocol layer handling:
   - Stdio JSON-RPC protocol loop (`initialize`, `tools/list`, `tools/call`).
   - Input payload validation & error formatting.
 - **`remind_me_api`**: The REST API layer:
   - Async HTTP daemon built with `rusty_http` and `tokio`.
   - Routes: `/health`, `/stats`, `/api/v1/memories`, `/api/v1/search`.
-- **`remind_me_cli`**: The unified CLI binary executable (`rusty-remind-me`) handling command line flags and subcommand dispatch (`server`, `api`, `add`, `search`, `get`, `entity`, `wiki-write`, `wiki-read`, `stats`).
+- **`remind_me_cli`**: The unified CLI binary executable (`rusty-remind-me`) handling command line flags and subcommand dispatch (`server`, `api`, `add`, `search`, `get`, `entity`, `wiki-write`, `wiki-read`, `wiki-import`, `stats`).
 
 ---
 
@@ -176,6 +178,13 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
     updated_at  TEXT NOT NULL
 );
 ```
+
+`slug` being the primary key is what makes `wiki-import` (`wiki_import.rs`)
+idempotent: `write_wiki_page` upserts, so re-importing a regenerated directory
+revises pages in place. `content` stores the Markdown body *after* front
+matter — the three fields that front matter carries (`slug`, `title`, `topic`)
+are columns here, so retaining them in the body would duplicate them and leak
+YAML into anything that renders the page.
 
 ---
 
