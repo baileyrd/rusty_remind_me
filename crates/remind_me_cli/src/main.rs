@@ -1,6 +1,8 @@
 use remind_me_api::ApiServer;
 use remind_me_core::db::queries;
-use remind_me_core::{entity, wiki, Database, EntityInput, MemoryAddInput, MemorySearchInput};
+use remind_me_core::{
+    entity, wiki, wiki_import, Database, EntityInput, MemoryAddInput, MemorySearchInput,
+};
 use remind_me_mcp::McpServer;
 use serde_json::{json, Value};
 use std::env;
@@ -219,6 +221,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("Wiki page not found: {}", slug);
                 }
             }
+            "wiki-import" => {
+                if args.len() < 3 {
+                    eprintln!("Usage: rusty-remind-me wiki-import <dir>");
+                    eprintln!("Imports every .md file in <dir> into the wiki. Pairs with");
+                    eprintln!("`dbs export-wiki --out-dir <dir>` from daily-backup-system.");
+                    std::process::exit(1);
+                }
+                let dir = PathBuf::from(&args[2]);
+                let conn = db.conn();
+                let report = wiki_import::import_wiki_dir(&conn, &dir, true)?;
+                for page in &report.imported {
+                    println!("{}  <- {}", page.slug, page.path);
+                }
+                for (path, reason) in &report.skipped {
+                    eprintln!("skipped {}: {}", path, reason);
+                }
+                println!(
+                    "Imported {} page(s), skipped {}.",
+                    report.imported.len(),
+                    report.skipped.len()
+                );
+            }
             "stats" => {
                 let conn = db.conn();
                 let count: i64 = conn
@@ -234,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             cmd => {
-                eprintln!("Unknown subcommand: {}. Available: configure, api, server, search, add, get, entity, wiki-write, wiki-read, stats", cmd);
+                eprintln!("Unknown subcommand: {}. Available: configure, api, server, search, add, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);
                 std::process::exit(1);
             }
         }

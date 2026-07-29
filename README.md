@@ -14,7 +14,9 @@
 - **Automated Client Setup**: Built-in `configure` command & scripts for 1-click MCP setup across **Claude Desktop**, **Antigravity**, **Cursor**, and **Codex**.
 - **REST API Server**: Async HTTP daemon (`rusty_http` / `tokio`) exposing endpoints for health checks, memory storage, FTS5 retrieval, and stats.
 - **Knowledge Graph Entities**: Canonical entity deduplication, alias resolution, and 1-hop relation linking.
-- **Markdown Wiki Synthesis**: Topic-based wiki page compilation and queryable topic search.
+- **Markdown Wiki Synthesis**: Topic-based wiki page compilation, queryable topic search, and
+  bulk import of Markdown directories (`wiki-import`) — the ingestion path for
+  [`dbs export-wiki`](https://github.com/baileyrd/Daily-Backup-System).
 - **Rusty Mill Integration**: Zero-dependency philosophy built on `c:\dev\Rusty_Mill` crates (`rusty_tokio`, `rusty-db`, `rusty_json`, `rusty-search`, `rusty_http`, `rusty_lines`, `rusty_term`, `rusty_time`, `rusty_config`).
 
 ---
@@ -125,6 +127,27 @@ rusty-remind-me wiki-write architecture "System Architecture" "Rusty Remind Me i
 Reads a wiki page by slug:
 ```bash
 rusty-remind-me wiki-read architecture
+```
+
+Imports a whole directory of Markdown files into the wiki (recursively):
+```bash
+rusty-remind-me wiki-import ./wiki-pages
+```
+
+Each file's `slug`, `title` and `topic` are read from its YAML front matter,
+which is stripped from the stored `content` since those three become columns.
+Any field that is absent falls back independently — `title` from the file's
+first `# ` heading then its filename, `slug` derived from the resolved title,
+`topic` to `general` — so a hand-written note imports without ceremony. The
+import upserts on `slug`, so re-importing an updated directory revises pages
+in place rather than duplicating them.
+
+This pairs with [`daily-backup-system`](https://github.com/baileyrd/Daily-Backup-System),
+whose `dbs export-wiki --out-dir DIR` writes exactly this layout — one page per
+backup source and per tag, cross-linked with `[[wikilinks]]`:
+```bash
+dbs export-wiki --out-dir ./wiki-pages    # in the dbs repo
+rusty-remind-me wiki-import ./wiki-pages
 ```
 
 ### 9. System Statistics

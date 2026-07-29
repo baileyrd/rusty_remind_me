@@ -1,5 +1,6 @@
 use remind_me_core::{
-    db::queries, entity, wiki, Database, EntityInput, MemoryAddInput, MemorySearchInput,
+    db::queries, entity, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
+    MemorySearchInput,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -141,6 +142,18 @@ impl McpServer {
                                         "slug": { "type": "string" }
                                     },
                                     "required": ["slug"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_wiki_import",
+                                "description": "Import a directory of Markdown files into the wiki. Each file's slug/title/topic come from its YAML front matter, falling back to its first '# ' heading then its filename. Idempotent - pages upsert on slug. Pairs with `dbs export-wiki --out-dir` from daily-backup-system.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "dir": { "type": "string" },
+                                        "recursive": { "type": "boolean", "default": true }
+                                    },
+                                    "required": ["dir"]
                                 }
                             },
                             {
@@ -314,6 +327,27 @@ impl McpServer {
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki read error: {}", e) }] })
                             }
+                        }
+                    }
+                    "remind_me_wiki_import" => {
+                        let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or("");
+                        let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
+                        match wiki_import::import_wiki_dir(&conn, std::path::Path::new(dir), recursive) {
+                            Ok(report) => {
+                                let imported: Vec<_> = report.imported.iter().map(|p| json!({
+                                    "slug": p.slug, "title": p.title, "topic": p.topic, "path": p.path
+                                })).collect();
+                                let skipped: Vec<_> = report.skipped.iter().map(|(path, reason)| json!({
+                                    "path": path, "reason": reason
+                                })).collect();
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
+                                    "imported_count": imported.len(),
+                                    "skipped_count": skipped.len(),
+                                    "imported": imported,
+                                    "skipped": skipped
+                                })).unwrap() }] })
+                            }
+                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki import error: {}", e) }] }),
                         }
                     }
                     "remind_me_stats" => {
