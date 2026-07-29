@@ -2,6 +2,43 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Entity annotation, and three entity-layer bugs (#7)
+
+### Added
+- `remind_me_annotate` — applies subject/predicate/object triples and entity
+  mentions to existing memories, in batches of 1–100. Only the SPO fields
+  supplied are written; omitted ones keep their value.
+- Per-item error handling rather than all-or-nothing, matching the reference:
+  one unknown `memory_id` is reported in `errors` and the rest of the batch
+  still applies. An extraction pass carrying one stale id should not lose 99
+  good annotations.
+- `entity::apply_entity_mentions`, shared by annotate and `add_memory`.
+
+### Fixed
+- **`add_memory` silently discarded its `entities` field.** `MemoryAddInput` has
+  always accepted entity mentions; they were parsed and dropped, so callers
+  supplying them got a no-op with no error. They are now applied through the
+  same path as annotate.
+- **`upsert_entity` never merged aliases.** Its `ON CONFLICT(name) DO UPDATE`
+  clause updated `kind` and `updated_at` but not `aliases`, so aliases could
+  only ever be set on first insert. They now union-merge — existing first, new
+  appended, de-duplicated.
+- **`upsert_entity` crashed on a casing variant.** It looked up by the
+  case-sensitive `name` column while deriving `id` from the case-folded name, so
+  `"tasmania"` after `"Tasmania"` missed the lookup, attempted an insert, and
+  hit the `entities.id` unique constraint. Lookups now key on the derived id,
+  which is what carries the identity. `get_entity_by_name` resolves the same
+  way and is now case- and whitespace-insensitive.
+- `kind` precedence now matches the reference: an existing kind is never
+  overwritten by a later mention, and a missing one is filled in. Previously
+  `COALESCE(excluded.kind, ...)` let a later guess clobber a deliberate earlier
+  value.
+
+### Notes
+The `tools/list` JSON literal outgrew `serde_json::json!`'s macro recursion
+limit. The annotate schema is built in its own function and interpolated, which
+costs no expansion depth; further deeply-nested schemas should do the same.
+
 ## 2026-07-29 — Vault vitality report (#6)
 
 ### Added

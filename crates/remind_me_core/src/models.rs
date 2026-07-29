@@ -173,6 +173,55 @@ pub struct MemoryDeleteInput {
     pub memory_id: String,
 }
 
+/// One memory's annotation: SPO triple fields and entity mentions.
+///
+/// Every field but `memory_id` is optional; omitted ones are left unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryAnnotation {
+    pub memory_id: String,
+    pub subject: Option<String>,
+    pub predicate: Option<String>,
+    pub object: Option<String>,
+    #[serde(default)]
+    pub entities: Vec<EntityInput>,
+}
+
+/// A batch of annotations to apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotateInput {
+    pub annotations: Vec<MemoryAnnotation>,
+}
+
+/// Inclusive bounds the reference enforces on an annotation batch.
+pub const ANNOTATE_BATCH_MIN: usize = 1;
+pub const ANNOTATE_BATCH_MAX: usize = 100;
+
+/// What happened to one annotation that was applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationApplied {
+    pub memory_id: String,
+    /// Number of *new* mention links created for this memory.
+    pub entities_linked: usize,
+}
+
+/// Why one annotation in the batch could not be applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationError {
+    pub memory_id: String,
+    pub error: String,
+}
+
+/// Outcome of an annotation batch.
+///
+/// Per-item rather than all-or-nothing: one unknown `memory_id` does not
+/// discard the rest of the batch, matching the reference, which collects
+/// `errors` and continues.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotateResult {
+    pub results: Vec<AnnotationApplied>,
+    pub errors: Vec<AnnotationError>,
+}
+
 /// Search result item containing memory and diagnostic ranking scores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchResult {

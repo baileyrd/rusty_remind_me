@@ -1,9 +1,54 @@
 use remind_me_core::{
-    db::queries, entity, stats, vitality, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
-    MemoryListInput, MemorySearchInput, MemoryUpdateInput, UpdateOutcome, WikiDeleteOutcome,
+    db::queries, entity, stats, vitality, wiki, wiki_import, AnnotateInput, Database, EntityInput,
+    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+
+/// Input schema for `remind_me_annotate`.
+///
+/// Built here rather than inline in the `tools/list` literal: that literal is
+/// one `json!` invocation covering every tool, and this schema's nesting depth
+/// pushed the macro past its expansion recursion limit. Interpolating an
+/// already-built `Value` costs no expansion depth. Any further deeply-nested
+/// schema should be extracted the same way.
+fn annotate_input_schema() -> Value {
+    let entity = json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" },
+            "kind": { "type": "string" },
+            "aliases": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["name"]
+    });
+
+    let annotation = json!({
+        "type": "object",
+        "properties": {
+            "memory_id": { "type": "string" },
+            "subject": { "type": "string" },
+            "predicate": { "type": "string" },
+            "object": { "type": "string" },
+            "entities": { "type": "array", "items": entity }
+        },
+        "required": ["memory_id"]
+    });
+
+    json!({
+        "type": "object",
+        "properties": {
+            "annotations": {
+                "type": "array",
+                "minItems": ANNOTATE_BATCH_MIN,
+                "maxItems": ANNOTATE_BATCH_MAX,
+                "items": annotation
+            }
+        },
+        "required": ["annotations"]
+    })
+}
 
 pub struct McpServer {
     db: Database,
@@ -199,6 +244,11 @@ impl McpServer {
                                     },
                                     "required": ["dir"]
                                 }
+                            },
+                            {
+                                "name": "remind_me_annotate",
+                                "description": "Apply subject/predicate/object triples and entity mentions to existing memories, in batches of up to 100.",
+                                "inputSchema": annotate_input_schema()
                             },
                             {
                                 "name": "remind_me_vitality_report",
@@ -502,6 +552,29 @@ impl McpServer {
                             }
                         }
                     }
+                    "remind_me_annotate" => {
+                        let input: Result<AnnotateInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(annotate_input) => {
+                                let count = annotate_input.annotations.len();
+                                if !(ANNOTATE_BATCH_MIN..=ANNOTATE_BATCH_MAX).contains(&count) {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("`annotations` must hold {}..={} items, got {}", ANNOTATE_BATCH_MIN, ANNOTATE_BATCH_MAX, count) }] })
+                                } else {
+                                    match queries::annotate_memories(&conn, &annotate_input) {
+                                        Ok(outcome) => {
+                                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                                        }
+                                        Err(e) => {
+                                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Annotate error: {}", e) }] })
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid annotate input: {}", e) }] })
+                            }
+                        }
+                    }
                     "remind_me_vitality_report" => match vitality::build_vitality_report(&conn) {
                         Ok(report) => {
                             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
@@ -716,6 +789,58 @@ mod tests {
         // than a silent clamp to zero.
         let bad_limit = call(&server, "remind_me_list", json!({ "limit": -3 }));
         assert_eq!(bad_limit["isError"], true);
+    }
+
+    #[test]
+    fn test_annotate_tool_round_trip_and_partial_failure() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let added = call(&server, "remind_me_add", json!({ "content": "a fact" }));
+        let id = serde_json::from_str::<Value>(&text_of(&added)).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let annotated = call(
+            &server,
+            "remind_me_annotate",
+            json!({ "annotations": [
+                { "memory_id": id, "predicate": "uses", "entities": [{ "name": "SQLite" }] },
+                { "memory_id": "mem_nope", "predicate": "uses" }
+            ]}),
+        );
+        assert!(annotated.get("isError").is_none());
+
+        let body: Value = serde_json::from_str(&text_of(&annotated)).unwrap();
+        assert_eq!(body["results"].as_array().unwrap().len(), 1);
+        assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(body["results"][0]["entities_linked"], 1);
+
+        let fetched = call(&server, "remind_me_get", json!({ "id": id }));
+        assert_eq!(
+            serde_json::from_str::<Value>(&text_of(&fetched)).unwrap()["predicate"],
+            "uses"
+        );
+    }
+
+    #[test]
+    fn test_annotate_rejects_an_out_of_range_batch() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let empty = call(&server, "remind_me_annotate", json!({ "annotations": [] }));
+        assert_eq!(empty["isError"], true);
+
+        let oversized: Vec<Value> = (0..ANNOTATE_BATCH_MAX + 1)
+            .map(|_| json!({ "memory_id": "mem_x" }))
+            .collect();
+        let too_many = call(
+            &server,
+            "remind_me_annotate",
+            json!({ "annotations": oversized }),
+        );
+        assert_eq!(too_many["isError"], true);
     }
 
     #[test]
