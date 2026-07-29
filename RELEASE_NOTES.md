@@ -2,6 +2,66 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Push ingestion over HTTP (#56)
+
+### Added
+- **`POST /ingest`** — an HTTP endpoint that turns a pushed payload into
+  memories through the same importer a file goes through: same parsing, same
+  dedup, same chunking. The folder watcher covers senders that can drop a file
+  where this process sees it; a CI job or an automation on another machine
+  usually cannot.
+- **`remind_me_webhook_status`** — whether a secret is configured, whether it
+  is listening, where, and how many pushes were ingested, skipped or refused.
+- `importer::import_bytes`, the filesystem-free import entry point, and
+  `importer::validate_kind_and_suffix`, which now decides the accepted formats
+  in one place for file, directory and pushed imports alike.
+
+### Notes
+**It does not exist unless `REMIND_ME_WEBHOOK_SECRET` is set.** That is the
+behaviour, not a deployment recommendation — an endpoint that writes arbitrary
+content into memory with no authentication is worse than no endpoint — and
+there is no configuration that asks for one: `WebhookConfig` cannot be
+constructed with an empty secret. The bind address defaults to localhost for
+the same reason.
+
+Three properties are load-bearing rather than decorative:
+
+- **The token comparison is constant-time.** A `==` returns faster on a wrong
+  first byte than a wrong last one, which recovers a secret one byte at a time
+  over enough requests.
+- **The body is capped at 10 MiB and the header block at 8 KiB**, both checked
+  before anything is buffered. A declared `Content-Length` is never trusted as
+  an allocation size.
+- **The listener stops before the database connections close** (`SE-07`).
+  `WebhookServer` joins its thread in `Drop`, and `McpServer` declares the
+  webhook field *before* the database — Rust drops fields in declaration order,
+  so the ordering holds by construction rather than by remembering to call
+  things in sequence. A test asserts it directly: once `stop()` returns, the
+  database `Arc` has one holder left.
+
+Authentication is checked **before** routing, so an unauthenticated caller
+cannot map the endpoint by comparing a 404 against a 405.
+
+A pushed `filename` names nothing on disk — it supplies the extension that
+picks the parser and the display name stored in metadata. It is held to exactly
+the same format rule a real file is, so the extension is not a way to reach a
+parser the file importer will not reach.
+
+**`source` stays `chat_import`/`document_import`, not `webhook`.** #56 asked
+for the latter, and `webhook` does carry a 0.9 prior in the vitality source
+table — but the reference stores pushed content under the file-import values
+too, and `source` feeds dedup, the `normalize_batch` selection and that same
+prior. Diverging would make identical content score differently depending on
+which implementation happened to receive the push, on a database the two are
+meant to share. The arrival channel is recorded as `metadata.ingest` instead,
+where it costs nothing.
+
+Connections are served one at a time. Every request takes the database lock to
+import, so a thread per connection would not make any of them finish sooner —
+it would only move the queue out of the kernel's accept backlog and into
+unbounded threads inside this process. Reads and writes carry a 10-second
+deadline so a stalled client releases the loop.
+
 ## 2026-07-29 — Bound the sync outbox (#59)
 
 ### Fixed

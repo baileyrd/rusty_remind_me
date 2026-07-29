@@ -10,10 +10,10 @@
 
 use remind_me_core::{
     backup, capture, db::queries, entity, export, importer, normalize, stats, status, vitality,
-    watcher, wiki, wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput,
-    ChatImportInput, Database, DecomposeBatchInput, DecomposeInput, EntityInput,
-    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
-    MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
+    watcher, webhook::Webhook, wiki, wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput,
+    BulkImportDirInput, ChatImportInput, Database, DecomposeBatchInput, DecomposeInput,
+    EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput,
+    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
     NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
     ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
     DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
@@ -22,6 +22,7 @@ use remind_me_core::{
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 
 /// Input schema for `remind_me_annotate`.
 ///
@@ -191,16 +192,20 @@ fn import_input_schema(directory: bool) -> Value {
 }
 
 pub struct McpServer {
-    db: Database,
+    /// Declared **before** `db`, and that ordering is load-bearing: Rust drops
+    /// struct fields in declaration order, `Webhook`'s drop joins its serving
+    /// thread, and that thread writes through the database. Listed after `db`
+    /// it would still be sound — the thread holds its own `Arc` — but the
+    /// connections would stay open until the thread noticed, which is the
+    /// shutdown ordering `SE-07` exists to pin down.
+    webhook: Webhook,
+    db: Arc<Database>,
     wiki: Wiki,
 }
 
 impl McpServer {
     pub fn new(db: Database) -> Self {
-        Self {
-            db,
-            wiki: Wiki::from_env(),
-        }
+        Self::with_wiki(db, Wiki::from_env())
     }
 
     /// Build a server against a specific wiki directory.
@@ -208,7 +213,24 @@ impl McpServer {
     /// Tests need this: the default root is a real shared directory, so a test
     /// using it would write into whatever wiki the machine's user actually has.
     pub fn with_wiki(db: Database, wiki: Wiki) -> Self {
-        Self { db, wiki }
+        let db = Arc::new(db);
+        Self {
+            // A no-op without `REMIND_ME_WEBHOOK_SECRET`, which is the ordinary
+            // case — nothing binds a port unless someone asked for one.
+            webhook: Webhook::from_env(Arc::clone(&db)),
+            db,
+            wiki,
+        }
+    }
+
+    /// Stop the push endpoint without tearing the server down.
+    pub fn stop_webhook(&mut self) {
+        self.webhook.stop();
+    }
+
+    /// The push endpoint's state, as `remind_me_webhook_status` reports it.
+    pub fn webhook_status(&self) -> remind_me_core::webhook::WebhookStatus {
+        self.webhook.status()
     }
 
     pub fn handle_request(&self, request_json: &str) -> Option<Value> {
@@ -379,6 +401,11 @@ impl McpServer {
                             {
                                 "name": "remind_me_watch_status",
                                 "description": "Report the folder watcher: which directories are watched, which were refused for sitting outside the import roots, scan counts, and recent errors. Says what to configure when nothing is.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_webhook_status",
+                                "description": "Report the push ingestion endpoint: whether a secret is configured, whether it is listening, where, and how many pushes it has ingested, skipped or refused. Distinguishes 'nobody configured one' from 'configured but the port could not be bound'.",
                                 "inputSchema": { "type": "object", "properties": {} }
                             },
                             {
@@ -903,6 +930,10 @@ impl McpServer {
                         };
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                     }
+                    "remind_me_webhook_status" => {
+                        let report = self.webhook.status();
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                    }
                     "remind_me_list_connectors" => {
                         let body = json!({
                             "connectors": importer::connectors(),
@@ -912,6 +943,13 @@ impl McpServer {
                     }
                     "remind_me_server_status" => match status::server_status(&conn) {
                         Ok(report) => {
+                            // The webhook's state lives on this struct, not on
+                            // the connection, so it is merged in here rather
+                            // than gathered by `server_status`. The dedicated
+                            // tool carries the same report in full.
+                            let mut report = serde_json::to_value(&report).unwrap_or(json!({}));
+                            report["webhook"] =
+                                serde_json::to_value(self.webhook.status()).unwrap_or(json!({}));
                             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                         }
                         Err(e) => {
@@ -1843,6 +1881,69 @@ mod tests {
         assert!(text_of(&reserved).contains("reserved"));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_webhook_status_is_registered_and_reports_disabled() {
+        // No `REMIND_ME_WEBHOOK_SECRET` in the test environment, so nothing
+        // binds a port — which is the state this asserts.
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 11, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"remind_me_webhook_status"),
+            "remind_me_webhook_status not in tools/list"
+        );
+
+        let report: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_webhook_status",
+            json!({}),
+        )))
+        .unwrap();
+        assert_eq!(report["enabled"], false);
+        assert_eq!(report["running"], false);
+        // Disabled, not broken: no bind failure to report, and a hint saying
+        // what would turn it on.
+        assert!(report["start_error"].is_null());
+        assert!(report["hint"].as_str().unwrap().contains("SECRET"));
+    }
+
+    #[test]
+    fn test_server_status_carries_the_webhook() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let report: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_server_status",
+            json!({}),
+        )))
+        .unwrap();
+
+        // Merged in by the MCP layer rather than gathered from the connection,
+        // because that is where the endpoint's state lives.
+        assert_eq!(report["webhook"]["enabled"], false);
+        assert_eq!(report["schema_current"], true);
+    }
+
+    #[test]
+    fn test_stopping_the_webhook_is_safe_when_none_is_running() {
+        let db = Database::open_in_memory().unwrap();
+        let mut server = McpServer::new(db);
+
+        server.stop_webhook();
+        server.stop_webhook();
+
+        assert!(!server.webhook_status().running);
     }
 
     #[test]

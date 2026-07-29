@@ -751,6 +751,92 @@ fn existing_import(conn: &Connection, hash: &str) -> Result<Option<String>> {
     .optional()
 }
 
+/// Reject a kind/suffix pair the importer cannot honour.
+///
+/// Returns the refusal, or `None` when the pair is importable. Shared by every
+/// entry point — a file path, a directory sweep, and a pushed payload — so the
+/// set of formats this accepts is decided in one place. A webhook push in
+/// particular arrives with a caller-supplied `filename` that names nothing on
+/// disk, and it must be held to exactly the same rule as a real file.
+pub fn validate_kind_and_suffix(
+    kind: ImportKind,
+    suffix: &str,
+    filename: &str,
+) -> Option<ImportOutcome> {
+    if !SUPPORTED_SUFFIXES.contains(&suffix) {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!("unsupported format: .{}", suffix),
+        });
+    }
+    if kind == ImportKind::Document && !DOCUMENT_SUFFIXES.contains(&suffix) {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!(
+                "document import does not support .{}: use .md, .markdown or .txt",
+                suffix
+            ),
+        });
+    }
+    None
+}
+
+/// Import bytes already held in memory.
+///
+/// The filesystem-free entry point, for content that arrives over the network
+/// rather than as a file: a pushed payload has no path to read. `filename` is
+/// a *display name* — its extension picks the parser exactly as a real file's
+/// would, and it is stored in each memory's metadata and the `chat_imports`
+/// row, but nothing resolves it against the filesystem.
+///
+/// That is the reason this is a separate entry point rather than a temporary
+/// file: writing a pushed payload to disk to import it would put attacker-
+/// controlled bytes under a real path, and the import roots exist precisely to
+/// keep that from happening.
+///
+/// Deduplicates by content hash like a file import, so pushing byte-identical
+/// content twice is a no-op.
+#[allow(clippy::too_many_arguments)]
+pub fn import_bytes(
+    conn: &Connection,
+    content: &[u8],
+    filename: &str,
+    category: &str,
+    tags: &[String],
+    extract_mode: &str,
+    max_length: usize,
+    kind: ImportKind,
+) -> Result<ImportOutcome> {
+    let suffix = suffix_of(std::path::Path::new(filename));
+
+    if let Some(rejection) = validate_kind_and_suffix(kind, &suffix, filename) {
+        return Ok(rejection);
+    }
+
+    let hash = hash_bytes(content);
+    if let Some(import_id) = existing_import(conn, &hash)? {
+        return Ok(ImportOutcome::Skipped {
+            reason: "already_imported".to_string(),
+            file: filename.to_string(),
+            import_id,
+        });
+    }
+
+    let raw = String::from_utf8_lossy(content).to_string();
+    import_content(
+        conn,
+        &raw,
+        &suffix,
+        filename,
+        &hash,
+        category,
+        tags,
+        extract_mode,
+        max_length,
+        kind,
+    )
+}
+
 /// Import one already-validated file.
 ///
 /// The dedup hash is computed from the file's bytes and checked **before** the
@@ -773,14 +859,8 @@ pub fn import_file(
         .to_string();
     let suffix = suffix_of(path);
 
-    if kind == ImportKind::Document && !DOCUMENT_SUFFIXES.contains(&suffix.as_str()) {
-        return Ok(ImportOutcome::Failed {
-            file: filename,
-            reason: format!(
-                "document import does not support .{}: use .md, .markdown or .txt",
-                suffix
-            ),
-        });
+    if let Some(rejection) = validate_kind_and_suffix(kind, &suffix, &filename) {
+        return Ok(rejection);
     }
 
     let bytes = match std::fs::read(path) {
