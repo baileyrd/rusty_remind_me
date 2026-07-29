@@ -1,3 +1,4 @@
+use crate::fts::sanitize_fts_query;
 use crate::wiki_import::slugify;
 use chrono::Utc;
 use rusqlite::{params, Connection, Result, Row};
@@ -99,6 +100,62 @@ pub fn list_wiki_pages(conn: &Connection) -> Result<Vec<WikiPage>> {
         pages.push(r?);
     }
     Ok(pages)
+}
+
+/// One hit from [`search_wiki_pages`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiSearchHit {
+    pub slug: String,
+    pub title: String,
+    pub summary: String,
+    /// Matching excerpt with the hit bracketed, from FTS5's `snippet()`.
+    pub snippet: String,
+}
+
+/// Inclusive bounds the reference enforces on `WikiSearchInput`.
+pub const WIKI_SEARCH_LIMIT_MIN: usize = 1;
+pub const WIKI_SEARCH_LIMIT_MAX: usize = 50;
+pub const WIKI_SEARCH_LIMIT_DEFAULT: usize = 10;
+
+/// Full-text search over wiki page titles and content, ranked by BM25.
+///
+/// Distinct from memory search: this covers synthesised pages, not the raw
+/// memory store. No vitality or RRF applies — the reference ranks wiki hits by
+/// BM25 alone.
+///
+/// A query with no searchable tokens returns no hits rather than erroring;
+/// see [`sanitize_fts_query`].
+pub fn search_wiki_pages(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<WikiSearchHit>> {
+    let match_expr = sanitize_fts_query(query);
+    if match_expr.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(WIKI_SEARCH_LIMIT_MIN, WIKI_SEARCH_LIMIT_MAX);
+
+    let mut stmt = conn.prepare(
+        "SELECT wp.slug, wp.title, wp.summary,
+                snippet(wiki_fts, 1, '[', ']', '…', 12) AS snippet
+           FROM wiki_fts
+           JOIN wiki_pages wp ON wp.rowid = wiki_fts.rowid
+          WHERE wiki_fts MATCH ?
+          ORDER BY bm25(wiki_fts)
+          LIMIT ?",
+    )?;
+
+    let rows = stmt.query_map(params![match_expr, limit as i64], |row| {
+        Ok(WikiSearchHit {
+            slug: row.get("slug")?,
+            title: row.get("title")?,
+            summary: row.get("summary")?,
+            snippet: row.get("snippet")?,
+        })
+    })?;
+
+    rows.collect()
 }
 
 /// Delete a wiki page addressed by either its title or its slug.

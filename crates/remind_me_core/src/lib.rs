@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod db;
 pub mod entity;
+pub mod fts;
 pub mod models;
 pub mod retrieval;
 pub mod stats;

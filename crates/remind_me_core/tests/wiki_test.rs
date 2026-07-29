@@ -138,3 +138,138 @@ fn delete_refuses_reserved_pages_addressed_by_title() {
     );
     assert!(get_wiki_page(&conn, "index").unwrap().is_some());
 }
+
+// --- remind_me_wiki_search (#15) -------------------------------------------
+
+use remind_me_core::wiki::{search_wiki_pages, WIKI_SEARCH_LIMIT_MAX};
+
+fn slugs_for(conn: &rusqlite::Connection, query: &str) -> Vec<String> {
+    search_wiki_pages(conn, query, 10)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.slug)
+        .collect()
+}
+
+#[test]
+fn search_matches_on_title() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(&conn, "vlan-setup", "VLAN Setup", "unrelated body", "").unwrap();
+
+    assert_eq!(slugs_for(&conn, "VLAN"), vec!["vlan-setup"]);
+}
+
+#[test]
+fn search_matches_on_content() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(&conn, "notes", "Notes", "the quokka is a marsupial", "").unwrap();
+
+    assert_eq!(slugs_for(&conn, "quokka"), vec!["notes"]);
+}
+
+#[test]
+fn search_returns_nothing_rather_than_erroring_on_a_miss() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(&conn, "notes", "Notes", "body", "").unwrap();
+
+    assert!(slugs_for(&conn, "pangolin").is_empty());
+}
+
+#[test]
+fn a_punctuation_heavy_query_is_a_search_not_a_syntax_error() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(&conn, "plan", "The Plan", "what the plan is", "").unwrap();
+
+    // Every one of ? ' , is FTS5 operator syntax. Unsanitised this is not a
+    // valid MATCH expression at all, and SQLite answers with an error.
+    assert_eq!(slugs_for(&conn, "what's the plan, exactly?"), vec!["plan"]);
+}
+
+#[test]
+fn a_query_with_no_searchable_tokens_yields_no_hits() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(&conn, "notes", "Notes", "body", "").unwrap();
+
+    // MATCH on an empty expression is itself an error, so this must short-circuit.
+    assert!(search_wiki_pages(&conn, "?! ...", 10).unwrap().is_empty());
+}
+
+#[test]
+fn search_clamps_the_limit_at_both_ends() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    for i in 0..3 {
+        write_wiki_page(
+            &conn,
+            &format!("p{}", i),
+            &format!("Page {}", i),
+            "shared term",
+            "",
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        search_wiki_pages(&conn, "shared", 0).unwrap().len(),
+        1,
+        "a zero limit clamps up to the minimum of 1"
+    );
+    assert_eq!(
+        search_wiki_pages(&conn, "shared", WIKI_SEARCH_LIMIT_MAX + 500)
+            .unwrap()
+            .len(),
+        3,
+        "an oversized limit clamps down without erroring"
+    );
+}
+
+#[test]
+fn search_carries_a_snippet_and_the_summary() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(
+        &conn,
+        "notes",
+        "Notes",
+        "a long body mentioning pangolins somewhere inside it",
+        "about pangolins",
+    )
+    .unwrap();
+
+    let hit = &search_wiki_pages(&conn, "pangolins", 10).unwrap()[0];
+    assert_eq!(hit.summary, "about pangolins");
+    assert!(
+        hit.snippet.contains('[') && hit.snippet.contains(']'),
+        "the matched term should be bracketed, got {:?}",
+        hit.snippet
+    );
+}
+
+#[test]
+fn a_deleted_page_stops_matching() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(&conn, "ephemeral", "Ephemeral", "quokka sighting", "").unwrap();
+    assert_eq!(slugs_for(&conn, "quokka"), vec!["ephemeral"]);
+
+    delete_wiki_page(&conn, "ephemeral").unwrap();
+
+    // Relies on wiki_pages_ad keeping wiki_fts in step.
+    assert!(slugs_for(&conn, "quokka").is_empty());
+}
+
+#[test]
+fn an_edited_page_is_reindexed() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    write_wiki_page(&conn, "notes", "Notes", "quokka sighting", "").unwrap();
+    write_wiki_page(&conn, "notes", "Notes", "wombat sighting", "").unwrap();
+
+    assert!(slugs_for(&conn, "quokka").is_empty(), "stale term must go");
+    assert_eq!(slugs_for(&conn, "wombat"), vec!["notes"]);
+}

@@ -2,6 +2,28 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Wiki search, and an FTS sanitizer both searches now use (#15)
+
+### Added
+- `remind_me_wiki_search` — BM25 full-text search over wiki page titles and
+  content, with an FTS5 `snippet()` excerpt. `limit` clamps to 1..=50.
+- `fts::sanitize_fts_query`, shared by wiki and memory search.
+
+### Fixed
+- **Memory search choked on ordinary punctuation.** `search_memories` passed the
+  raw query straight to `MATCH`, where `?`, `'`, `,`, `.` and `-` are operator
+  syntax — so `what's the plan, exactly?` was a SQLite *syntax error*, not a
+  search returning nothing. Both searches now tokenise, quote each token (which
+  also stops `and` / `or` / `near` being parsed as operators), and join with
+  `OR`; BM25 still ranks by term importance.
+- A query with no searchable tokens short-circuits to no results. `MATCH` on an
+  empty expression is itself an error.
+
+### Notes
+This is a visible change to memory search: queries that previously errored now
+return results. Nothing that worked before behaves differently — the sanitizer
+is a no-op on a query that was already a bare word list.
+
 ## 2026-07-29 — Reset the schema to remind_me's current one (#29)
 
 ### Changed

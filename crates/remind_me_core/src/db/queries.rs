@@ -1,3 +1,4 @@
+use crate::fts::sanitize_fts_query;
 use crate::models::{
     AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, Memory, MemoryAddInput,
     MemoryListInput, MemoryListResult, MemorySearchInput, MemorySearchResult, MemoryUpdateInput,
@@ -350,6 +351,15 @@ pub fn search_memories(
 ) -> Result<Vec<MemorySearchResult>> {
     let weights = choose_rrf_weights(&input.query, RetrievalStrategy::Auto);
 
+    // Raw user text is not a valid FTS5 MATCH expression — ordinary punctuation
+    // is operator syntax there, so a question like "what's the plan?" was a
+    // syntax error rather than a search. An empty result means nothing was
+    // searchable; MATCH on an empty string is itself an error.
+    let match_expr = sanitize_fts_query(&input.query);
+    if match_expr.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // Derived from MEMORY_COLUMNS rather than spelled out, so adding a column
     // cannot leave this query selecting a stale subset — which is exactly how
     // `base_weight` slipped past here once.
@@ -374,7 +384,7 @@ pub fn search_memories(
     sql.push_str(" ORDER BY bm25(memories_fts) LIMIT ?");
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![input.query, (input.limit * 2) as i64], |row| {
+    let rows = stmt.query_map(params![match_expr, (input.limit * 2) as i64], |row| {
         let memory = parse_memory_row(row)?;
         let fts_rank: f64 = row.get("fts_rank")?;
         Ok(MemorySearchResult {

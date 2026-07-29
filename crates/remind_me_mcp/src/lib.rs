@@ -273,6 +273,18 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_wiki_search",
+                                "description": "Full-text search wiki page titles and content, ranked by BM25.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+                                        "limit": { "type": "integer", "default": 10, "minimum": 1, "maximum": 50 }
+                                    },
+                                    "required": ["query"]
+                                }
+                            },
+                            {
                                 "name": "remind_me_wiki_list",
                                 "description": "List every wiki page, most recently updated first.",
                                 "inputSchema": {
@@ -596,6 +608,27 @@ impl McpServer {
                             json!({ "isError": true, "content": [{ "type": "text", "text": format!("Vitality report error: {}", e) }] })
                         }
                     },
+                    "remind_me_wiki_search" => {
+                        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(wiki::WIKI_SEARCH_LIMIT_DEFAULT);
+                        if query.is_empty() {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": "`query` is required" }] })
+                        } else {
+                            match wiki::search_wiki_pages(&conn, query, limit) {
+                                Ok(hits) => {
+                                    let body = json!({ "count": hits.len(), "results": hits });
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki search error: {}", e) }] })
+                                }
+                            }
+                        }
+                    }
                     "remind_me_wiki_list" => match wiki::list_wiki_pages(&conn) {
                         Ok(pages) => {
                             let body = json!({ "count": pages.len(), "pages": pages });
@@ -975,6 +1008,68 @@ mod tests {
             serde_json::from_str::<Value>(&text_of(&after)).unwrap()["count"],
             0
         );
+    }
+
+    #[test]
+    fn test_wiki_search_tool() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        assert!(
+            resp["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "remind_me_wiki_search"),
+            "remind_me_wiki_search not in tools/list"
+        );
+
+        call(
+            &server,
+            "remind_me_wiki_write",
+            json!({ "slug": "vlan", "title": "VLAN Setup", "content": "trunking notes",
+                    "summary": "how to trunk" }),
+        );
+
+        let hits = call(
+            &server,
+            "remind_me_wiki_search",
+            json!({ "query": "trunking" }),
+        );
+        assert!(hits.get("isError").is_none(), "search failed: {:?}", hits);
+        let body: Value = serde_json::from_str(&text_of(&hits)).unwrap();
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["results"][0]["slug"], "vlan");
+        assert_eq!(body["results"][0]["summary"], "how to trunk");
+
+        let missing = call(&server, "remind_me_wiki_search", json!({}));
+        assert_eq!(missing["isError"], true);
+    }
+
+    #[test]
+    fn test_memory_search_survives_punctuation() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        call(
+            &server,
+            "remind_me_add",
+            json!({ "content": "the plan is to ship" }),
+        );
+
+        // Unsanitised, this is an FTS5 syntax error rather than a search.
+        let found = call(
+            &server,
+            "remind_me_search",
+            json!({ "query": "what's the plan, exactly?" }),
+        );
+        assert!(
+            found.get("isError").is_none(),
+            "search errored: {:?}",
+            found
+        );
+        assert!(text_of(&found).contains("the plan is to ship"));
     }
 
     #[test]
