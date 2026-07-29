@@ -2,6 +2,26 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Wiki list and delete (#4)
+
+### Added
+- `remind_me_wiki_list` — every page, most recently updated first. The core
+  `list_wiki_pages` already existed; it had simply never been exposed as a tool.
+- `remind_me_wiki_delete` — deletes by **title or slug**. Both work because the
+  input is run through the existing `wiki_import::slugify`, which is idempotent
+  on a string that is already a slug: `"VLAN Setup!"` and `"vlan-setup"` both
+  resolve to `vlan-setup`. This is how the reference accepts either form.
+- Reserved system pages (`index`, `log`, `schema`) are refused rather than
+  deleted, matching `wiki.RESERVED_SLUGS`. None of them exist yet — this crate
+  has no on-disk wiki — so the guard is there to keep behavior stable once
+  `wiki_load` / `wiki_compile` start generating them.
+- 12 tests, including casing and punctuation drift in titles, delete
+  idempotence, and reserved pages addressed by title rather than slug.
+
+### Notes
+`get_wiki_page` and `list_wiki_pages` each carried their own copy of the
+row-to-struct mapping; both now share one helper alongside the new delete.
+
 ## 2026-07-29 — Complete memory CRUD (#3)
 
 ### Added
