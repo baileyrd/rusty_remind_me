@@ -110,6 +110,69 @@ fn default_token_budget() -> usize {
     800
 }
 
+/// Input model for listing memories with filters and pagination.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryListInput {
+    pub category: Option<String>,
+    /// A memory must carry *all* of these tags to match.
+    pub tags: Option<Vec<String>>,
+    pub source: Option<String>,
+    #[serde(default = "default_list_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub response_format: ResponseFormat,
+}
+
+fn default_list_limit() -> usize {
+    20
+}
+
+/// Inclusive bounds the reference enforces on `MemoryListInput::limit`.
+pub const LIST_LIMIT_MIN: usize = 1;
+pub const LIST_LIMIT_MAX: usize = 100;
+
+/// A page of memories plus the total matching the same filters.
+///
+/// `total` counts every row the filters match, not just the returned page, so
+/// callers can paginate without a second round trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryListResult {
+    pub memories: Vec<Memory>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// Input model for updating a memory. Every field but `memory_id` is optional;
+/// omitted fields are left untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryUpdateInput {
+    pub memory_id: String,
+    pub content: Option<String>,
+    pub category: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Outcome of an update attempt.
+///
+/// `NoFields` is distinct from `Updated` because the reference reports
+/// "nothing to update" rather than silently touching `updated_at`.
+#[derive(Debug, Clone)]
+pub enum UpdateOutcome {
+    Updated(Box<Memory>),
+    NotFound,
+    NoFields,
+}
+
+/// Input model for deleting a memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryDeleteInput {
+    pub memory_id: String,
+}
+
 /// Search result item containing memory and diagnostic ranking scores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchResult {
