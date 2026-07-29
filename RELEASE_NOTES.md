@@ -2,6 +2,36 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Dormancy filtering actually filters (#24)
+
+### Fixed
+- **`remind_me_search` filtered on the stored `vitality` column, which never
+  decays.** `add_memory` computes that value once, with `access_count = 0` and
+  zero elapsed days, and nothing rewrites it afterwards. So `include_dormant:
+  false` — the default — filtered nothing, and `min_vitality` compared against a
+  number unrelated to the memory's current standing. Both predicates now use
+  vitality recomputed from real elapsed time, including the bridge rule that
+  halves decay for memories accessed at least 10 times.
+
+### Changed
+- **Default search results are smaller.** Memories that have decayed below the
+  0.05 floor no longer come back unless `include_dormant: true` is passed. That
+  is the documented behaviour, but it is the first release in which it has any
+  effect, so an existing vault will visibly return fewer rows.
+
+### Notes
+The filter runs inside the query, before `LIMIT`, so a page of results is not
+truncated and then thinned — the under-filling shape the reference tracks as
+`DI-03`. Expressing the ACT-R formula in SQL would have achieved that too, but
+the bundled SQLite is compiled without `SQLITE_ENABLE_MATH_FUNCTIONS`, so `exp`
+and `sqrt` do not exist. `calculate_vitality` is registered as a scalar SQL
+function instead, which keeps the predicate in the query and leaves exactly one
+implementation of the maths.
+
+`accessed_at` is nullable — `remind_me` leaves it unset until a memory is first
+retrieved — so it falls back to `created_at`. Without that a synced row would
+compute a NULL vitality and vanish from every search.
+
 ## 2026-07-29 — Memory classification, and one owner for decay_rate (#17)
 
 ### Added

@@ -8,7 +8,8 @@ use crate::models::{
 };
 use crate::retrieval::{choose_rrf_weights, rank_rrf, trim_by_token_budget};
 use crate::vitality::{
-    calculate_vitality, get_decay_rate, get_source_prior, get_type_prior, VITALITY_FLOOR,
+    calculate_vitality, get_decay_rate, get_source_prior, get_type_prior, EFFECTIVE_VITALITY_FN,
+    VITALITY_FLOOR,
 };
 use chrono::Utc;
 use rusqlite::types::Value;
@@ -36,6 +37,8 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
     let metadata: serde_json::Value =
         serde_json::from_str(&meta_json).unwrap_or(serde_json::Value::Null);
 
+    let created_at: String = row.get("created_at")?;
+
     Ok(Memory {
         id: row.get("id")?,
         content: row.get("content")?,
@@ -43,7 +46,7 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
         tags,
         source: row.get("source")?,
         metadata,
-        created_at: row.get("created_at")?,
+        created_at: created_at.clone(),
         updated_at: row.get("updated_at")?,
         capture_id: row.get("capture_id")?,
         subject: row.get("subject")?,
@@ -54,7 +57,12 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
         vitality: row.get("vitality")?,
         base_weight: row.get("base_weight")?,
         access_count: row.get("access_count")?,
-        accessed_at: row.get("accessed_at")?,
+        // The column is nullable and a row written by `remind_me` may leave it
+        // unset. Falling back to `created_at` matches the reference, and keeps
+        // `get::<String>` from failing on NULL.
+        accessed_at: row
+            .get::<_, Option<String>>("accessed_at")?
+            .unwrap_or_else(|| created_at.clone()),
     })
 }
 
@@ -434,6 +442,27 @@ pub fn unclassified_batch(
     })
 }
 
+/// Effective vitality as a SQL expression over the alias `m`.
+///
+/// The stored `vitality` column is a write-time snapshot that never decays, so
+/// filtering on it means `include_dormant: false` filters nothing and
+/// `min_vitality` compares against a number unrelated to the memory's current
+/// standing. This calls [`vitality::register_sql_functions`]'s scalar function
+/// instead, which keeps the predicate *before* `LIMIT`.
+///
+/// Doing it in Rust after the fetch would push the filter after the limit, the
+/// shape the reference warns about as `DI-03`: the page would be truncated
+/// first and then thinned, under-filling every result set.
+///
+/// `coalesce`s `accessed_at` to `created_at`, because a memory that has never
+/// been retrieved should age from when it was written.
+fn effective_vitality_sql() -> String {
+    format!(
+        "{}(m.base_weight, m.access_count, m.decay_rate, coalesce(m.accessed_at, m.created_at))",
+        EFFECTIVE_VITALITY_FN
+    )
+}
+
 pub fn search_memories(
     conn: &Connection,
     input: &MemorySearchInput,
@@ -460,11 +489,12 @@ pub fn search_memories(
         prefixed_memory_columns("m")
     );
 
+    let effective = effective_vitality_sql();
     if !input.include_dormant {
-        sql.push_str(&format!(" AND m.vitality >= {}", VITALITY_FLOOR));
+        sql.push_str(&format!(" AND {} >= {}", effective, VITALITY_FLOOR));
     }
     if input.min_vitality > 0.0 {
-        sql.push_str(&format!(" AND m.vitality >= {}", input.min_vitality));
+        sql.push_str(&format!(" AND {} >= {}", effective, input.min_vitality));
     }
     if let Some(ref cat) = input.category {
         sql.push_str(&format!(" AND m.category = '{}'", cat.replace('\'', "''")));
