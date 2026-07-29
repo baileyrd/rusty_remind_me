@@ -1,7 +1,7 @@
 use remind_me_api::ApiServer;
 use remind_me_core::db::queries;
 use remind_me_core::{
-    entity, wiki, wiki_import, Database, EntityInput, MemoryAddInput, MemorySearchInput,
+    entity, stats, wiki, wiki_import, Database, EntityInput, MemoryAddInput, MemorySearchInput,
 };
 use remind_me_mcp::McpServer;
 use serde_json::{json, Value};
@@ -245,17 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "stats" => {
                 let conn = db.conn();
-                let count: i64 = conn
-                    .query_row(
-                        "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(0);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "total_memories": count }))?
-                );
+                println!("{}", serde_json::to_string_pretty(&stats::collect(&conn)?)?);
             }
             cmd => {
                 eprintln!("Unknown subcommand: {}. Available: configure, api, server, search, add, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);

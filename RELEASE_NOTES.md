@@ -2,6 +2,34 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Deeper remind_me_stats, one shared implementation (#5)
+
+### Added
+- `remind_me_stats` now reports per-category and per-source counts, the import
+  ledger total, the five most recent memories with 80-character previews, and
+  the database path and size — matching the reference's payload field for field.
+  `total_memories` keeps its meaning, so existing consumers are unaffected.
+
+### Fixed
+- **Statistics were computed in four places**, not the three the issue listed:
+  the MCP tool, the `memory://stats` MCP resource, the HTTP `GET /stats` route,
+  and the CLI `stats` subcommand. All four now call one `stats::collect` and
+  cannot drift.
+- All four swallowed database errors with `.unwrap_or(0)`, reporting an empty
+  store when the database was unreadable. Errors now propagate.
+
+### Notes
+- Database size comes from SQLite's own page accounting rather than a
+  filesystem `stat`, so it is correct for an in-memory database — where the
+  reference has no file to measure and reports 0.
+- No vitality distribution here. The issue called for it, but the reference
+  keeps vitality reporting in `remind_me_vitality_report` (#6); `memory_stats`
+  has none. Putting buckets here would have invented a divergence.
+- `categories` and `sources` serialize alphabetically where the reference emits
+  them count-descending. JSON objects are unordered by specification, and
+  matching the reference's order would have required a new dependency for
+  insertion-ordered maps, so consumers that care should sort by value.
+
 ## 2026-07-29 — Wiki list and delete (#4)
 
 ### Added

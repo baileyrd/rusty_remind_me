@@ -2,6 +2,7 @@ pub mod db;
 pub mod entity;
 pub mod models;
 pub mod retrieval;
+pub mod stats;
 pub mod vitality;
 pub mod wiki;
 pub mod wiki_import;
