@@ -830,3 +830,95 @@ pub struct BulkImportResult {
     pub memories_created: usize,
     pub results: Vec<ImportOutcome>,
 }
+
+// ---------------------------------------------------------------------------
+// HTTP API (`remind_me_api`) — bulk operations and paginated search
+// ---------------------------------------------------------------------------
+//
+// These have no MCP-tool equivalent: the reference's bulk routes exist only
+// on its dashboard-facing HTTP surface (a dashboard selects a batch from a
+// list/search result, then acts on exactly that selection), and paginated
+// search with a `total`/`has_more` envelope is likewise an HTTP-only shape —
+// the MCP `remind_me_search` tool returns a ranked, token-budgeted list
+// instead.
+
+/// A caller-supplied id list, capped for the same reason `ConsolidateInput`
+/// caps its candidate pool: a bounded worst case per request. Dashboard
+/// selections are user-driven and typically small; this is a safety limit,
+/// not an expected size.
+pub const BULK_IDS_MAX: usize = 200;
+
+/// Result of a bulk delete: which ids were removed, which named nothing live.
+///
+/// A missing id does not fail the batch — the rest still applies — so a
+/// caller can tell which selections were stale without retrying one at a
+/// time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BulkDeleteResult {
+    pub deleted: Vec<String>,
+    pub not_found: Vec<String>,
+}
+
+/// How [`BulkTagInput`] combines its `tags` with each memory's existing ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagMode {
+    /// Union onto the memory's existing tags (the default).
+    #[default]
+    Add,
+    /// Drop these tags if present; anything else is left alone.
+    Remove,
+    /// Replace the memory's tags wholesale.
+    Set,
+}
+
+/// Input for a bulk tag operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkTagInput {
+    pub ids: Vec<String>,
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub mode: TagMode,
+}
+
+/// Result of a bulk tag operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BulkTagResult {
+    pub updated: Vec<String>,
+    pub not_found: Vec<String>,
+}
+
+/// Input to the paginated `GET /api/memories/search` route.
+///
+/// `query` has already had any `entity:` token stripped by the caller (see
+/// [`crate::fts::extract_entity_token`]); `entity` carries that token
+/// separately so the entity-scoped path can apply its own rules
+/// (superseded exclusion) rather than folding them into the FTS predicate.
+#[derive(Debug, Clone)]
+pub struct SearchPageInput {
+    pub query: String,
+    pub category: Option<String>,
+    /// A memory must carry *all* of these tags to match.
+    pub tags: Option<Vec<String>>,
+    pub entity: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+/// A page of [`SearchPageInput`] results, with the same pagination envelope
+/// as [`MemoryListResult`] — a client pages through search results the same
+/// way it pages through a list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchPageResult {
+    pub total: usize,
+    pub count: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+    pub memories: Vec<Memory>,
+    /// Set when an `entity:` token named an entity this store has never
+    /// heard of — the result is a real empty page, not a query error, and
+    /// the message says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}

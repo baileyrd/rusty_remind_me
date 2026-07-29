@@ -611,6 +611,29 @@ impl Wiki {
     }
 }
 
+/// Count raw memories awaiting wiki synthesis.
+///
+/// Non-superseded, non-deleted `memories` rows created after the compile
+/// watermark — exactly the set [`Wiki::compile`] would surface, except
+/// uncapped: `compile`'s own `pending` count is truncated by its `limit`
+/// argument, which is right for a synthesis brief and wrong for a status
+/// badge. Zero means the wiki is current with the memory store.
+pub fn pending_compile_count(conn: &Connection) -> Result<usize> {
+    let watermark = get_meta(conn, COMPILE_WATERMARK_KEY)?.unwrap_or_default();
+    let cutoff = if watermark.is_empty() {
+        EPOCH.to_string()
+    } else {
+        watermark
+    };
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM memories
+          WHERE superseded_by IS NULL AND deleted_at IS NULL AND created_at > ?",
+        params![cutoff],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(0) as usize)
+}
+
 /// Read a `wiki_meta` value.
 pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
     conn.query_row(
