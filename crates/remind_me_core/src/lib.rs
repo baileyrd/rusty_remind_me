@@ -9,6 +9,7 @@ pub mod models;
 pub mod normalize;
 pub mod retrieval;
 pub mod stats;
+pub mod status;
 pub mod sync;
 pub mod vitality;
 pub mod wiki;
