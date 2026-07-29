@@ -1,11 +1,13 @@
 use remind_me_core::{
     backup, capture, db::queries, entity, normalize, stats, vitality, wiki, wiki_import,
-    AnnotateInput, AutoCaptureInput, Database, EntityInput, EntityTraverseInput, ExtractBatchInput,
-    FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput,
-    NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome,
-    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, EXTRACT_BATCH_MAX,
-    EXTRACT_BATCH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
-    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    AnnotateInput, AutoCaptureInput, Database, DecomposeBatchInput, DecomposeInput, EntityInput,
+    EntityTraverseInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
+    MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput,
+    ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX,
+    ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX,
+    DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, NORMALIZE_APPLY_MAX,
+    NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX,
+    RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -94,6 +96,51 @@ fn normalize_apply_input_schema() -> Value {
             }
         },
         "required": ["normalizations"]
+    })
+}
+
+/// Input schema for `remind_me_decompose`.
+///
+/// Extracted for the same reason as [`annotate_input_schema`]: an entity array
+/// nested inside a fact array inside the batch exceeds the shared `json!`
+/// literal's expansion recursion limit.
+fn decompose_input_schema() -> Value {
+    let entity = json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" },
+            "kind": { "type": "string" },
+            "aliases": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["name"]
+    });
+
+    let fact = json!({
+        "type": "object",
+        "properties": {
+            "content": { "type": "string", "minLength": 1, "maxLength": 50000 },
+            "memory_type": { "type": "string", "description": "decision, preference, fact, insight, learning, blocker or action_item; defaults to unclassified" },
+            "extra_tags": { "type": "array", "items": { "type": "string" }, "description": "Merged with the parent capture's tags" },
+            "subject": { "type": "string", "maxLength": 200 },
+            "predicate": { "type": "string", "maxLength": 200 },
+            "object": { "type": "string", "maxLength": 500 },
+            "entities": { "type": "array", "items": entity, "maxItems": 20 }
+        },
+        "required": ["content"]
+    });
+
+    json!({
+        "type": "object",
+        "properties": {
+            "capture_id": { "type": "string", "minLength": 1 },
+            "facts": {
+                "type": "array",
+                "minItems": DECOMPOSE_FACTS_MIN,
+                "maxItems": DECOMPOSE_FACTS_MAX,
+                "items": fact
+            }
+        },
+        "required": ["capture_id", "facts"]
     })
 }
 
@@ -259,6 +306,21 @@ impl McpServer {
                                         "kind": { "type": "string" }
                                     },
                                     "required": ["name"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_decompose",
+                                "description": "Break a captured conversation into individually searchable atomic facts, each linked to the capture. A fact whose subject/predicate match an existing fact but whose object differs supersedes it.",
+                                "inputSchema": decompose_input_schema()
+                            },
+                            {
+                                "name": "remind_me_decompose_batch",
+                                "description": "Fetch captures that have not been decomposed into atomic facts yet.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "batch_size": { "type": "integer", "default": 20, "minimum": DECOMPOSE_BATCH_MIN, "maximum": DECOMPOSE_BATCH_MAX }
+                                    }
                                 }
                             },
                             {
@@ -679,6 +741,45 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Extract batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_decompose" => {
+                        let input: Result<DecomposeInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(decompose_input) => {
+                                if decompose_input.facts.len() < DECOMPOSE_FACTS_MIN
+                                    || decompose_input.facts.len() > DECOMPOSE_FACTS_MAX
+                                {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("facts must hold {}..={} entries", DECOMPOSE_FACTS_MIN, DECOMPOSE_FACTS_MAX) }] })
+                                } else {
+                                    match capture::decompose(&conn, &decompose_input) {
+                                        Ok(Some(result)) => {
+                                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                        }
+                                        Ok(None) => {
+                                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("No memory found with capture_id {:?}.", decompose_input.capture_id) }] })
+                                        }
+                                        Err(e) => {
+                                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Decompose error: {}", e) }] })
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid decompose input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_decompose_batch" => {
+                        let input: DecomposeBatchInput = serde_json::from_value(args)
+                            .unwrap_or(DecomposeBatchInput { batch_size: 20 });
+                        match capture::undecomposed_batch(&conn, &input) {
+                            Ok(batch) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&batch).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Decompose batch error: {}", e) }] })
                             }
                         }
                     }

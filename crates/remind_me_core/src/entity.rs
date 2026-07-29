@@ -557,3 +557,158 @@ pub fn traverse_from_name(
         entities,
     })
 }
+
+/// The deterministic id for a typed relation edge.
+///
+/// `sha256("subject_id|normalized_relation|object_id")` truncated to 12 hex
+/// characters, matching the reference. The relation label is normalised for the
+/// same reason entity names are — so two machines recording the same edge
+/// converge on one row rather than two.
+pub fn entity_relation_id(
+    subject_entity_id: &str,
+    relation: &str,
+    object_entity_id: &str,
+) -> String {
+    let key = format!(
+        "{}|{}|{}",
+        subject_entity_id,
+        normalize_entity_name(relation),
+        object_entity_id
+    );
+    sha256::digest(key)[..12].to_string()
+}
+
+/// Record a typed edge between two entities. Returns `true` if it is new.
+///
+/// Insert-or-ignore on the derived id, so re-recording the same edge is a no-op
+/// rather than an error. The stored label has its whitespace collapsed, matching
+/// the id's normalisation.
+pub fn upsert_entity_relation(
+    conn: &Connection,
+    subject_entity_id: &str,
+    relation: &str,
+    object_entity_id: &str,
+) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let id = entity_relation_id(subject_entity_id, relation, object_entity_id);
+    let label = relation.split_whitespace().collect::<Vec<_>>().join(" ");
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO entity_relations
+             (id, subject_entity_id, relation, object_entity_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        params![id, subject_entity_id, label, object_entity_id, now, now],
+    )?;
+    Ok(inserted > 0)
+}
+
+/// Best-effort: record a relation edge when an SPO triple names two *known*
+/// entities.
+///
+/// A memory's triple is free text — writing one does not imply the subject and
+/// object name anything in the graph. An edge is only recorded when **both**
+/// sides resolve to entities that already exist, typically because the same
+/// call's `entities` list upserted them a moment earlier. A triple naming
+/// something unknown keeps working exactly as before: a memory-level triple
+/// with no graph edge, rather than an error or an invented entity.
+///
+/// Returns `true` when both sides resolved, whether or not the edge was new.
+pub fn maybe_link_entity_relation(
+    conn: &Connection,
+    subject: Option<&str>,
+    predicate: Option<&str>,
+    object: Option<&str>,
+) -> Result<bool> {
+    let (Some(subject), Some(predicate), Some(object)) = (subject, predicate, object) else {
+        return Ok(false);
+    };
+    if subject.trim().is_empty() || predicate.trim().is_empty() || object.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let (Some(subject_entity), Some(object_entity)) = (
+        resolve_entity(conn, subject)?,
+        resolve_entity(conn, object)?,
+    ) else {
+        return Ok(false);
+    };
+
+    upsert_entity_relation(conn, &subject_entity.id, predicate, &object_entity.id)?;
+    Ok(true)
+}
+
+/// Supersede live facts that a new triple contradicts.
+///
+/// A memory sharing this triple's `(subject, predicate)` but carrying a
+/// *different* `object` is a contradiction: "I moved to Boston" replaces "I
+/// live in Seattle" even though the two share no words, which similarity-based
+/// merging could never catch.
+///
+/// Returns the ids superseded.
+///
+/// # What this deliberately does not do
+///
+/// It is **not** predicate inference. `lives_in` does not contradict `visited`
+/// — only an exact normalised `(subject, predicate)` match counts. A
+/// differently-worded predicate for a related-but-distinct claim is a
+/// false-positive risk the caller controls by choosing predicate names, not
+/// something this tries to resolve.
+///
+/// A memory with the *same* object is the same fact restated, not a
+/// contradiction, so it survives.
+///
+/// # Why the comparison is not in SQL
+///
+/// `lower()` in SQL would miss internal-whitespace variants, which
+/// [`normalize_entity_name`] collapses. SQL narrows to live, fully-tripled
+/// candidates; the exact comparison happens here, against the same
+/// normalisation the entity graph uses for identity.
+pub fn supersede_contradicting_facts(
+    conn: &Connection,
+    memory_id: &str,
+    subject: Option<&str>,
+    predicate: Option<&str>,
+    object: Option<&str>,
+) -> Result<Vec<String>> {
+    let (Some(subject), Some(predicate), Some(object)) = (subject, predicate, object) else {
+        return Ok(Vec::new());
+    };
+    if subject.is_empty() || predicate.is_empty() || object.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let want_subject = normalize_entity_name(subject);
+    let want_predicate = normalize_entity_name(predicate);
+    let want_object = normalize_entity_name(object);
+
+    let mut stmt = conn.prepare(
+        "SELECT id, subject, predicate, object FROM memories
+          WHERE id != ?
+            AND superseded_by IS NULL AND deleted_at IS NULL
+            AND subject IS NOT NULL AND predicate IS NOT NULL AND object IS NOT NULL",
+    )?;
+    let candidates: Vec<(String, String, String, String)> = stmt
+        .query_map(params![memory_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_>>()?;
+    drop(stmt);
+
+    let now = Utc::now().to_rfc3339();
+    let mut superseded = Vec::new();
+    for (id, candidate_subject, candidate_predicate, candidate_object) in candidates {
+        if normalize_entity_name(&candidate_subject) != want_subject
+            || normalize_entity_name(&candidate_predicate) != want_predicate
+        {
+            continue;
+        }
+        if normalize_entity_name(&candidate_object) == want_object {
+            continue; // the same fact restated, not a contradiction
+        }
+        conn.execute(
+            "UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id = ?",
+            params![memory_id, now, id],
+        )?;
+        superseded.push(id);
+    }
+    Ok(superseded)
+}

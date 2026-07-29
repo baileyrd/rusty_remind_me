@@ -6,13 +6,18 @@
 //! `remind_me_decompose` to break the capture into atomic facts.
 
 use crate::db::queries::{parse_memory_row, MEMORY_COLUMNS};
+use crate::entity::{
+    apply_entity_mentions, maybe_link_entity_relation, supersede_contradicting_facts,
+};
 use crate::models::{
-    AutoCaptureInput, Capture, CaptureResult, Memory, CAPTURE_SOURCE, CAPTURE_TITLE_CHARS,
-    DIALOG_CATEGORY,
+    AutoCaptureInput, Capture, CaptureResult, DecomposeBatchInput, DecomposeBatchResult,
+    DecomposeInput, DecomposeResult, Memory, UndecomposedCapture, CAPTURE_SOURCE,
+    CAPTURE_TITLE_CHARS, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSITION_SOURCE,
+    DIALOG_CATEGORY, FACT_CATEGORY, UNCLASSIFIED,
 };
 use crate::vitality::{calculate_vitality, get_decay_rate, get_source_prior, get_type_prior};
 use chrono::Utc;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
 /// Derive a display title from a summary when the caller supplied none.
 ///
@@ -221,4 +226,184 @@ pub fn get_capture(conn: &Connection, capture_id: &str) -> Result<Option<Capture
         summary,
         other,
     }))
+}
+
+/// Break a capture into individually searchable atomic facts.
+///
+/// Each fact becomes its own memory, linked to the capture through
+/// `source_capture_id`. Facts are *not* captures themselves, so their own
+/// `capture_id` stays NULL — that is what keeps a decomposed fact out of
+/// [`undecomposed_batch`] and stops decomposition generating its own backlog.
+///
+/// Three things happen per fact beyond the insert, in this order, and the order
+/// matters:
+///
+/// 1. **Entity mentions are applied**, which upserts any entities the fact
+///    names.
+/// 2. **A relation edge is recorded** when the triple's subject and object both
+///    resolve to *known* entities — usually the ones step 1 just created. Doing
+///    this before step 1 would find nothing.
+/// 3. **Contradicted facts are superseded.**
+///
+/// Returns `None` when no memory carries `capture_id`.
+pub fn decompose(conn: &Connection, input: &DecomposeInput) -> Result<Option<DecomposeResult>> {
+    let parent_tags: Option<Vec<String>> = conn
+        .query_row(
+            "SELECT tags FROM memories WHERE capture_id = ? LIMIT 1",
+            params![input.capture_id],
+            |row| {
+                let tags_json: String = row.get(0)?;
+                Ok(serde_json::from_str(&tags_json).unwrap_or_default())
+            },
+        )
+        .optional()?;
+    let Some(parent_tags) = parent_tags else {
+        return Ok(None);
+    };
+
+    let now = Utc::now();
+    let now_iso = now.to_rfc3339();
+    let mut fact_ids = Vec::new();
+    let mut entities_linked = 0;
+    let mut relations_linked = 0;
+    let mut superseded_ids = Vec::new();
+
+    for fact in &input.facts {
+        let fact_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
+        let memory_type = fact
+            .memory_type
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .unwrap_or(UNCLASSIFIED);
+
+        // Tags: the parent's, then the fact's own, de-duplicated and
+        // order-preserving — the same merge idiom `upsert_entity` uses for
+        // aliases.
+        let mut merged_tags = parent_tags.clone();
+        for tag in &fact.extra_tags {
+            if !merged_tags.contains(tag) {
+                merged_tags.push(tag.clone());
+            }
+        }
+
+        // `memory_type` owns `decay_rate` — the single-writer arrangement
+        // established when reclassify landed — and seeds `base_weight`, so a
+        // decision outranks an unclassified aside before any feedback or access
+        // signal exists. At zero elapsed days vitality equals base_weight
+        // exactly, so both columns carry the same seeded value.
+        let decay_rate = get_decay_rate(memory_type);
+        let base_weight = get_type_prior(memory_type);
+
+        conn.execute(
+            "INSERT INTO memories (
+                id, content, category, tags, source, metadata,
+                capture_id, source_capture_id, created_at, updated_at,
+                memory_type, decay_rate, vitality, base_weight, status,
+                accessed_at, access_count, subject, predicate, object
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?, ?, ?)",
+            params![
+                fact_id,
+                fact.content,
+                FACT_CATEGORY,
+                serde_json::to_string(&merged_tags).unwrap_or_else(|_| "[]".to_string()),
+                DECOMPOSITION_SOURCE,
+                serde_json::json!({ "source_capture_id": input.capture_id }).to_string(),
+                input.capture_id,
+                now_iso,
+                now_iso,
+                memory_type,
+                decay_rate,
+                base_weight,
+                base_weight,
+                now_iso,
+                fact.subject,
+                fact.predicate,
+                fact.object,
+            ],
+        )?;
+
+        entities_linked += apply_entity_mentions(conn, &fact_id, &fact.entities)?;
+        if maybe_link_entity_relation(
+            conn,
+            fact.subject.as_deref(),
+            fact.predicate.as_deref(),
+            fact.object.as_deref(),
+        )? {
+            relations_linked += 1;
+        }
+        superseded_ids.extend(supersede_contradicting_facts(
+            conn,
+            &fact_id,
+            fact.subject.as_deref(),
+            fact.predicate.as_deref(),
+            fact.object.as_deref(),
+        )?);
+
+        fact_ids.push(fact_id);
+    }
+
+    Ok(Some(DecomposeResult {
+        created: fact_ids.len(),
+        fact_ids,
+        capture_id: input.capture_id.clone(),
+        parent_tags_inherited: parent_tags,
+        entities_linked,
+        relations_linked,
+        superseded_ids,
+    }))
+}
+
+/// Captures that have not been decomposed yet, newest first.
+///
+/// A row qualifies when it **is** a capture (`capture_id` set), is **not itself
+/// a fact** (`source_capture_id` unset), and nothing already names its
+/// `capture_id` as a source. That last clause is the "already done" test —
+/// there is no decomposed flag, so a capture leaves the backlog once any fact
+/// points back at it.
+pub fn undecomposed_batch(
+    conn: &Connection,
+    input: &DecomposeBatchInput,
+) -> Result<DecomposeBatchResult> {
+    let batch_size = input
+        .batch_size
+        .clamp(DECOMPOSE_BATCH_MIN, DECOMPOSE_BATCH_MAX);
+    let predicate = "m.capture_id IS NOT NULL
+         AND m.source_capture_id IS NULL
+         AND m.deleted_at IS NULL
+         AND NOT EXISTS (
+             SELECT 1 FROM memories c WHERE c.source_capture_id = m.capture_id
+         )";
+
+    let total: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM memories m WHERE {}", predicate),
+        [],
+        |r| r.get(0),
+    )?;
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT m.id, m.capture_id, m.content, m.category, m.tags
+           FROM memories m
+          WHERE {}
+          ORDER BY m.created_at DESC
+          LIMIT ?",
+        predicate
+    ))?;
+    let memories: Vec<UndecomposedCapture> = stmt
+        .query_map(params![batch_size as i64], |row| {
+            let content: String = row.get("content")?;
+            let tags_json: String = row.get("tags")?;
+            Ok(UndecomposedCapture {
+                id: row.get("id")?,
+                capture_id: row.get("capture_id")?,
+                content_snippet: content.chars().take(500).collect(),
+                category: row.get("category")?,
+                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+            })
+        })?
+        .collect::<Result<_>>()?;
+
+    Ok(DecomposeBatchResult {
+        memories,
+        total_undecomposed: total.max(0) as usize,
+    })
 }
