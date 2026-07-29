@@ -9,17 +9,19 @@
 #![recursion_limit = "512"]
 
 use remind_me_core::{
-    backup, capture, db::queries, dbs_import, entity, export, importer, normalize, stats, status,
-    vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki, wiki_import, AnnotateInput,
-    AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database, DbsImportInput,
-    DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput, ExportInput,
-    ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
-    MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput,
-    ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
-    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
-    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
-    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN,
-    NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    backup, capture, db::queries, dbs_import, entity, export, importer, mempalace_import,
+    normalize, stats, status, vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki,
+    wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database,
+    DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput,
+    ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
+    MemorySearchInput, MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput,
+    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN,
+    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
+    EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX,
+    IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
+    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
+    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -419,6 +421,27 @@ impl McpServer {
                                         "dry_run": { "type": "boolean", "default": false, "description": "Report what would be imported without writing" }
                                     },
                                     "required": ["db_path"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_import_mempalace",
+                                "description": "Bulk-import memories from a MemPalace ChromaDB store, one page at a time. Reads its metadata segment directly, read-only, rather than one drawer at a time via MemPalace's own tools. A drawer carrying remind_me's own memory frontmatter has its category/tags/created restored; everything else is stored as one opaque memory per drawer, tagged with its wing and room. Already-imported drawers are skipped (tracked by drawer id), so reruns are safe. Reads REMIND_ME_MEMPALACE_PATH for the store location.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "wing": { "type": "string", "description": "Restrict to one wing (project). Omit for all." },
+                                        "room": { "type": "string", "description": "Restrict to one room within the wing. Omit for all." },
+                                        "limit": {
+                                            "type": "integer",
+                                            "minimum": MEMPALACE_IMPORT_LIMIT_MIN,
+                                            "maximum": MEMPALACE_IMPORT_LIMIT_MAX,
+                                            "default": 500
+                                        },
+                                        "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                                        "category": { "type": "string", "description": "Category for a drawer with no restorable frontmatter category (default: mempalace_import)" },
+                                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Extra tags added to every imported memory" },
+                                        "dry_run": { "type": "boolean", "default": false, "description": "Report what would be imported without writing" }
+                                    }
                                 }
                             },
                             {
@@ -966,6 +989,24 @@ impl McpServer {
                             },
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid dbs import input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_import_mempalace" => {
+                        let input: Result<MempalaceImportInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(import_input) => {
+                                match mempalace_import::pull_mempalace(&conn, &import_input) {
+                                    Ok(result) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("MemPalace import error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid MemPalace import input: {}", e) }] })
                             }
                         }
                     }
@@ -1949,6 +1990,39 @@ mod tests {
         // reveal whether a path outside the roots is there.
         assert!(
             text_of(&result).contains("not in allowed import roots"),
+            "got {}",
+            text_of(&result)
+        );
+    }
+
+    #[test]
+    fn test_import_mempalace_is_registered_and_has_no_path_field() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 13, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tool = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_import_mempalace")
+            .expect("remind_me_import_mempalace not in tools/list");
+        // Unlike remind_me_import_dbs, the store location is operator
+        // configuration (REMIND_ME_MEMPALACE_PATH), not a per-call argument —
+        // there is nothing required at all.
+        assert!(tool["inputSchema"]["required"]
+            .as_array()
+            .is_none_or(|r| r.is_empty()));
+        assert_eq!(tool["inputSchema"]["properties"]["limit"]["maximum"], 2000);
+
+        // No store configured in the test environment, so this must fail —
+        // as "no store found", not silently succeed with zero results, which
+        // would be indistinguishable from an empty palace.
+        let result = call(&server, "remind_me_import_mempalace", json!({}));
+        assert_eq!(result["isError"], true);
+        assert!(
+            text_of(&result).contains("No MemPalace store found"),
             "got {}",
             text_of(&result)
         );

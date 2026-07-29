@@ -2,6 +2,66 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Import a MemPalace ChromaDB store (#53)
+
+### Added
+- **`remind_me_import_mempalace`** — bulk-imports MemPalace drawers by
+  reading its persistent ChromaDB store's metadata segment directly,
+  read-only. A drawer carrying `remind_me`'s own memory frontmatter has its
+  `category`/`tags`/`created` restored; everything else becomes one opaque
+  memory per drawer, tagged with its wing and room.
+- `docs/adr/0001-mempalace-chroma-sqlite-read.md` — the first ADR in this
+  repo, recording the investigation the issue asked for before writing any
+  code: Chroma's local persistence keeps documents and metadata in an
+  ordinary SQLite file (`collections`/`segments`/`embeddings`/
+  `embedding_metadata`, with a document's text under the reserved key
+  `chroma:document`), verified stable from `chromadb` 0.5.0 (the reference's
+  own minimum pin) through 1.5.9. The vector segment — the actual HNSW
+  index — is never opened.
+- A `mempalace` entry in the connector registry, `file_import_kind: false`,
+  matching `dbs`'s precedent from #52: listed for discovery, not dispatch.
+
+### Notes
+This was the one import source in the backlog with a genuinely hard
+dependency — Rust has no ChromaDB client — and the issue was explicit that
+declining the tool was a legitimate outcome if direct reading wasn't
+feasible. It turned out to be the wrong question: the reference's own read
+(`collection.get(..., include=["documents", "metadatas"])`) never asks Chroma
+for a vector in the first place, so "read a vector database" was never
+actually required. Once that was verified rather than assumed, this became
+comparable in shape to `#52`'s `dbs` importer — read a foreign SQLite schema,
+directly, read-only.
+
+**The issue's acceptance criteria says frontmatter-bearing drawers restore
+their original `id`; the reference does not do this.** `pull_mempalace`
+parses a drawer's `id:` frontmatter field into a dict and never reads it
+again — the memory id is always freshly minted, matching every other memory
+this crate creates. This is matched deliberately, not "fixed": these gap
+issues track the reference's actual behaviour, and a test
+(`a_native_drawers_frontmatter_id_is_not_restored`) asserts the real behaviour
+directly so a future change does not quietly turn this into a divergence.
+`category`/`tags`/`created` genuinely are restored, and `source` is restored
+too but always prefixed `mempalace:` — also matched exactly, not idealized.
+
+Unlike `dbs_import`, there is no edit-detection: dedup is keyed on
+`drawer_id` alone, so an edited drawer that keeps its id is silently skipped
+on a rerun. This matches the reference exactly — it has no content-hash
+column to notice the edit with — and is asserted directly for the same
+reason as the `id` point above.
+
+`REMIND_ME_MEMPALACE_PATH` (default `~/.mempalace/palace`) is operator
+configuration, not a per-call argument — `MempalaceImportInput` has no path
+field, matching the reference's own `MempalaceImportInput`. This is why it
+does not go through the import-roots containment check (`SE-02`) a
+caller-supplied path would: nothing about this path is caller-supplied.
+
+The wing/room filter and pagination are applied in Rust, over every drawer in
+the collection, rather than pushed into Chroma's own query planner the way
+the reference does (`collection.get(where=..., limit=, offset=)`) — reading a
+flat key/value table makes that just as simple locally, and it avoids
+depending on whatever internal query-planning API a given Chroma version
+exposes.
+
 ## 2026-07-29 — The HTTP API grows from 2 routes to 19 (#48)
 
 ### Added
