@@ -100,6 +100,47 @@ fn list_tag_filter_requires_all_tags() {
 }
 
 #[test]
+fn tag_filtering_tracks_edits_to_a_memory_s_tags() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "retagged", "general", "manual", &["before"]);
+
+    queries::update_memory(
+        &conn,
+        &MemoryUpdateInput {
+            memory_id: id.clone(),
+            content: None,
+            category: None,
+            tags: Some(vec!["after".into()]),
+            metadata: None,
+        },
+    )
+    .unwrap();
+
+    // Filtering reads the normalized `memory_tags` index rather than the JSON
+    // column, so this is really asserting the `memories_tags_au` trigger keeps
+    // the two in step. Drift here would silently return stale results.
+    let (stale, _) = list(
+        &conn,
+        MemoryListInput {
+            tags: Some(vec!["before".into()]),
+            ..Default::default()
+        },
+    );
+    assert!(stale.is_empty(), "the removed tag must stop matching");
+
+    let (fresh, total) = list(
+        &conn,
+        MemoryListInput {
+            tags: Some(vec!["after".into()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(fresh, vec![id], "the added tag must match");
+    assert_eq!(total, 1);
+}
+
+#[test]
 fn list_total_counts_all_matches_not_just_the_page() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
