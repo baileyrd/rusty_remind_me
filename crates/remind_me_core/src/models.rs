@@ -495,3 +495,38 @@ pub struct Capture {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub other: Vec<Memory>,
 }
+
+/// Request for a batch of memories still awaiting entity/triple extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractBatchInput {
+    #[serde(default = "default_extract_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_extract_batch_size() -> usize {
+    20
+}
+
+/// Inclusive bounds the reference enforces on an extraction batch request.
+pub const EXTRACT_BATCH_MIN: usize = 1;
+pub const EXTRACT_BATCH_MAX: usize = 100;
+
+/// One memory awaiting extraction, trimmed for review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnannotatedMemory {
+    pub id: String,
+    /// First 500 characters of the content, matching the reference.
+    pub content_snippet: String,
+    pub category: String,
+    /// Carried here but not by [`UnclassifiedMemory`] — an extractor benefits
+    /// from knowing what a memory has already been classified as.
+    pub memory_type: String,
+    pub tags: Vec<String>,
+}
+
+/// A page of memories awaiting extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractBatchResult {
+    pub memories: Vec<UnannotatedMemory>,
+    pub total_unannotated: usize,
+}
