@@ -1,6 +1,6 @@
 use remind_me_core::{
-    db::queries, entity, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
-    MemorySearchInput,
+    db::queries, entity, wiki, wiki_import, Database, EntityInput, MemoryAddInput, MemoryListInput,
+    MemorySearchInput, MemoryUpdateInput, UpdateOutcome,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -93,6 +93,50 @@ impl McpServer {
                                         "id": { "type": "string" }
                                     },
                                     "required": ["id"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_list",
+                                "description": "List memories with optional filtering by category, tags, or source. Results are paginated, newest first.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "category": { "type": "string" },
+                                        "tags": {
+                                            "type": "array",
+                                            "items": { "type": "string" },
+                                            "description": "Memory must have ALL of these tags"
+                                        },
+                                        "source": { "type": "string" },
+                                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 },
+                                        "offset": { "type": "integer", "default": 0, "minimum": 0 }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_update",
+                                "description": "Update an existing memory's content, category, tags, or metadata.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" },
+                                        "content": { "type": "string" },
+                                        "category": { "type": "string" },
+                                        "tags": { "type": "array", "items": { "type": "string" } },
+                                        "metadata": { "type": "object" }
+                                    },
+                                    "required": ["memory_id"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_delete",
+                                "description": "Delete a memory by ID.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" }
+                                    },
+                                    "required": ["memory_id"]
                                 }
                             },
                             {
@@ -261,6 +305,61 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_list" => {
+                        let input: Result<MemoryListInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(list_input) => match queries::list_memories(&conn, &list_input) {
+                                Ok(page) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("List error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid list input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_update" => {
+                        let input: Result<MemoryUpdateInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(update_input) => {
+                                match queries::update_memory(&conn, &update_input) {
+                                    Ok(UpdateOutcome::Updated(mem)) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] })
+                                    }
+                                    Ok(UpdateOutcome::NotFound) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Memory `{}` not found", update_input.memory_id) }] })
+                                    }
+                                    Ok(UpdateOutcome::NoFields) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": "Nothing to update — no fields provided" }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Update error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid update input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_delete" => {
+                        let memory_id =
+                            args.get("memory_id").and_then(|v| v.as_str()).unwrap_or("");
+                        match queries::delete_memory(&conn, memory_id) {
+                            Ok(true) => {
+                                json!({ "content": [{ "type": "text", "text": format!("Memory `{}` deleted", memory_id) }] })
+                            }
+                            Ok(false) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Memory `{}` not found", memory_id) }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Delete error: {}", e) }] })
                             }
                         }
                     }
@@ -439,6 +538,110 @@ mod tests {
         let resp = server.handle_request(&req.to_string()).unwrap();
         assert_eq!(resp["result"]["protocolVersion"], "2026-07-28");
         assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], true);
+    }
+
+    fn call(server: &McpServer, name: &str, args: Value) -> Value {
+        let req = json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        });
+        server.handle_request(&req.to_string()).unwrap()["result"].clone()
+    }
+
+    fn text_of(result: &Value) -> String {
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn test_crud_tools_are_registered() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let req = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+
+        for expected in ["remind_me_list", "remind_me_update", "remind_me_delete"] {
+            assert!(names.contains(&expected), "{} not in tools/list", expected);
+        }
+    }
+
+    #[test]
+    fn test_crud_tools_round_trip_over_jsonrpc() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let added = call(
+            &server,
+            "remind_me_add",
+            json!({ "content": "a fact worth keeping" }),
+        );
+        let id = serde_json::from_str::<Value>(&text_of(&added)).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let listed = call(&server, "remind_me_list", json!({}));
+        let page: Value = serde_json::from_str(&text_of(&listed)).unwrap();
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["memories"][0]["id"], id);
+
+        let updated = call(
+            &server,
+            "remind_me_update",
+            json!({ "memory_id": id, "content": "a revised fact" }),
+        );
+        assert!(
+            updated.get("isError").is_none(),
+            "update failed: {:?}",
+            updated
+        );
+        assert!(text_of(&updated).contains("a revised fact"));
+
+        let deleted = call(&server, "remind_me_delete", json!({ "memory_id": id }));
+        assert!(
+            deleted.get("isError").is_none(),
+            "delete failed: {:?}",
+            deleted
+        );
+
+        let after = call(&server, "remind_me_list", json!({}));
+        assert_eq!(
+            serde_json::from_str::<Value>(&text_of(&after)).unwrap()["total"],
+            0
+        );
+    }
+
+    #[test]
+    fn test_crud_tools_surface_errors() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let missing = call(
+            &server,
+            "remind_me_delete",
+            json!({ "memory_id": "mem_nope" }),
+        );
+        assert_eq!(missing["isError"], true);
+
+        let no_fields = call(
+            &server,
+            "remind_me_update",
+            json!({ "memory_id": "mem_nope" }),
+        );
+        assert_eq!(no_fields["isError"], true);
+
+        // `limit` is typed usize; a negative value must be an input error rather
+        // than a silent clamp to zero.
+        let bad_limit = call(&server, "remind_me_list", json!({ "limit": -3 }));
+        assert_eq!(bad_limit["isError"], true);
     }
 
     #[test]

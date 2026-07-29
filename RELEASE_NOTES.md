@@ -2,6 +2,35 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Complete memory CRUD (#3)
+
+### Added
+- `remind_me_list` — filter by category, source, and tags (ALL-of), newest
+  first, with `limit` clamped to 1..=100 and a `total` that counts every match
+  rather than just the returned page.
+- `remind_me_update` — partial update of content, category, tags, and metadata.
+- `remind_me_delete` — removes a memory by id.
+- 17 tests covering pagination tiling, ALL-of tag matching, FTS consistency
+  across update and delete, entity-link cascade, and JSON-RPC round trips.
+
+### Notes
+Two behaviors differ from what issue #3 originally specified, after reading the
+reference more closely:
+
+- **Delete is a hard delete, not a soft delete.** `remind_me` tombstones via
+  `deleted_at` only when sync is configured, so the deletion can propagate to
+  other nodes; with sync off its path is a plain `DELETE`. This crate has no
+  sync layer, so a hard delete is the reference-matching behavior. The
+  `deleted_at` column and its read filters remain for when sync lands.
+- **Update does not recompute vitality.** The reference seeds `base_weight` from
+  `source` alone — it is not category-derived — and its update leaves the value
+  alone. `decay_rate` *is* recomputed here on a category change, because in this
+  crate it is a pure function of category and would otherwise go stale.
+
+Tag filtering runs over `json_each(memories.tags)` rather than a normalized tag
+table, keeping the predicate in SQL so `COUNT`/`LIMIT`/`OFFSET` stay correct.
+It becomes a plain join once `memory_tags` lands (#10), with no caller changes.
+
 ## 2026-07-29 — Wave 0: buildable workspace and CI
 
 ### Fixed
