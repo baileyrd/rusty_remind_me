@@ -491,6 +491,7 @@ fn the_distillation_is_searchable() {
             verbose: false,
             expand_entities: false,
             include_neighbors: false,
+            expand_co_retrieval: false,
         },
     )
     .unwrap();

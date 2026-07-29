@@ -232,12 +232,18 @@ impl McpServer {
                             },
                             {
                                 "name": "remind_me_search",
-                                "description": "Search memories using FTS5 keyword & hybrid ranking.",
+                                "description": "Search memories using FTS5 keyword & hybrid ranking. The three expansion flags surface adjacent memories in their own sections, outside the ranked results, so they never consume `limit`.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "query": { "type": "string" },
-                                        "limit": { "type": "integer", "default": 20 }
+                                        "limit": { "type": "integer", "default": 20 },
+                                        "category": { "type": "string" },
+                                        "include_dormant": { "type": "boolean", "default": false, "description": "Include memories that have decayed below the vitality floor" },
+                                        "min_vitality": { "type": "number", "default": 0, "description": "Only return memories at or above this current vitality" },
+                                        "expand_entities": { "type": "boolean", "default": false, "description": "Also surface memories mentioning the same entities" },
+                                        "include_neighbors": { "type": "boolean", "default": false, "description": "Also surface adjacent chunks of the same source document" },
+                                        "expand_co_retrieval": { "type": "boolean", "default": false, "description": "Also surface memories frequently retrieved alongside these" }
                                     },
                                     "required": ["query"]
                                 }
@@ -596,7 +602,7 @@ impl McpServer {
                         let input: Result<MemorySearchInput, _> = serde_json::from_value(args);
                         match input {
                             Ok(search_input) => {
-                                match queries::search_memories(&conn, &search_input) {
+                                match queries::search_with_expansions(&conn, &search_input) {
                                     Ok(res) => {
                                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&res).unwrap() }] })
                                     }
