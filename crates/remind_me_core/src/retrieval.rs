@@ -34,8 +34,20 @@ pub fn looks_semantic_shaped(query: &str) -> bool {
 pub fn looks_temporal_shaped(query: &str) -> bool {
     let lower = query.to_lowercase();
     let keywords = [
-        "before", "after", "since", "until", "when", "during", "ago", "recently",
-        "yesterday", "today", "tomorrow", "last week", "last month", "last year",
+        "before",
+        "after",
+        "since",
+        "until",
+        "when",
+        "during",
+        "ago",
+        "recently",
+        "yesterday",
+        "today",
+        "tomorrow",
+        "last week",
+        "last month",
+        "last year",
     ];
     keywords.iter().any(|kw| lower.contains(kw))
 }
@@ -91,19 +103,26 @@ pub fn rank_rrf(
         let vitality = item.memory.vitality;
         let vit_rank = if vitality > 0.0 { 1.0 } else { penalty_rank };
 
-        let score = (weights.w_keyword / (RRF_K + kw_rank))
-            + (weights.w_vitality / (RRF_K + vit_rank));
+        let score =
+            (weights.w_keyword / (RRF_K + kw_rank)) + (weights.w_vitality / (RRF_K + vit_rank));
 
         item.score = score;
         item.fts_score = Some(weights.w_keyword / (RRF_K + kw_rank));
         item.vitality_score = Some(weights.w_vitality / (RRF_K + vit_rank));
     }
 
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     ranked
 }
 
-pub fn trim_by_token_budget(results: Vec<MemorySearchResult>, token_budget: usize) -> Vec<MemorySearchResult> {
+pub fn trim_by_token_budget(
+    results: Vec<MemorySearchResult>,
+    token_budget: usize,
+) -> Vec<MemorySearchResult> {
     if token_budget == 0 {
         return results;
     }

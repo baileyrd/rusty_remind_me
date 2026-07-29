@@ -174,7 +174,13 @@ impl McpServer {
             "resources/read" => {
                 let req_id = id.unwrap_or(json!(1));
                 let conn = self.db.conn();
-                let count: i64 = conn.query_row("SELECT count(*) FROM memories WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
                 Some(json!({
                     "jsonrpc": "2.0",
                     "id": req_id,
@@ -219,63 +225,110 @@ impl McpServer {
                         let input: Result<MemoryAddInput, _> = serde_json::from_value(args);
                         match input {
                             Ok(add_input) => match queries::add_memory(&conn, add_input) {
-                                Ok(mem) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] }),
-                                Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Database error: {}", e) }] }),
+                                Ok(mem) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Database error: {}", e) }] })
+                                }
                             },
-                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid input: {}", e) }] }),
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid input: {}", e) }] })
+                            }
                         }
                     }
                     "remind_me_get" => {
                         let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         match queries::get_memory_by_id(&conn, id) {
-                            Ok(Some(mem)) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] }),
-                            Ok(None) => json!({ "isError": true, "content": [{ "type": "text", "text": "Memory not found" }] }),
-                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Error: {}", e) }] }),
+                            Ok(Some(mem)) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] })
+                            }
+                            Ok(None) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": "Memory not found" }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Error: {}", e) }] })
+                            }
                         }
                     }
                     "remind_me_search" => {
                         let input: Result<MemorySearchInput, _> = serde_json::from_value(args);
                         match input {
-                            Ok(search_input) => match queries::search_memories(&conn, &search_input) {
-                                Ok(res) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&res).unwrap() }] }),
-                                Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Search error: {}", e) }] }),
-                            },
-                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid search input: {}", e) }] }),
+                            Ok(search_input) => {
+                                match queries::search_memories(&conn, &search_input) {
+                                    Ok(res) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&res).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Search error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid search input: {}", e) }] })
+                            }
                         }
                     }
                     "remind_me_entity" => {
                         let input: Result<EntityInput, _> = serde_json::from_value(args);
                         match input {
                             Ok(ent_input) => match entity::upsert_entity(&conn, &ent_input) {
-                                Ok(ent) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&ent).unwrap() }] }),
-                                Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Entity error: {}", e) }] }),
+                                Ok(ent) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&ent).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Entity error: {}", e) }] })
+                                }
                             },
-                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity input: {}", e) }] }),
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity input: {}", e) }] })
+                            }
                         }
                     }
                     "remind_me_wiki_write" => {
                         let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
                         let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
                         let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                        let topic = args.get("topic").and_then(|v| v.as_str()).unwrap_or("general");
+                        let topic = args
+                            .get("topic")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("general");
                         match wiki::write_wiki_page(&conn, slug, title, content, topic) {
-                            Ok(page) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] }),
-                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki write error: {}", e) }] }),
+                            Ok(page) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki write error: {}", e) }] })
+                            }
                         }
                     }
                     "remind_me_wiki_read" => {
                         let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
                         match wiki::get_wiki_page(&conn, slug) {
-                            Ok(Some(page)) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] }),
-                            Ok(None) => json!({ "isError": true, "content": [{ "type": "text", "text": "Wiki page not found" }] }),
-                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki read error: {}", e) }] }),
+                            Ok(Some(page)) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
+                            }
+                            Ok(None) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": "Wiki page not found" }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki read error: {}", e) }] })
+                            }
                         }
                     }
                     "remind_me_stats" => {
-                        let count: i64 = conn.query_row("SELECT count(*) FROM memories WHERE deleted_at IS NULL", [], |r| r.get(0)).unwrap_or(0);
+                        let count: i64 = conn
+                            .query_row(
+                                "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
+                                [],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or(0);
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({ "total_memories": count })).unwrap() }] })
                     }
-                    _ => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Unknown tool: {}", tool_name) }] }),
+                    _ => {
+                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Unknown tool: {}", tool_name) }] })
+                    }
                 };
 
                 Some(json!({
@@ -350,6 +403,9 @@ mod tests {
 
         let prompt_req = json!({ "jsonrpc": "2.0", "id": 3, "method": "prompts/list" });
         let prompt_resp = server.handle_request(&prompt_req.to_string()).unwrap();
-        assert_eq!(prompt_resp["result"]["prompts"][0]["name"], "recall_context");
+        assert_eq!(
+            prompt_resp["result"]["prompts"][0]["name"],
+            "recall_context"
+        );
     }
 }

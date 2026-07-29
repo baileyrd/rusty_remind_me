@@ -31,7 +31,9 @@ pub fn upsert_entity(conn: &Connection, input: &EntityInput) -> Result<Entity> {
 }
 
 pub fn get_entity_by_name(conn: &Connection, name: &str) -> Result<Option<Entity>> {
-    let mut stmt = conn.prepare("SELECT id, name, kind, aliases, created_at, updated_at FROM entities WHERE name = ?")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, kind, aliases, created_at, updated_at FROM entities WHERE name = ?",
+    )?;
     let mut rows = stmt.query_map(params![name.trim()], |row| {
         let aliases_json: String = row.get("aliases")?;
         let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
