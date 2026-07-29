@@ -331,15 +331,28 @@ impl McpServer {
                     }
                     "remind_me_wiki_import" => {
                         let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or("");
-                        let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
-                        match wiki_import::import_wiki_dir(&conn, std::path::Path::new(dir), recursive) {
+                        let recursive = args
+                            .get("recursive")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        match wiki_import::import_wiki_dir(
+                            &conn,
+                            std::path::Path::new(dir),
+                            recursive,
+                        ) {
                             Ok(report) => {
                                 let imported: Vec<_> = report.imported.iter().map(|p| json!({
                                     "slug": p.slug, "title": p.title, "topic": p.topic, "path": p.path
                                 })).collect();
-                                let skipped: Vec<_> = report.skipped.iter().map(|(path, reason)| json!({
-                                    "path": path, "reason": reason
-                                })).collect();
+                                let skipped: Vec<_> = report
+                                    .skipped
+                                    .iter()
+                                    .map(|(path, reason)| {
+                                        json!({
+                                            "path": path, "reason": reason
+                                        })
+                                    })
+                                    .collect();
                                 json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
                                     "imported_count": imported.len(),
                                     "skipped_count": skipped.len(),
@@ -347,7 +360,9 @@ impl McpServer {
                                     "skipped": skipped
                                 })).unwrap() }] })
                             }
-                            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki import error: {}", e) }] }),
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki import error: {}", e) }] })
+                            }
                         }
                     }
                     "remind_me_stats" => {
