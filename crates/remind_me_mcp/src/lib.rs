@@ -1,10 +1,10 @@
 use remind_me_core::{
-    backup, db::queries, entity, normalize, stats, vitality, wiki, wiki_import, AnnotateInput,
-    Database, EntityInput, EntityTraverseInput, FeedbackInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput,
-    ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX,
-    ANNOTATE_BATCH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
-    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    backup, capture, db::queries, entity, normalize, stats, vitality, wiki, wiki_import,
+    AnnotateInput, AutoCaptureInput, Database, EntityInput, EntityTraverseInput, FeedbackInput,
+    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
+    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN,
+    NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -258,6 +258,33 @@ impl McpServer {
                                         "kind": { "type": "string" }
                                     },
                                     "required": ["name"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_auto_capture",
+                                "description": "Capture a whole conversation as two linked memories: the verbatim dialog and a concise summary. They share a capture_id, which remind_me_get_capture retrieves both by and remind_me_decompose breaks into atomic facts.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "conversation": { "type": "string", "minLength": 1, "maxLength": 500000, "description": "The verbatim exchange" },
+                                        "summary": { "type": "string", "minLength": 1, "maxLength": 50000, "description": "A concise distillation of it" },
+                                        "title": { "type": "string", "maxLength": 200, "description": "Defaults to the summary's first line" },
+                                        "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+                                        "category": { "type": "string", "default": "conversation", "maxLength": 100, "description": "Category for the SUMMARY; the dialog is always stored as 'dialog'" },
+                                        "metadata": { "type": "object" }
+                                    },
+                                    "required": ["conversation", "summary"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_get_capture",
+                                "description": "Retrieve a linked dialog and summary pair by their shared capture_id.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "capture_id": { "type": "string" }
+                                    },
+                                    "required": ["capture_id"]
                                 }
                             },
                             {
@@ -629,6 +656,41 @@ impl McpServer {
                             },
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_auto_capture" => {
+                        let input: Result<AutoCaptureInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(capture_input) => {
+                                match capture::auto_capture(&conn, &capture_input) {
+                                    Ok(result) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Auto capture error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid auto capture input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_get_capture" => {
+                        let capture_id = args
+                            .get("capture_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match capture::get_capture(&conn, capture_id) {
+                            Ok(Some(found)) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&found).unwrap() }] })
+                            }
+                            Ok(None) => {
+                                json!({ "content": [{ "type": "text", "text": format!("No capture found with id {:?}.", capture_id) }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Get capture error: {}", e) }] })
                             }
                         }
                     }

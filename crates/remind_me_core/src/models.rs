@@ -433,3 +433,65 @@ pub struct NormalizeApplyResult {
     pub results: Vec<NormalizationOutcome>,
     pub errors: Vec<NormalizationError>,
 }
+
+/// Input model for `remind_me_auto_capture`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoCaptureInput {
+    /// The verbatim exchange.
+    pub conversation: String,
+    /// The distillation of it.
+    pub summary: String,
+    /// Falls back to the summary's first line, truncated, when empty.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Category for the **summary**. The dialog's category is always
+    /// [`DIALOG_CATEGORY`].
+    #[serde(default = "default_capture_category")]
+    pub category: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+fn default_capture_category() -> String {
+    "conversation".to_string()
+}
+
+/// Category the verbatim half of a capture is always stored under.
+///
+/// Not the caller's `category` — that names the summary. `extract_batch`
+/// excludes this category, so getting the two the wrong way round would flood
+/// the annotation backlog with raw transcripts.
+pub const DIALOG_CATEGORY: &str = "dialog";
+/// `source` both halves of a capture are stored under.
+pub const CAPTURE_SOURCE: &str = "auto_capture";
+/// Longest title derived from a summary when none is supplied.
+pub const CAPTURE_TITLE_CHARS: usize = 80;
+
+/// The two linked memories a capture produces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureResult {
+    pub capture_id: String,
+    pub dialog_id: String,
+    pub summary_id: String,
+    pub title: String,
+    pub tags: Vec<String>,
+    /// The summary's category; the dialog's is always [`DIALOG_CATEGORY`].
+    pub category: String,
+}
+
+/// A capture retrieved by its `capture_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Capture {
+    pub capture_id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<Memory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Memory>,
+    /// Rows sharing the `capture_id` that are neither half — present so a
+    /// malformed capture is visible rather than silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub other: Vec<Memory>,
+}
