@@ -1,9 +1,11 @@
 use crate::db::migrations;
+use crate::vitality;
 use rusqlite::{Connection, Result};
 
 pub use crate::db::migrations::SCHEMA_VERSION;
 
-/// Open-time setup: connection pragmas, then schema creation and reconciliation.
+/// Open-time setup: connection pragmas, the SQL helper functions, then schema
+/// creation and reconciliation.
 ///
 /// See [`migrations`] for how the schema is defined — it is generated from
 /// `remind_me` rather than written here.
@@ -15,6 +17,10 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         PRAGMA foreign_keys=ON;
         ",
     )?;
+
+    // Scalar functions live on the connection, not in the file, so every
+    // connection has to register them before running a query that uses one.
+    vitality::register_sql_functions(conn)?;
 
     migrations::apply(conn)
 }
