@@ -2,6 +2,42 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-29 — Import normalization (#18)
+
+### Added
+- `remind_me_normalize_batch` — returns raw `document_import` / `chat_import`
+  memories that have not been normalized yet, with 1000-character snippets and
+  `total_unnormalized` so a caller can tell whether another round is worth it.
+  Batch size 1–100.
+- `remind_me_normalize_apply` — writes distillations back, 1–50 at a time. Each
+  entry is `{memory_id, question, summary, resolution?, refs?, entities?}`.
+
+### Notes
+The write is **non-destructive**. A distillation becomes a *new* memory
+(category `normalized`, source `normalization`) and the raw import is untouched,
+staying searchable in its own right. The link is metadata-only, via
+`normalized_from`, which is also how the backlog shrinks — there is no
+"normalized" flag column, so a raw row drops out once anything points back at
+it.
+
+The new memory inherits the raw row's `tags`, `doc_id` and `chunk_index`, the
+last two so neighbour-aware retrieval still associates it with the rest of the
+document, and links any entities the entry names — a raw import is never
+entity-linked automatically, so without that the distillation would be invisible
+to `remind_me_entity` and `remind_me_entity_traverse`.
+
+Distillations are given the same write-time vitality treatment as memories
+written through `remind_me_add`, rather than being left at the column defaults
+to rank unlike everything else.
+
+The asymmetric bounds — 100 to read, 50 to write — are the reference's, not a
+transcription slip.
+
+**The batch is empty until importers land.** Nothing in this crate writes
+`document_import` or `chat_import` memories yet, so on a store built only
+through `remind_me_add` there is never anything to normalize. That is correct
+behaviour and is pinned by a test.
+
 ## 2026-07-29 — Entity relation traversal (#16)
 
 ### Added
