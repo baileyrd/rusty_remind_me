@@ -3,6 +3,7 @@ pub mod db;
 pub mod entity;
 pub mod fts;
 pub mod models;
+pub mod normalize;
 pub mod retrieval;
 pub mod stats;
 pub mod vitality;

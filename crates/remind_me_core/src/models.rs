@@ -324,3 +324,98 @@ fn default_traverse_hops() -> u32 {
 fn default_traverse_cap() -> usize {
     crate::entity::RELATION_TRAVERSAL_CAP
 }
+
+/// Request for a batch of raw imports still awaiting normalization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizeBatchInput {
+    #[serde(default = "default_normalize_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_normalize_batch_size() -> usize {
+    20
+}
+
+/// Inclusive bounds the reference enforces on a normalization batch request.
+pub const NORMALIZE_BATCH_MIN: usize = 1;
+pub const NORMALIZE_BATCH_MAX: usize = 100;
+
+/// Inclusive bounds on an *apply* batch.
+///
+/// Deliberately half the read bound: the reference asks for up to 100 rows to
+/// review and accepts up to 50 distillations back. Not a transcription slip.
+pub const NORMALIZE_APPLY_MIN: usize = 1;
+pub const NORMALIZE_APPLY_MAX: usize = 50;
+
+/// One raw import awaiting normalization, trimmed for review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnnormalizedMemory {
+    pub id: String,
+    /// First 1000 characters of the content, matching the reference.
+    pub content_snippet: String,
+    pub category: String,
+    pub source: String,
+    pub tags: Vec<String>,
+    /// Lifted out of `metadata` because it is the one field a reviewer needs to
+    /// tell two chunks of an import apart.
+    pub filename: Option<String>,
+}
+
+/// A page of raw imports awaiting normalization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizeBatchResult {
+    pub memories: Vec<UnnormalizedMemory>,
+    /// The whole backlog, not just this page, so a caller can tell whether
+    /// another round is worth requesting.
+    pub total_unnormalized: usize,
+}
+
+/// One distillation of a raw import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizationEntry {
+    pub memory_id: String,
+    pub question: String,
+    pub summary: String,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub refs: Vec<String>,
+    /// Entities the distillation mentions. A raw import is never entity-linked
+    /// automatically, so without these the normalized memory is invisible to
+    /// `remind_me_entity` and `remind_me_entity_traverse`.
+    #[serde(default)]
+    pub entities: Vec<EntityInput>,
+}
+
+/// A batch of distillations to write back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizeApplyInput {
+    pub normalizations: Vec<NormalizationEntry>,
+}
+
+/// One successfully written normalization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizationOutcome {
+    /// The raw memory the distillation came from.
+    pub memory_id: String,
+    /// The **new** memory holding the distillation.
+    pub normalized_id: String,
+}
+
+/// One entry that could not be applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizationError {
+    pub memory_id: String,
+    pub error: String,
+}
+
+/// Outcome of an apply batch.
+///
+/// Unknown ids are reported rather than failing the batch, matching
+/// `reclassify`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizeApplyResult {
+    pub normalized: usize,
+    pub results: Vec<NormalizationOutcome>,
+    pub errors: Vec<NormalizationError>,
+}

@@ -1,9 +1,10 @@
 use remind_me_core::{
-    backup, db::queries, entity, stats, vitality, wiki, wiki_import, AnnotateInput, Database,
-    EntityInput, EntityTraverseInput, FeedbackInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome,
-    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, RECLASSIFY_BATCH_MAX,
-    RECLASSIFY_BATCH_MIN,
+    backup, db::queries, entity, normalize, stats, vitality, wiki, wiki_import, AnnotateInput,
+    Database, EntityInput, EntityTraverseInput, FeedbackInput, MemoryAddInput, MemoryListInput,
+    MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput,
+    ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX,
+    ANNOTATE_BATCH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
+    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -49,6 +50,49 @@ fn annotate_input_schema() -> Value {
             }
         },
         "required": ["annotations"]
+    })
+}
+
+/// Input schema for `remind_me_normalize_apply`.
+///
+/// Extracted for the same reason as [`annotate_input_schema`] — nesting an
+/// entity array inside an entry array inside the batch pushes the shared
+/// `json!` literal past its expansion recursion limit.
+fn normalize_apply_input_schema() -> Value {
+    let entity = json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" },
+            "kind": { "type": "string" },
+            "aliases": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["name"]
+    });
+
+    let entry = json!({
+        "type": "object",
+        "properties": {
+            "memory_id": { "type": "string", "description": "The raw import being distilled" },
+            "question": { "type": "string", "maxLength": 500 },
+            "summary": { "type": "string", "maxLength": 10000 },
+            "resolution": { "type": "string", "maxLength": 5000 },
+            "refs": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+            "entities": { "type": "array", "items": entity, "maxItems": 20 }
+        },
+        "required": ["memory_id", "question", "summary"]
+    });
+
+    json!({
+        "type": "object",
+        "properties": {
+            "normalizations": {
+                "type": "array",
+                "minItems": NORMALIZE_APPLY_MIN,
+                "maxItems": NORMALIZE_APPLY_MAX,
+                "items": entry
+            }
+        },
+        "required": ["normalizations"]
     })
 }
 
@@ -209,6 +253,21 @@ impl McpServer {
                                     },
                                     "required": ["name"]
                                 }
+                            },
+                            {
+                                "name": "remind_me_normalize_batch",
+                                "description": "Fetch raw imported memories (document/chat imports) that have not been normalized yet, so they can be distilled into a {question, summary, resolution?} shape. The raw memory is kept, not replaced.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_normalize_apply",
+                                "description": "Write distilled normalizations back as new memories, each linked to the raw import it came from via a normalized_from metadata pointer. The raw memory is left untouched.",
+                                "inputSchema": normalize_apply_input_schema()
                             },
                             {
                                 "name": "remind_me_entity_traverse",
@@ -564,6 +623,42 @@ impl McpServer {
                             },
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_normalize_batch" => {
+                        let input: NormalizeBatchInput = serde_json::from_value(args)
+                            .unwrap_or(NormalizeBatchInput { batch_size: 20 });
+                        match normalize::unnormalized_batch(&conn, &input) {
+                            Ok(batch) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&batch).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_normalize_apply" => {
+                        let input: Result<NormalizeApplyInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(apply_input) => {
+                                if apply_input.normalizations.len() < NORMALIZE_APPLY_MIN
+                                    || apply_input.normalizations.len() > NORMALIZE_APPLY_MAX
+                                {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("normalizations must hold {}..={} entries", NORMALIZE_APPLY_MIN, NORMALIZE_APPLY_MAX) }] })
+                                } else {
+                                    match normalize::apply_normalizations(&conn, &apply_input) {
+                                        Ok(result) => {
+                                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                        }
+                                        Err(e) => {
+                                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize apply error: {}", e) }] })
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid normalize apply input: {}", e) }] })
                             }
                         }
                     }
