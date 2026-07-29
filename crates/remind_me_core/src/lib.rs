@@ -15,6 +15,7 @@ pub mod status;
 pub mod sync;
 pub mod vitality;
 pub mod wiki;
+pub mod wiki_fs;
 pub mod wiki_import;
 
 pub use db::Database;

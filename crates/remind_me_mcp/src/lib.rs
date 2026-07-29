@@ -10,15 +10,15 @@
 
 use remind_me_core::{
     backup, capture, db::queries, entity, export, importer, normalize, stats, status, vitality,
-    wiki, wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
-    Database, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput, ExportInput,
-    ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
-    MemoryUpdateInput, NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput,
-    ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
-    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
-    EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX,
-    IMPORT_MAX_LENGTH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
-    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    wiki, wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput,
+    ChatImportInput, Database, DecomposeBatchInput, DecomposeInput, EntityInput,
+    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
+    MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
+    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
+    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
+    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN,
+    NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -192,11 +192,23 @@ fn import_input_schema(directory: bool) -> Value {
 
 pub struct McpServer {
     db: Database,
+    wiki: Wiki,
 }
 
 impl McpServer {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            wiki: Wiki::from_env(),
+        }
+    }
+
+    /// Build a server against a specific wiki directory.
+    ///
+    /// Tests need this: the default root is a real shared directory, so a test
+    /// using it would write into whatever wiki the machine's user actually has.
+    pub fn with_wiki(db: Database, wiki: Wiki) -> Self {
+        Self { db, wiki }
     }
 
     pub fn handle_request(&self, request_json: &str) -> Option<Value> {
@@ -470,12 +482,11 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "slug": { "type": "string" },
-                                        "title": { "type": "string" },
-                                        "content": { "type": "string" },
-                                        "summary": { "type": "string", "description": "One-line summary shown in the wiki index" }
+                                        "title": { "type": "string", "minLength": 1, "maxLength": 200, "description": "The title's slug is the page's identity — keep titles stable so [[wikilinks]] resolve" },
+                                        "content": { "type": "string", "minLength": 1, "maxLength": 100000, "description": "Full markdown body, REPLACING any existing content. Open with a one-sentence summary; it becomes the index entry. A leading '# Title' is added if absent." },
+                                        "log_note": { "type": "string", "maxLength": 500, "description": "Optional note recorded in log.md alongside the change" }
                                     },
-                                    "required": ["slug", "title", "content"]
+                                    "required": ["title", "content"]
                                 }
                             },
                             {
@@ -571,6 +582,28 @@ impl McpServer {
                                             "enum": ["json", "markdown"],
                                             "default": "json"
                                         }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_wiki_load",
+                                "description": "Load the whole wiki into context as one markdown document, newest-revised first up to a token budget. Overflow is listed by title so it can be read individually.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "token_budget": { "type": "integer", "default": 0, "minimum": 0, "maximum": 200000, "description": "0 means unlimited" },
+                                        "include_index": { "type": "boolean", "default": true }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_wiki_compile",
+                                "description": "Drive wiki synthesis over raw memories. With mark_integrated=false (the default) returns a brief of pending sources and never advances the watermark, so it is safe to call repeatedly. Call again with mark_integrated=true after writing the pages.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 },
+                                        "mark_integrated": { "type": "boolean", "default": false }
                                     }
                                 }
                             },
@@ -1004,10 +1037,19 @@ impl McpServer {
                         let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
                         let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
                         let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                        let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-                        match wiki::write_wiki_page(&conn, slug, title, content, summary) {
-                            Ok(page) => {
-                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
+                        let log_note = args.get("log_note").and_then(|v| v.as_str());
+                        // The slug is derived from the title now that files are
+                        // canonical: a caller-supplied slug disagreeing with the
+                        // title would name a file the index could not find. A
+                        // `slug` argument is still tolerated as the title when
+                        // none is given, so an older caller is not broken.
+                        let title = if title.is_empty() { slug } else { title };
+                        match self.wiki.write_page(&conn, title, content, log_note) {
+                            Ok(Ok(outcome)) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                            }
+                            Ok(Err(_)) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("'{}' is a reserved system page and cannot be written directly", title) }] })
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki write error: {}", e) }] })
@@ -1016,7 +1058,7 @@ impl McpServer {
                     }
                     "remind_me_wiki_read" => {
                         let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-                        match wiki::get_wiki_page(&conn, slug) {
+                        match self.wiki.read_page(&conn, slug) {
                             Ok(Some(page)) => {
                                 json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
                             }
@@ -1171,6 +1213,48 @@ impl McpServer {
                             json!({ "isError": true, "content": [{ "type": "text", "text": format!("Vitality report error: {}", e) }] })
                         }
                     },
+                    "remind_me_wiki_load" => {
+                        let token_budget = args
+                            .get("token_budget")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(0);
+                        let include_index = args
+                            .get("include_index")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        match self.wiki.load(&conn, token_budget, include_index) {
+                            Ok(loaded) if loaded.pages_included == 0 => {
+                                json!({ "content": [{ "type": "text", "text": "_The wiki is empty._ Synthesise pages from raw memories with `remind_me_wiki_compile`." }] })
+                            }
+                            Ok(loaded) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&loaded).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki load error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_wiki_compile" => {
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize)
+                            .unwrap_or(20)
+                            .clamp(1, 100);
+                        let mark_integrated = args
+                            .get("mark_integrated")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        match self.wiki.compile(&conn, limit, mark_integrated) {
+                            Ok(outcome) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki compile error: {}", e) }] })
+                            }
+                        }
+                    }
                     "remind_me_wiki_search" => {
                         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                         let limit = args
@@ -1181,7 +1265,7 @@ impl McpServer {
                         if query.is_empty() {
                             json!({ "isError": true, "content": [{ "type": "text", "text": "`query` is required" }] })
                         } else {
-                            match wiki::search_wiki_pages(&conn, query, limit) {
+                            match self.wiki.search_pages(&conn, query, limit) {
                                 Ok(hits) => {
                                     let body = json!({ "count": hits.len(), "results": hits });
                                     json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
@@ -1192,7 +1276,7 @@ impl McpServer {
                             }
                         }
                     }
-                    "remind_me_wiki_list" => match wiki::list_wiki_pages(&conn) {
+                    "remind_me_wiki_list" => match self.wiki.list_pages(&conn) {
                         Ok(pages) => {
                             let body = json!({ "count": pages.len(), "pages": pages });
                             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
@@ -1206,7 +1290,7 @@ impl McpServer {
                         if title.is_empty() {
                             json!({ "isError": true, "content": [{ "type": "text", "text": "`title` is required" }] })
                         } else {
-                            match wiki::delete_wiki_page(&conn, title) {
+                            match self.wiki.delete_page(&conn, title) {
                                 Ok(WikiDeleteOutcome::Deleted) => {
                                     json!({ "content": [{ "type": "text", "text": format!("Wiki page '{}' deleted", title) }] })
                                 }
@@ -1572,6 +1656,22 @@ mod tests {
         assert!(body["vitality_buckets"].is_object());
     }
 
+    /// A server whose wiki lives in its own scratch directory.
+    ///
+    /// `McpServer::new` reads the configured wiki root, which is a real shared
+    /// directory — a test using it would write into the machine user's actual
+    /// wiki.
+    fn wiki_server(name: &str) -> (McpServer, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("rrm_mcp_wiki_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let db = Database::open_in_memory().unwrap();
+        (
+            McpServer::with_wiki(db, remind_me_core::wiki_fs::Wiki::new(&root)),
+            root,
+        )
+    }
+
     #[test]
     fn test_wiki_tools_are_registered() {
         let db = Database::open_in_memory().unwrap();
@@ -1592,13 +1692,12 @@ mod tests {
 
     #[test]
     fn test_wiki_tools_round_trip_over_jsonrpc() {
-        let db = Database::open_in_memory().unwrap();
-        let server = McpServer::new(db);
+        let (server, root) = wiki_server("roundtrip");
 
         call(
             &server,
             "remind_me_wiki_write",
-            json!({ "slug": "vlan-setup", "title": "VLAN Setup", "content": "body" }),
+            json!({ "title": "VLAN Setup", "content": "body" }),
         );
 
         let listed = call(&server, "remind_me_wiki_list", json!({}));
@@ -1623,12 +1722,13 @@ mod tests {
             serde_json::from_str::<Value>(&text_of(&after)).unwrap()["count"],
             0
         );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn test_wiki_search_tool() {
-        let db = Database::open_in_memory().unwrap();
-        let server = McpServer::new(db);
+        let (server, root) = wiki_server("search");
 
         let req = json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/list" });
         let resp = server.handle_request(&req.to_string()).unwrap();
@@ -1644,8 +1744,7 @@ mod tests {
         call(
             &server,
             "remind_me_wiki_write",
-            json!({ "slug": "vlan", "title": "VLAN Setup", "content": "trunking notes",
-                    "summary": "how to trunk" }),
+            json!({ "title": "VLAN Setup", "content": "trunking notes" }),
         );
 
         let hits = call(
@@ -1656,11 +1755,16 @@ mod tests {
         assert!(hits.get("isError").is_none(), "search failed: {:?}", hits);
         let body: Value = serde_json::from_str(&text_of(&hits)).unwrap();
         assert_eq!(body["count"], 1);
-        assert_eq!(body["results"][0]["slug"], "vlan");
-        assert_eq!(body["results"][0]["summary"], "how to trunk");
+        // The slug is derived from the title, and the summary from the first
+        // body line — neither is caller-supplied any more, because a file-backed
+        // page has to be self-describing.
+        assert_eq!(body["results"][0]["slug"], "vlan-setup");
+        assert_eq!(body["results"][0]["summary"], "trunking notes");
 
         let missing = call(&server, "remind_me_wiki_search", json!({}));
         assert_eq!(missing["isError"], true);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -1689,8 +1793,7 @@ mod tests {
 
     #[test]
     fn test_wiki_delete_surfaces_errors() {
-        let db = Database::open_in_memory().unwrap();
-        let server = McpServer::new(db);
+        let (server, root) = wiki_server("deleteerrors");
 
         let missing = call(&server, "remind_me_wiki_delete", json!({ "title": "nope" }));
         assert_eq!(missing["isError"], true);
@@ -1698,11 +1801,15 @@ mod tests {
         let blank = call(&server, "remind_me_wiki_delete", json!({ "title": "" }));
         assert_eq!(blank["isError"], true);
 
-        call(
+        // Writing a reserved page is refused too, not just deleting one.
+        let written = call(
             &server,
             "remind_me_wiki_write",
-            json!({ "slug": "index", "title": "Index", "content": "body" }),
+            json!({ "title": "Index", "content": "body" }),
         );
+        assert_eq!(written["isError"], true);
+        assert!(text_of(&written).contains("reserved"));
+
         let reserved = call(
             &server,
             "remind_me_wiki_delete",
@@ -1710,6 +1817,8 @@ mod tests {
         );
         assert_eq!(reserved["isError"], true);
         assert!(text_of(&reserved).contains("reserved"));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
