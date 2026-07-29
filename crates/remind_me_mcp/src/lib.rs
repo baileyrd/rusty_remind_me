@@ -1,8 +1,18 @@
+// The `tools/list` response is one `json!` literal covering every tool, and
+// `json!` expands recursively — so the limit is reached by the *number* of
+// tools as well as by any one schema's nesting depth. Extracting a schema into
+// its own function (see `annotate_input_schema`) fixes the depth case; nothing
+// but a higher limit fixes the breadth case short of building the array as a
+// `Vec<Value>` from several smaller literals. Raise this when it bites again,
+// or do that restructuring — the literal is around thirty tools now, and the
+// restructuring is the better answer once it is closer to sixty.
+#![recursion_limit = "512"]
+
 use remind_me_core::{
-    backup, capture, db::queries, entity, export, normalize, stats, vitality, wiki, wiki_import,
-    AnnotateInput, AutoCaptureInput, Database, DecomposeBatchInput, DecomposeInput, EntityInput,
-    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
-    MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
+    backup, capture, db::queries, entity, export, normalize, stats, status, vitality, wiki,
+    wiki_import, AnnotateInput, AutoCaptureInput, Database, DecomposeBatchInput, DecomposeInput,
+    EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput,
+    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, NormalizeApplyInput,
     NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
     ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
     DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN,
@@ -307,6 +317,11 @@ impl McpServer {
                                     },
                                     "required": ["name"]
                                 }
+                            },
+                            {
+                                "name": "remind_me_server_status",
+                                "description": "Report where the data lives and what is running: database path and size, schema version against what this build expects, memory count, backup inventory, and which subsystems are active. Subsystems this crate does not implement are named with a reason rather than reported as stopped.",
+                                "inputSchema": { "type": "object", "properties": {} }
                             },
                             {
                                 "name": "remind_me_export_memories",
@@ -758,6 +773,14 @@ impl McpServer {
                             }
                         }
                     }
+                    "remind_me_server_status" => match status::server_status(&conn) {
+                        Ok(report) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Server status error: {}", e) }] })
+                        }
+                    },
                     "remind_me_export_memories" => {
                         let input: ExportInput = serde_json::from_value(args).unwrap_or_default();
                         match export::export_memories(&conn, &input) {
