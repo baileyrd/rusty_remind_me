@@ -97,7 +97,24 @@ pub fn raw_request(
     content_type: Option<&str>,
     body: &str,
 ) -> String {
+    raw_request_with_origin(method, path, None, auth, content_type, body)
+}
+
+/// As [`raw_request`], additionally carrying an `Origin` header when given
+/// one — for CORS tests, which are the only ones that need a request to look
+/// like it came from a browser tab rather than a script.
+pub fn raw_request_with_origin(
+    method: &str,
+    path: &str,
+    origin: Option<&str>,
+    auth: Option<&str>,
+    content_type: Option<&str>,
+    body: &str,
+) -> String {
     let mut head = format!("{} {} HTTP/1.1\r\nHost: localhost\r\n", method, path);
+    if let Some(origin) = origin {
+        head.push_str(&format!("Origin: {}\r\n", origin));
+    }
     if let Some(auth) = auth {
         head.push_str(&format!("Authorization: {}\r\n", auth));
     }
@@ -112,10 +129,12 @@ pub fn raw_request(
     head
 }
 
-/// The full parsed response: status, content-type header, and raw body text.
+/// The full parsed response: status, every header (lowercased name), and the
+/// raw body text.
 pub struct Response {
     pub status: u16,
     pub content_type: String,
+    pub headers: std::collections::HashMap<String, String>,
     pub body: String,
 }
 
@@ -123,6 +142,14 @@ impl Response {
     pub fn json(&self) -> Value {
         serde_json::from_str(&self.body)
             .unwrap_or_else(|e| panic!("response body was not JSON ({e}): {:?}", self.body))
+    }
+
+    /// A response header by name, case-insensitively — for CORS assertions,
+    /// which care whether `Access-Control-Allow-Origin` is present at all.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
     }
 }
 
@@ -137,13 +164,15 @@ pub fn parse_response(raw: &[u8]) -> Response {
         .and_then(|line| line.split(' ').nth(1))
         .and_then(|code| code.parse().ok())
         .expect("a status line");
-    let content_type = lines
-        .find_map(|line| line.strip_prefix("Content-Type: "))
-        .unwrap_or("")
-        .to_string();
+    let headers: std::collections::HashMap<String, String> = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    let content_type = headers.get("content-type").cloned().unwrap_or_default();
     Response {
         status,
         content_type,
+        headers,
         body: body.to_string(),
     }
 }
@@ -157,7 +186,25 @@ pub fn call(
     content_type: Option<&str>,
     body: &str,
 ) -> Response {
-    let raw = raw_request(method, path, auth, content_type, body);
+    call_full(server, method, path, None, auth, content_type, body)
+}
+
+/// As [`call`], additionally carrying an `Origin` header — CORS tests only.
+pub fn call_with_origin(server: &ApiServer, method: &str, path: &str, origin: &str) -> Response {
+    call_full(server, method, path, Some(origin), None, None, "")
+}
+
+/// The fully general form every other `call*` helper delegates to.
+pub fn call_full(
+    server: &ApiServer,
+    method: &str,
+    path: &str,
+    origin: Option<&str>,
+    auth: Option<&str>,
+    content_type: Option<&str>,
+    body: &str,
+) -> Response {
+    let raw = raw_request_with_origin(method, path, origin, auth, content_type, body);
     let mut stream = FakeStream::new(raw.into_bytes());
     server.serve_one(&mut stream).expect("no I/O failure");
     parse_response(&stream.output)
