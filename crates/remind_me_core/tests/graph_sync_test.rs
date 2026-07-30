@@ -559,6 +559,15 @@ fn push_outbox_delivers_entities_relations_and_links_to_a_real_hub_in_one_pass()
 
 #[test]
 fn pull_entities_applies_the_hubs_entities_and_persists_a_namespaced_cursor() {
+    // Holds `ENV_LOCK` for its whole body: `entity::upsert_entity` stamps
+    // `node_id` on the hub-side row from the process-wide `NODE_ID_ENV` (via
+    // `configured_node_id()`), and this test pulls with `node_id: "local-node"`
+    // itself -- if a concurrently-running test's `enable_sync("local-node")`
+    // window overlapped the insert below, the row would come back stamped
+    // `node_id = "local-node"` and the pull's own `exclude_node=local-node`
+    // filter would silently exclude it, producing a flaky `applied: 0`.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    disable_sync();
     let hub = TestHub::start("hub-node");
     {
         let hub_conn = hub.db.conn();
@@ -594,6 +603,10 @@ fn pull_entities_applies_the_hubs_entities_and_persists_a_namespaced_cursor() {
 
 #[test]
 fn pull_links_and_pull_entity_relations_apply_the_hubs_graph_rows() {
+    // Same `ENV_LOCK` reasoning as the entities-pull test above: the hub-side
+    // writes below stamp `node_id` from the process-wide `NODE_ID_ENV`.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    disable_sync();
     let hub = TestHub::start("hub-node");
     {
         let hub_conn = hub.db.conn();
