@@ -14,8 +14,9 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use serde_json::json;
 
-use crate::auth::{secret_gate, HEALTH_PATH, MCP_PATH};
+use crate::auth::{secret_gate, GateConfig, HEALTH_PATH, MCP_PATH};
 use crate::handler::RemindMeHandler;
+use crate::oauth::{self, IssuerError, OAuthAppState};
 
 const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
 
@@ -53,18 +54,36 @@ async fn health() -> impl IntoResponse {
 }
 
 /// Build the full router: `GET /health` unauthenticated, `/mcp` (plus
-/// `/mcp/<token>`) behind [`secret_gate`].
+/// `/mcp/<token>`) behind [`secret_gate`] — and, when `issuer` is `Some`,
+/// the OAuth authorization server ([`oauth::oauth_router`]) mounted
+/// alongside, with [`oauth::require_bearer`] guarding `/mcp` instead of the
+/// legacy bearer check (the legacy secret-path/bearer token still works —
+/// `secret_gate`'s OAuth-mode branch rewrites it into a bearer request; see
+/// `auth.rs`'s module doc).
 ///
 /// `rmcp`'s own `StreamableHttpServerConfig` defaults to a Host-header
 /// allowlist of `localhost`/`127.0.0.1`/`::1` (DNS-rebinding protection).
-/// That default is disabled here, matching the reference's own
-/// `TransportSecuritySettings(enable_dns_rebinding_protection=False)` and
-/// its stated reasoning: behind a tunnel the public hostname isn't knowable
-/// in advance, and the actual credential is the secret path / bearer token,
-/// not the Host header — enforcing the default allowlist would just break
-/// every tunneled connection while adding no real protection this app
-/// doesn't already have from the token check.
-pub fn build_router(mcp: Arc<McpServer>, token: String) -> Router {
+/// That default is disabled here — in both modes — matching the
+/// reference's own `TransportSecuritySettings(enable_dns_rebinding_protection=False)`
+/// and its stated reasoning, which applies identically whether or not OAuth
+/// is active: behind a tunnel the public hostname isn't knowable in
+/// advance, and the actual credential is the secret path / bearer token (or
+/// an OAuth access token, itself bound to the explicitly configured
+/// `issuer` — never to `Host`), not the `Host` header. Enforcing the
+/// default allowlist would just break every tunneled connection while
+/// adding no protection this app doesn't already have from those checks.
+///
+/// # Errors
+///
+/// Returns [`IssuerError`] if `issuer` is `Some` and fails
+/// [`oauth::validate_issuer`] (not an https origin, or has a path/query/
+/// fragment) — mirrors the reference's `build_remote_app`, which raises
+/// `ValueError` synchronously at the same point for the same reason.
+pub fn build_router(
+    mcp: Arc<McpServer>,
+    token: String,
+    issuer: Option<String>,
+) -> Result<Router, IssuerError> {
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
     let session_manager = Arc::new(LocalSessionManager::default());
     let service: StreamableHttpService<RemindMeHandler, LocalSessionManager> =
@@ -74,10 +93,52 @@ pub fn build_router(mcp: Arc<McpServer>, token: String) -> Router {
             config,
         );
 
-    Router::new()
+    let Some(raw_issuer) = issuer else {
+        let gate = Arc::new(GateConfig::legacy(token));
+        return Ok(Router::new()
+            .route(HEALTH_PATH, get(health))
+            .nest_service(MCP_PATH, service)
+            .layer(middleware::from_fn_with_state(gate, secret_gate)));
+    };
+
+    let issuer = oauth::validate_issuer(&raw_issuer)?;
+    let store = remind_me_core::remote::OAuthStateStore::new(
+        remind_me_core::remote::oauth_state_file_path(),
+    );
+    let provider = Arc::new(oauth::Provider::new(token.clone(), store));
+    let oauth_state = OAuthAppState { provider, issuer };
+
+    // `route_layer` (as opposed to `layer`) applies only to the routes
+    // already registered on *this* sub-router -- i.e. only `/mcp`, not the
+    // OAuth routes merged in below, which authenticate themselves
+    // differently (owner-credential consent, client_id lookup, or nothing
+    // at all for public metadata).
+    let mcp_router =
+        Router::new()
+            .nest_service(MCP_PATH, service)
+            .route_layer(middleware::from_fn_with_state(
+                oauth_state.clone(),
+                oauth::require_bearer,
+            ));
+
+    let gate = Arc::new(GateConfig {
+        token,
+        oauth_mode: true,
+        extra_allow_paths: &[
+            "/authorize",
+            "/token",
+            "/register",
+            "/revoke",
+            oauth::CONSENT_PATH,
+        ],
+        allow_prefixes: &["/.well-known/"],
+    });
+
+    Ok(Router::new()
         .route(HEALTH_PATH, get(health))
-        .nest_service(MCP_PATH, service)
-        .layer(middleware::from_fn_with_state(Arc::new(token), secret_gate))
+        .merge(oauth::oauth_router(oauth_state))
+        .merge(mcp_router)
+        .layer(middleware::from_fn_with_state(gate, secret_gate)))
 }
 
 /// Run the remote MCP connector until the process is killed or the listener
@@ -92,13 +153,24 @@ pub async fn run(mcp: Arc<McpServer>, config: RemoteConfig, token: String) -> st
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!(
-        "Remote MCP connector listening on http://{addr}{MCP_PATH} (token redacted; \
-         header-capable clients may instead send Authorization: Bearer <token> to \
-         http://{addr}{MCP_PATH}). Expose it via an HTTPS tunnel (e.g. Tailscale Funnel) \
-         and add the public /mcp/<token> URL as a claude.ai custom connector."
-    );
-    let router = build_router(mcp, token);
+    match &config.issuer {
+        Some(issuer) => eprintln!(
+            "Remote MCP connector listening on http://{addr}{MCP_PATH} with OAuth (FT-07) \
+             ACTIVE -- issuer {issuer}. claude.ai can connect via OAuth discovery; the \
+             legacy secret-path/bearer token keeps working too. Expose it via an HTTPS \
+             tunnel (e.g. Tailscale Funnel) so the issuer's public origin actually reaches \
+             this process."
+        ),
+        None => eprintln!(
+            "Remote MCP connector listening on http://{addr}{MCP_PATH} (token redacted; \
+             header-capable clients may instead send Authorization: Bearer <token> to \
+             http://{addr}{MCP_PATH}). Expose it via an HTTPS tunnel (e.g. Tailscale Funnel) \
+             and add the public /mcp/<token> URL as a claude.ai custom connector. Set \
+             REMIND_ME_REMOTE_ISSUER to serve OAuth (FT-07) instead."
+        ),
+    }
+    let router = build_router(mcp, token, config.issuer.clone())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
     axum::serve(listener, router).await
 }
 
