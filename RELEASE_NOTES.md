@@ -41,6 +41,21 @@ Verified live: `GET /` serves correct HTML end to end and the page reaches
 only the three CDN `<script>` fetches fail without it, matching the
 reference's own stated offline limitation.
 
+## 2026-07-30 — Fix a flaky graph-sync test (#81)
+
+### Fixed
+- `graph_sync_test.rs::pull_entities_applies_the_hubs_entities_and_persists_a_namespaced_cursor`
+  failed intermittently under the default concurrent test harness (root
+  cause: it wrote to the hub-side database without holding the file's
+  `ENV_LOCK`, so a concurrently-running test's `enable_sync("local-node")`
+  could transiently stamp the inserted entity's `node_id` from the
+  process-wide `NODE_ID_ENV`, causing the pull's own `exclude_node`
+  filter to silently exclude it). Now holds `ENV_LOCK` and explicitly
+  disables sync env vars for the duration of the write, matching every
+  other test in the file that touches process-global sync configuration.
+  Applied the same guard to the neighboring `pull_links_and_pull_entity_relations`
+  test as a preventative measure against the same class of race.
+
 ## 2026-07-30 — Multi-node sync: `memories` and the knowledge graph (#57)
 
 ### Added
