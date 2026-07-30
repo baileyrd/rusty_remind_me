@@ -2,6 +2,18 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-30 — Fix an ADR numbering collision
+
+### Fixed
+- `docs/adr/0002-otel-tracing-hand-rolled-otlp-http-export.md` and
+  `docs/adr/0002-embeddings-ollama-and-brute-force-vectors.md` landed
+  independently via separate merges, each unaware the number was already
+  taken (a third, `docs/adr/0002-dashboard-vendored-jsx-and-cors.md`, was
+  caught and renumbered to `0008` while resolving a merge conflict).
+  Renumbered the OpenTelemetry ADR to `0009` — its own internal `# ADR-0002:`
+  header updated to match, and the one other reference to its old filename
+  (in this file's own OpenTelemetry entry, below) updated too.
+
 ## 2026-07-30 — Serve the dashboard, and CORS to match (#78)
 
 ### Added
@@ -62,7 +74,7 @@ reference's own stated offline limitation.
   `remind-me-mcp`) — matching the reference's three config vars.
 - A hand-rolled OTLP/HTTP JSON exporter (`resourceSpans`/`scopeSpans`/`spans`,
   hex-encoded ids, nanosecond timestamps), not the real OTEL SDK — full
-  reasoning in `docs/adr/0002-otel-tracing-hand-rolled-otlp-http-export.md`.
+  reasoning in `docs/adr/0009-otel-tracing-hand-rolled-otlp-http-export.md`.
   Spans export from a dedicated background thread over a bounded channel
   (the same shape `SyncWorker` already uses) so a slow or unreachable
   collector never blocks the tool call, watcher pass, webhook request, or

@@ -1,4 +1,4 @@
-# ADR-0002: Optional OpenTelemetry tracing — a hand-rolled OTLP/HTTP exporter, not the OTEL SDK
+# ADR-0009: Optional OpenTelemetry tracing — a hand-rolled OTLP/HTTP exporter, not the OTEL SDK
 
 Status: Accepted
 Date: 2026-07-30
