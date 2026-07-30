@@ -94,6 +94,19 @@ fn objects(conn: &Connection, kind: &str) -> BTreeMap<String, String> {
     .collect()
 }
 
+/// Tables this crate's own code creates, deliberately, beyond the generated
+/// schema — not part of the "generated verbatim from `remind_me`" contract,
+/// so their presence is expected rather than a drift `assert_matches_schema`
+/// should flag.
+///
+/// `vec_embeddings`: this crate's own vector storage
+/// (`docs/adr/0002-embeddings-ollama-and-brute-force-vectors.md`) — `remind_me`
+/// stores vectors in a `sqlite-vec` `vec0` virtual table this crate has no way
+/// to load, so it keeps its own plain table instead. `vec_chunks` (the rowid
+/// map back to `memory_rowid`/`chunk_ix`) *is* part of the generated schema
+/// and stays untouched; only the table holding the actual bytes is new.
+const OWN_ADDITIONS: &[&str] = &["vec_embeddings"];
+
 /// Compare live objects of `kind` against the shipped schema, reporting only
 /// what differs. A whole-map `assert_eq!` dumps twenty tables of DDL and buries
 /// the one that is wrong.
@@ -113,7 +126,7 @@ fn assert_matches_schema(live: &Connection, kind: &str) {
         }
     }
     for name in actual.keys() {
-        if !want.contains_key(name) {
+        if !want.contains_key(name) && !OWN_ADDITIONS.contains(&name.as_str()) {
             problems.push(format!("  UNEXPECTED {} {}", kind, name));
         }
     }

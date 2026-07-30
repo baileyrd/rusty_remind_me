@@ -24,6 +24,12 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
 
     migrations::apply(conn)?;
 
+    // Not part of the generated schema: this crate's own vector storage,
+    // added after the generated tables exist. See
+    // docs/adr/0002-embeddings-ollama-and-brute-force-vectors.md for why it
+    // is a plain table rather than `sqlite-vec`'s `vec0`.
+    crate::vectors::ensure_schema(conn)?;
+
     // Every outbox trigger (memories and the graph tables alike) is gated on
     // sync_flags.sync_enabled -- align it with the current configuration on
     // every open, exactly like the reference does, before anything else
