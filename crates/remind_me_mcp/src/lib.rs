@@ -802,6 +802,7 @@ impl McpServer {
                 let tool_name = params.get("name")?.as_str()?;
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 let conn = self.db.conn();
+                let mut span = remind_me_core::telemetry::maybe_span(&format!("tool.{tool_name}"));
 
                 let result = match tool_name {
                     "remind_me_add" => {
@@ -1460,6 +1461,13 @@ impl McpServer {
                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("Unknown tool: {}", tool_name) }] })
                     }
                 };
+                if result
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    span.mark_error();
+                }
 
                 Some(json!({
                     "jsonrpc": "2.0",
