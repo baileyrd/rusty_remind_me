@@ -2,6 +2,99 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-30 — Single-user OAuth 2.1 authorization server for the remote connector (#86)
+
+### Added
+- **OAuth 2.1 authorization server (FT-07)**, mounted alongside `#85`'s
+  FT-05 secret-path connector when `REMIND_ME_REMOTE_ISSUER` is set:
+  RFC 8414 AS metadata, RFC 9728 protected-resource metadata, RFC 7591
+  dynamic client registration, a mandatory PKCE (S256) authorization-code
+  flow with refresh-token rotation, and RFC 7009 revocation. New
+  `crates/remind_me_remote/src/oauth/` module (`issuer`, `pkce`, `types`,
+  `provider`, `routes`) ports `remind_me_mcp/oauth.py` and `remote.py`'s
+  OAuth-mode branch — hand-rolled from the reference's actual behavior and
+  the RFCs it cites, since `rmcp` (this workspace's Rust MCP SDK) has no
+  server-side auth framework equivalent to the Python MCP SDK's
+  `mcp.server.auth` (its own `auth` feature is *client*-side OAuth only,
+  confirmed by reading its source directly). See
+  `docs/adr/0011-oauth-hand-rolled-no-server-side-sdk.md`.
+- **Single-user `/consent` (GET+POST)**: no accounts, no sessions — the
+  owner pastes the existing connector token to approve a requesting client.
+  A wrong credential and an explicit deny produce the identical
+  `access_denied` redirect (the form never leaks which part failed),
+  matching the reference's `hmac`-style constant-time comparison via this
+  crate's existing `constant_time_eq`.
+- **`remind_me_revoke_clients`** registered in `remind_me_mcp` (alongside
+  `remind_me_self_update`/`remind_me_check_update`): empty `client_id`
+  **lists** every registered client with live access/refresh token counts;
+  a non-empty `client_id` revokes exactly that one client's registration
+  and every token it holds; there is no "revoke all" operation. Verified
+  against the reference's `tools/admin.py`, not assumed from the parameter
+  name (the issue's own explicit warning) — see the ADR and
+  `tests/oauth_test.rs`'s `revoke_clients_semantics_*` test.
+- **Issuer validation** (`oauth::validate_issuer`): must be an https origin
+  (http allowed only for `localhost`/`127.0.0.1`, matching the installed
+  MCP SDK's own local-testing carve-out), no path beyond `/`, no query, no
+  fragment — never derived from the inbound `Host` header. DNS-rebinding
+  protection stays disabled in OAuth mode for the same reason `#85`
+  disabled it for the plain connector: the credential is the issuer-bound
+  access token or the secret-path/bearer token, not `Host`.
+- **Legacy coexistence**: the FT-05 secret-path URL and
+  `Authorization: Bearer <connector-token>` both keep working when OAuth is
+  active — `auth::secret_gate` gained a `GateConfig` (`oauth_mode`,
+  extra allow-paths/prefixes for the OAuth routes and `/.well-known/`
+  metadata) so one middleware serves both modes, rewriting the secret-path
+  form into a bearer request that `oauth::require_bearer` (layered only
+  onto `/mcp`) authenticates the same way it authenticates an issued OAuth
+  token.
+- `remind_me_core::remote` gained `OAuthStateStore` (JSON-file client/token
+  persistence, `0600`, re-read on every operation so `remind_me_revoke_clients`
+  running in the stdio process revokes a client on the *live* remote server
+  immediately) and `RemoteStatus`'s `oauth_enabled`/`issuer`/
+  `oauth_state_file`/`oauth_clients` fields, surfaced through
+  `remind_me_server_status` the same way `#85`'s plain-mode fields already
+  are. `OAuthStateStore` lives in `remind_me_core` (not `remind_me_remote`)
+  so the synchronous `remind_me_revoke_clients` tool can use it without
+  pulling in tokio/axum — the same sync/async split `RemoteConfig`/
+  `RemoteStatus` already established.
+
+### Testing
+- 47 new unit tests: `oauth::issuer` (issuer validation), `oauth::pkce`
+  (S256, including the RFC 7636 Appendix B test vector), `oauth::types`
+  (redirect_uri pinning, scope validation), `oauth::provider` (the full
+  authorize → consent → code → exchange → refresh → revoke flow, denial
+  paths, expiry), `oauth::routes` (redirect-URI construction), plus new
+  `remind_me_core::remote` tests for `OAuthStateStore` and the extended
+  `RemoteStatus`/`RemoteConfig`.
+- 15 new HTTP integration tests (`crates/remind_me_remote/tests/oauth_test.rs`,
+  same style as `#85`'s `http_test.rs` — the real axum server on an
+  ephemeral loopback port, no mocking): the full PKCE flow end to end
+  (register → authorize → consent → code → token → authenticated `/mcp`
+  round-trip → refresh rotation → revocation), dynamic client registration
+  and its rejection paths, wrong-owner-credential/explicit-deny parity,
+  a PKCE mismatch that does *not* consume the code, single-use code
+  replay, `remind_me_revoke_clients`' list-vs-revoke-one semantics, a
+  malformed issuer rejected at `build_router` build time, and the legacy
+  secret-path/bearer token still authenticating in OAuth mode.
+- A real, environment-specific flakiness bug was found and fixed while
+  building this out: `OAuthStateStore`'s writes now use an explicit
+  `File`+`sync_all` instead of plain `fs::write`, and both `read`/`write`
+  retry with backoff — a same-process read was intermittently not seeing
+  its own immediately-preceding write under this sandbox's parallel test
+  execution (0 failures across 90+ full-suite runs after the fix; see the
+  ADR for the full root-cause writeup).
+- **Not yet validated: a real claude.ai custom connector's OAuth discovery,
+  consent, and token flow.** Same outstanding item `#85` recorded for the
+  transport half — this sandboxed environment has no network path to
+  exercise it. Must be performed by a human before this is considered fully
+  done.
+
+### Docs
+- `docs/adr/0011-oauth-hand-rolled-no-server-side-sdk.md`: the
+  server-side-SDK investigation (`rmcp`'s `auth` feature is client-side
+  only), the hand-roll decision, the `client_id=""` semantics verification,
+  and the filesystem-flakiness fix.
+
 ## 2026-07-30 — Remote MCP connector over Streamable HTTP (#85)
 
 ### Added

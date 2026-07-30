@@ -1,18 +1,31 @@
-//! Secret-path / bearer gate for the remote MCP connector (FT-05).
+//! Secret-path / bearer gate for the remote MCP connector (FT-05/FT-07).
 //!
-//! Ported from the reference's `SecretPathMiddleware` (`remind_me_mcp/remote.py`),
-//! legacy/no-OAuth branch only. Admits a request when either:
+//! Ported from the reference's `SecretPathMiddleware`
+//! (`remind_me_mcp/remote.py`), both branches. Admits a request when either:
 //!
 //! - its path is `/mcp/<token>` (optionally with a trailing segment) — the
-//!   path is rewritten to `/mcp` (or `/mcp/<rest>`) and forwarded; or
-//! - its path is exactly `/mcp` and carries `Authorization: Bearer <token>`.
+//!   path is rewritten to `/mcp` (or `/mcp/<rest>`) and forwarded (in OAuth
+//!   mode the matched token is also injected as an `Authorization: Bearer`
+//!   header, so `oauth::require_bearer` — layered separately, only onto the
+//!   `/mcp` route — authenticates it exactly like any other bearer token);
+//!   or
+//! - its path is exactly `/mcp`. In legacy mode it must carry
+//!   `Authorization: Bearer <token>`; in OAuth mode it is forwarded as-is —
+//!   `oauth::require_bearer` decides (401 with a `WWW-Authenticate` hint
+//!   pointing at the resource metadata, which is how clients discover the
+//!   authorization server).
 //!
-//! `/health` always passes through unauthenticated (SE-04 parity). Every
-//! other path is answered 404 without distinguishing "wrong token" from
-//! "not a real path" — a path-based probe learns nothing. A syntactically
-//! plausible `/mcp/<token>` with the wrong token is also 404, matching the
-//! reference exactly (only the header-based `/mcp` form uses 401, since that
-//! form has no ambiguity about which endpoint it targets).
+//! `/health` always passes through unauthenticated (SE-04 parity).
+//! [`GateConfig::extra_allow_paths`]/[`GateConfig::allow_prefixes`] (OAuth's
+//! `/authorize`, `/token`, `/register`, `/revoke`, `/consent`, and the
+//! `/.well-known/` metadata documents) pass through untouched too — those
+//! routes authenticate themselves (owner-credential consent, client_id
+//! lookup, or nothing at all for public metadata). Every other path is
+//! answered 404 without distinguishing "wrong token" from "not a real path"
+//! — a path-based probe learns nothing. A syntactically plausible
+//! `/mcp/<token>` with the wrong token is also 404, matching the reference
+//! exactly (only the header-based `/mcp` form uses 401 in legacy mode, since
+//! that form has no ambiguity about which endpoint it targets).
 //!
 //! Implemented as an axum middleware ([`secret_gate`], via
 //! `axum::middleware::from_fn_with_state`) applied at the `Router` level, so
@@ -28,7 +41,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::uri::PathAndQuery;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -71,16 +84,55 @@ fn rewrite_path(uri: &Uri, new_path: &str) -> Option<Uri> {
     Uri::from_parts(parts).ok()
 }
 
-/// The axum middleware itself. `token` is the resolved connector token
-/// (never logged, never included in a response).
+/// [`secret_gate`]'s configuration — a direct port of the reference's
+/// `SecretPathMiddleware.__init__` parameters.
+pub struct GateConfig {
+    /// The resolved connector token (never logged, never included in a
+    /// response). In OAuth mode it doubles as the owner credential the
+    /// `/consent` page checks, but that comparison lives in
+    /// `oauth::Provider`, not here.
+    pub token: String,
+    /// `true` once `REMIND_ME_REMOTE_ISSUER` is set: `/mcp` (bare, no
+    /// matching secret-path segment) is forwarded rather than gated on the
+    /// legacy bearer check, and the secret-path rewrite additionally
+    /// injects `Authorization: Bearer <token>`.
+    pub oauth_mode: bool,
+    /// Exact paths that pass through unauthenticated besides `/health` —
+    /// OAuth's `/authorize`, `/token`, `/register`, `/revoke`, `/consent`.
+    /// Empty in legacy mode.
+    pub extra_allow_paths: &'static [&'static str],
+    /// Path prefixes that pass through unauthenticated — OAuth's
+    /// `/.well-known/` metadata documents. Empty in legacy mode.
+    pub allow_prefixes: &'static [&'static str],
+}
+
+impl GateConfig {
+    /// Legacy (FT-05, no OAuth) configuration: only `/health` is exempt.
+    pub fn legacy(token: String) -> Self {
+        Self {
+            token,
+            oauth_mode: false,
+            extra_allow_paths: &[],
+            allow_prefixes: &[],
+        }
+    }
+}
+
+/// The axum middleware itself.
 pub async fn secret_gate(
-    State(token): State<Arc<String>>,
+    State(config): State<Arc<GateConfig>>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
 
-    if path == HEALTH_PATH {
+    if path == HEALTH_PATH
+        || config.extra_allow_paths.contains(&path.as_str())
+        || config
+            .allow_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+    {
         return next.run(request).await;
     }
 
@@ -90,7 +142,7 @@ pub async fn secret_gate(
             Some((segment, rest)) => (segment, Some(rest)),
             None => (after_prefix, None),
         };
-        if segment.is_empty() || !constant_time_eq(segment.as_bytes(), token.as_bytes()) {
+        if segment.is_empty() || !constant_time_eq(segment.as_bytes(), config.token.as_bytes()) {
             return not_found();
         }
         let new_path = match rest {
@@ -100,6 +152,15 @@ pub async fn secret_gate(
         return match rewrite_path(request.uri(), &new_path) {
             Some(rewritten) => {
                 *request.uri_mut() = rewritten;
+                if config.oauth_mode {
+                    // Re-express the secret path as a bearer credential so
+                    // `oauth::require_bearer` authenticates it like any
+                    // other token.
+                    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", config.token)) {
+                        request.headers_mut().remove(header::AUTHORIZATION);
+                        request.headers_mut().insert(header::AUTHORIZATION, value);
+                    }
+                }
                 next.run(request).await
             }
             None => not_found(),
@@ -107,12 +168,18 @@ pub async fn secret_gate(
     }
 
     if path == MCP_PATH {
+        if config.oauth_mode {
+            // `oauth::require_bearer`, layered only onto this route, owns
+            // /mcp auth in OAuth mode (accepting OAuth access tokens AND
+            // the legacy connector token via `Provider::load_access_token`).
+            return next.run(request).await;
+        }
         let authorization = request
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        let expected = format!("Bearer {token}");
+        let expected = format!("Bearer {}", config.token);
         return if constant_time_eq(authorization.as_bytes(), expected.as_bytes()) {
             next.run(request).await
         } else {

@@ -1,9 +1,13 @@
-//! Remote MCP connector over Streamable HTTP (`#85`, the FT-05 — no
-//! OAuth — slice of the transport epic recorded on `#57`). Ports
-//! `remind_me_mcp/remote.py`'s legacy/secret-path mode: `SecretPathMiddleware`
-//! and `build_remote_app`'s `if not issuer:` branch, `get_remote_status`.
-//! OAuth (FT-07) and `remind_me_revoke_clients` are `#86`, explicitly out of
-//! scope here and blocked on this crate existing at all.
+//! Remote MCP connector over Streamable HTTP. `#85` ported the FT-05
+//! (no-OAuth) slice of the transport epic recorded on `#57`:
+//! `remind_me_mcp/remote.py`'s legacy/secret-path mode (`SecretPathMiddleware`
+//! and `build_remote_app`'s `if not issuer:` branch), `get_remote_status`.
+//! `#86` (this crate's [`oauth`] module) adds FT-07: the single-user OAuth
+//! 2.1 authorization server (`build_remote_app`'s OAuth-mode branch) and
+//! `remind_me_revoke_clients` (registered in `remind_me_mcp`, operating on
+//! `remind_me_core::remote::OAuthStateStore`). The two modes share one
+//! router (`server::build_router`) and the legacy secret-path/bearer
+//! credential keeps working in both.
 //!
 //! # Why this is its own crate, on tokio + axum + rmcp
 //!
@@ -79,6 +83,7 @@
 
 pub mod auth;
 pub mod handler;
+pub mod oauth;
 pub mod server;
 
 pub use handler::RemindMeHandler;

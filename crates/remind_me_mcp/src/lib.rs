@@ -483,6 +483,16 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_revoke_clients",
+                                "description": "List OAuth clients registered with the remote connector's authorization server (FT-07), or revoke one by client_id. Without client_id, lists every registered client with its live access/refresh token counts -- this is the read path, not a bulk-revoke shorthand: there is no 'revoke all' operation, only 'list' (empty client_id) and 'revoke this one client' (client_id set). With client_id, deletes that client's registration and every token it holds; the live remote server re-reads the state file on each token check, so the client is locked out immediately and must re-register and re-obtain the owner's consent to reconnect.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "client_id": { "type": "string", "default": "", "description": "The client to revoke. Empty (default) lists clients instead of revoking anything." }
+                                    }
+                                }
+                            },
+                            {
                                 "name": "remind_me_reindex",
                                 "description": "Rebuild vector embeddings for every memory that doesn't have one yet. Existing embeddings are preserved; only missing ones are generated. Run this after configuring REMIND_ME_EMBEDDING_BACKEND, or after a bulk import that ran before an embedder was available. Reports 'degraded' when no embedder is configured or reachable, rather than silently doing nothing.",
                                 "inputSchema": { "type": "object", "properties": {} }
@@ -1041,6 +1051,33 @@ impl McpServer {
                         } else {
                             json!({ "isError": true, "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
                         }
+                    }
+                    "remind_me_revoke_clients" => {
+                        let client_id = args.get("client_id").and_then(Value::as_str).unwrap_or("");
+                        let store = remind_me_core::remote::OAuthStateStore::new(
+                            remind_me_core::remote::oauth_state_file_path(),
+                        );
+                        let body = if client_id.is_empty() {
+                            json!({
+                                "clients": store.list_clients(),
+                                "state_file": store.path().to_string_lossy(),
+                                "hint": "Pass client_id to revoke a client and all of its tokens.",
+                            })
+                        } else {
+                            match store.revoke_client(client_id) {
+                                Some(summary) => {
+                                    let mut body =
+                                        serde_json::to_value(summary).unwrap_or(json!({}));
+                                    body["status"] = json!("revoked");
+                                    body
+                                }
+                                None => json!({
+                                    "status": "error",
+                                    "error": format!("Unknown client_id: {}", client_id),
+                                }),
+                            }
+                        };
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
                     }
                     "remind_me_reindex" => match vectors::reindex(&conn) {
                         Ok(result) => {
@@ -2265,6 +2302,115 @@ mod tests {
             self_update["inputSchema"]["properties"]["force"]["default"],
             false
         );
+    }
+
+    #[test]
+    fn test_revoke_clients_lists_by_default_and_revokes_one_client_by_id() {
+        // No other test in this file touches REMIND_ME_REMOTE_OAUTH_STATE_FILE,
+        // so (matching this file's existing convention, e.g. the reindex
+        // test's EMBEDDING_BACKEND_ENV) this doesn't need a cross-test lock.
+        let dir = std::env::temp_dir().join(format!(
+            "rrm_mcp_revoke_clients_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state_file = dir.join("oauth.json");
+        std::env::set_var(
+            remind_me_core::remote::REMOTE_OAUTH_STATE_FILE_ENV,
+            &state_file,
+        );
+
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 16, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "remind_me_revoke_clients")
+            .expect("remind_me_revoke_clients not in tools/list");
+        assert_eq!(
+            tool["inputSchema"]["properties"]["client_id"]["default"],
+            ""
+        );
+
+        // Empty client_id is the *list* path, not "revoke every client" --
+        // this is the exact semantics #86 called out as easy to get backwards.
+        let empty_state: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_revoke_clients",
+            json!({}),
+        )))
+        .unwrap();
+        assert_eq!(empty_state["clients"], json!([]));
+        assert!(empty_state["hint"].as_str().unwrap().contains("client_id"));
+
+        // Register a client with tokens directly against the same state
+        // file a live remote server would read, the same cross-process
+        // story the reference's tool relies on.
+        let store = remind_me_core::remote::OAuthStateStore::new(&state_file);
+        store.put_client(
+            "client-1",
+            json!({ "client_name": "claude.ai", "redirect_uris": ["https://claude.ai/cb"] }),
+        );
+        store.put_token(
+            remind_me_core::remote::TokenKind::Access,
+            "access-tok",
+            json!({ "client_id": "client-1" }),
+        );
+        store.put_token(
+            remind_me_core::remote::TokenKind::Refresh,
+            "refresh-tok",
+            json!({ "client_id": "client-1" }),
+        );
+
+        let listed: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_revoke_clients",
+            json!({}),
+        )))
+        .unwrap();
+        assert_eq!(listed["clients"][0]["client_id"], "client-1");
+        assert_eq!(listed["clients"][0]["access_tokens"], 1);
+        assert_eq!(listed["clients"][0]["refresh_tokens"], 1);
+
+        // A non-empty client_id revokes that one client and its tokens.
+        let revoked: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_revoke_clients",
+            json!({ "client_id": "client-1" }),
+        )))
+        .unwrap();
+        assert_eq!(revoked["status"], "revoked");
+        assert_eq!(revoked["access_tokens"], 1);
+        assert_eq!(revoked["refresh_tokens"], 1);
+
+        // The client is gone -- listing is empty again, not "still there".
+        let after: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_revoke_clients",
+            json!({}),
+        )))
+        .unwrap();
+        assert_eq!(after["clients"], json!([]));
+
+        // Revoking an unknown client_id is an error, never silently a no-op
+        // success and never "revoked everything that happened to exist".
+        let unknown: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_revoke_clients",
+            json!({ "client_id": "no-such-client" }),
+        )))
+        .unwrap();
+        assert_eq!(unknown["status"], "error");
+
+        std::env::remove_var(remind_me_core::remote::REMOTE_OAUTH_STATE_FILE_ENV);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
