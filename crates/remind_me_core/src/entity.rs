@@ -76,15 +76,16 @@ pub fn upsert_entity(conn: &Connection, input: &EntityInput) -> Result<Entity> {
     match get_entity_by_id(conn, &id)? {
         None => {
             conn.execute(
-                "INSERT INTO entities (id, name, kind, aliases, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO entities (id, name, kind, aliases, created_at, updated_at, node_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     name,
                     input.kind,
                     serde_json::to_string(&clean_aliases).unwrap_or_else(|_| "[]".to_string()),
                     now,
-                    now
+                    now,
+                    crate::sync::configured_node_id(),
                 ],
             )?;
         }
@@ -779,9 +780,17 @@ pub fn upsert_entity_relation(
     let label = relation.split_whitespace().collect::<Vec<_>>().join(" ");
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO entity_relations
-             (id, subject_entity_id, relation, object_entity_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-        params![id, subject_entity_id, label, object_entity_id, now, now],
+             (id, subject_entity_id, relation, object_entity_id, created_at, updated_at, node_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            id,
+            subject_entity_id,
+            label,
+            object_entity_id,
+            now,
+            now,
+            crate::sync::configured_node_id(),
+        ],
     )?;
     Ok(inserted > 0)
 }

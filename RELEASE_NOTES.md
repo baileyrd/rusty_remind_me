@@ -41,6 +41,155 @@ Verified live: `GET /` serves correct HTML end to end and the page reaches
 only the three CDN `<script>` fetches fail without it, matching the
 reference's own stated offline limitation.
 
+## 2026-07-30 — Multi-node sync: `memories` and the knowledge graph (#57)
+
+### Added
+- **Sync client**: `sync::push_outbox` drains this node's `sync_outbox` to a
+  configured hub, paged (`BATCH_SIZE=200`), marking rows sent per-remote via
+  `sync_sends` — either the exact ids a modern hub reports processed, or
+  (a count-only legacy response) the whole page. `sync::pull_remote` pages
+  a hub's changes back (`PULL_PAGE_SIZE=500`, capped at `MAX_PULL_PAGES=100`
+  per cycle), applying each via the conflict-resolution engine below and
+  persisting a keyset `(updated_at, id)` cursor per remote in `sync_log`.
+- **Conflict resolution** (`sync::upsert_record`): last-write-wins on
+  `updated_at` — a *tied* timestamp means the incoming side loses, not a
+  no-op and not a win — with `tags` union-merged (dedup, order-preserving)
+  and `metadata` shallow-merged per key (the LWW winner's value wins on a
+  collision, never recursively), **both regardless of which side wins**.
+  A winning update never touches `created_at` (insert-only). Applying an
+  incoming record echo-suppresses only the outbox row that very write just
+  created, leaving a genuinely concurrent local edit to the same memory
+  untouched.
+- **This node's own peer server** (`sync::PeerServer`/`SyncPeer`): serves
+  `GET /health`, `POST /sync/push`, `GET /sync/pull` — the exact same
+  protocol this node's own client speaks to a hub, since hub and peer are
+  the same protocol against different endpoints, matching the reference.
+  Bearer-authenticated via `REMIND_ME_SYNC_SECRET`; off unless that secret
+  is configured, independent of whether this node is also configured to
+  sync outward.
+- **A background `SyncWorker`** runs push-then-pull-then-prune every
+  `REMIND_ME_SYNC_INTERVAL` seconds (default 60) against the configured
+  hub. Enabled only when `REMIND_ME_NODE_ID`, `REMIND_ME_HUB_URL`, and
+  `REMIND_ME_SYNC_SECRET` are all set — matching the reference's
+  `SYNC_ENABLED` exactly — and started once from the CLI's real server
+  entry point, not from `McpServer::new` (which the test suite also uses
+  to build a server per test).
+- `add_memory` now stamps `node_id`/`client` from
+  `REMIND_ME_NODE_ID`/`REMIND_ME_CLIENT` on every write, unconditionally —
+  not gated on sync being enabled, matching the reference exactly, so a
+  node that turns sync on later already knows which of its existing
+  memories were its own. `remind_me_update` does not re-stamp them, also
+  matching the reference.
+- `delete_memory` now tombstones (`deleted_at` + `updated_at` set) instead
+  of hard-deleting when sync is configured — a hard `DELETE` produces no
+  outbox row at all (the sync triggers only fire on INSERT/UPDATE), so it
+  would otherwise silently resurrect on the next pull elsewhere. A node
+  with sync disabled deletes immediately, exactly as before.
+- `remind_me_server_status` gained `sync_peer` and `sync` fields, merged in
+  by the MCP layer the same way `webhook`'s already is.
+- `docs/adr/0004-sync-protocol-and-conflict-resolution.md`.
+
+- **Knowledge-graph sync** — `entities`, `entity_relations`, and
+  `memory_entities` mention links now sync alongside `memories`, over three
+  new endpoints (`/sync/pull_entities`, `/sync/pull_links`,
+  `/sync/pull_entity_relations`), each with its own namespaced `sync_log`
+  cursor (`"{remote_id}#entities"` etc.). `sync::graph::ensure_schema`
+  installs this crate's own outbox triggers for these three tables — there
+  is no generated-schema equivalent, only `memories` ships one.
+- Entities get their own sync-specific conflict resolution
+  (`sync::upsert_entity_record`): LWW on `name`/`kind`/`node_id`, with
+  `aliases` always union-merging regardless of the winner — a distinct
+  function from the interactive `upsert_entity` used by direct tool calls,
+  which has its own different "existing kind wins" merge rule. Relations
+  and links are immutable insert-or-ignore, with no foreign key by design:
+  a link or relation may reference a memory/entity that hasn't arrived on
+  this node yet, and the row simply waits rather than erroring.
+- A push batch is naturally heterogeneous — every graph-table trigger
+  funnels into the same `sync_outbox` a memory row already uses, tagged
+  with a `record_type` key (absent means `"memory"`, for backward
+  compatibility). `sync::apply_incoming_record` dispatches each record in a
+  batch to the right conflict-resolution function.
+- `docs/adr/0005-graph-sync.md`, including a real bug this work caught
+  before it shipped: the outbox-push "did the peer accept this" check
+  originally matched on `sync_outbox.memory_id`, which for a link row
+  holds only the memory half of its identity, not its wire id
+  (`memory_id|entity_id`) — every link would have been silently retried
+  forever. Fixed by matching on the record's own `payload["id"]` instead,
+  for all four record types.
+
+- **Peer discovery** — `sync::discover_peers` combines a static peer list
+  (`REMIND_ME_STATIC_PEERS`, a JSON array of `{"node_id", "url"}` objects)
+  with Tailscale's local API (`GET /localapi/v0/status` over a Unix
+  socket, `REMIND_ME_TAILSCALE_SOCKET` to override the platform-default
+  path). Every `Online` Tailscale peer with an address is a candidate,
+  addressed at `http://{ip}:{PEER_PORT}`; whether it's actually a
+  `remind_me` instance is decided by probing `/health` right before
+  syncing (`sync::probe_peer`), the same check the hub already gets — not
+  a tag or hostname filter at discovery time. Static peers are processed
+  first, so one wins a URL collision with a Tailscale-sourced duplicate.
+  The background `SyncWorker` now syncs (push + all four pulls) with the
+  hub, then every discovered peer in turn, skipping any that name this
+  node's own `node_id` or fail the health probe.
+- `docs/adr/0006-peer-discovery.md`, including one deliberate divergence:
+  a malformed `REMIND_ME_STATIC_PEERS` *value* degrades to an empty peer
+  list instead of crashing the process at startup the way the reference's
+  own unguarded `json.loads` does — matching this crate's consistent
+  graceful-degradation posture for every other optional feature, since the
+  reference's behavior here reads as an oversight rather than a
+  considered design choice. A malformed individual *entry* within an
+  otherwise-valid array is still skipped, matching the reference exactly.
+
+### Scope — matches the epic's own suggested split, three slices in
+Per the issue's explicit instruction to split this epic: **`memories`, the
+knowledge-graph tables, and peer discovery (static list + Tailscale)**.
+Still no OAuth and no `remind_me_revoke_clients` — its own follow-up
+issue, the same way `#59` was already split out of this epic for the
+outbox-growth defect.
+
+### Fixed: tombstone propagation, and every outbox trigger's `sync_flags` gate (#76)
+The generated `schema_*.sql` files were dumped from an earlier `remind_me`
+snapshot whose `memories_outbox_ai`/`_au` had no `WHEN` guard and a
+23-column payload ending at `superseded_by` — missing `doc_id`,
+`chunk_index`, and (critically) `deleted_at`, so a `delete_memory`
+tombstone had no way to reach another node at all. Re-running the
+reference's actual schema code (`db.py`'s `_ensure_schema`, imported
+standalone rather than hand-transcribed) against a fresh SQLite connection
+confirmed the current shape: both triggers gated on
+`sync_flags.sync_enabled = '1'`, a 26-column payload, and — a second,
+independent finding — the four graph-table outbox triggers
+(`entities_outbox_ai`/`_au`, `entity_relations_outbox_ai`,
+`memory_entities_outbox_ai`) are themselves part of the reference's
+generated schema, not something this crate needed to hand-roll. All three
+`schema_*.sql` files were regenerated from that dump; `sync::graph`'s
+hand-rolled trigger installer was removed entirely now that its
+triggers live in the generated file like every other one.
+
+Every outbox trigger firing at all is now conditional on
+`sync_flags.sync_enabled`, reconciled against the live configuration on
+every open by the new `sync::reconcile_sync_enabled_flag` — matching the
+reference's own `_reconcile_sync_enabled_flag` exactly, including its
+backfill-on-first-enable behavior for `memories`/`entities`/
+`memory_entities` (deliberately not `entity_relations`, matching a real
+omission in the reference rather than "fixing" it into a difference).
+A node that never configures sync now queues nothing in `sync_outbox` at
+all — closing the growth problem `#59`'s `prune_outbox` was a downstream
+workaround for, at the actual source, matching the reference.
+
+`SyncRecord` gained `deleted_at`, applied through the same last-write-wins
+path as every other column — this is what actually lets a tombstone
+propagate. `doc_id`/`chunk_index` remain unapplied on receipt, matching the
+reference's own receiving side exactly (it sends them for wire column-list
+parity but never reads them back either). See ADR-0007.
+
+Re-embedding a synced memory is still deliberately left to
+`remind_me_reindex` (`#49`) rather than done inline here — `upsert_record`
+never calls the embedder, so a synced memory has no vector until the next
+reindex, exactly like any other bulk-arrived memory (`dbs`, MemPalace,
+chat/document import). Hard-deleting old tombstones once every reachable
+peer has almost certainly observed them (the reference's
+`sync._compact_tombstones`) is not implemented here — a real, separate gap
+for its own follow-up, not folded into this fix.
+
 ## 2026-07-29 — `remind_me_check_update` and `remind_me_self_update` (#58)
 
 ### Added

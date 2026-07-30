@@ -87,8 +87,9 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
     conn.execute(
         "INSERT INTO memories (
             id, content, category, tags, source, metadata, created_at, updated_at,
-            subject, predicate, object, decay_rate, vitality, base_weight, access_count, accessed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            subject, predicate, object, decay_rate, vitality, base_weight, access_count, accessed_at,
+            node_id, client
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
         params![
             id,
             input.content,
@@ -105,6 +106,8 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
             initial_vitality,
             base_weight,
             now_iso,
+            crate::sync::configured_node_id(),
+            crate::sync::configured_client(),
         ],
     )?;
 
@@ -281,12 +284,25 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
 
 /// Delete a memory. Returns `false` if no live memory had that id.
 ///
-/// This is a hard delete, matching the reference: it tombstones via `deleted_at`
-/// only when sync is configured (`NODE_ID and HUB_URL and SYNC_SECRET`), so that
-/// the deletion can propagate to other nodes. This crate has no sync layer, so
-/// there is nothing to propagate to and the reference's own path is a plain
-/// `DELETE`. The `deleted_at` column and the `deleted_at IS NULL` read filters
-/// stay in place for when sync lands.
+/// Soft-deletes (tombstones via `deleted_at` + bumps `updated_at`) when sync
+/// is configured (`NODE_ID and HUB_URL and SYNC_SECRET`, `#57`), matching the
+/// reference exactly: a hard `DELETE` produces no outbox row at all (the
+/// sync triggers only fire on INSERT/UPDATE), so it would otherwise silently
+/// resurrect on the next pull elsewhere. The tombstone is excluded from every
+/// normal read (`deleted_at IS NULL` everywhere this crate reads memories)
+/// and, on a node with sync disabled, there is nothing to propagate to, so
+/// this is a plain, immediate delete exactly as before.
+///
+/// **Known limitation**: the installed `memories_outbox_au` trigger's
+/// payload (`schema_triggers.sql`, generated verbatim and not this crate's
+/// file to hand-edit) does not carry `deleted_at` at all, so this tombstone
+/// does not yet actually propagate over the wire even though the row is
+/// correctly marked locally — see
+/// `docs/adr/0004-sync-protocol-and-conflict-resolution.md`'s "Known
+/// limitation" section. There is no background compaction of old tombstones
+/// yet either (the reference's own `TOMBSTONE_RETENTION_DAYS`); both are
+/// left for a follow-up once the schema carries what tombstone propagation
+/// actually needs.
 ///
 /// The FTS row and `memory_tags` are handled by triggers. Everything else is
 /// cleaned up explicitly, because the reference's schema carries **no foreign
@@ -295,9 +311,13 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
 /// and a cascade would reject that. This crate previously relied on a cascade
 /// it had added itself; regenerating the schema from `remind_me` removed it.
 pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
-    // Fetched before the delete: once the row is gone there is no `WHERE id
-    // = ?` left to find its rowid by, and that rowid is exactly what
-    // `vec_chunks` is keyed on.
+    // Fetched before either delete path: once a hard delete removes the row
+    // there is no `WHERE id = ?` left to find its rowid by, and that rowid
+    // is exactly what `vec_chunks` is keyed on. Matches the reference's own
+    // `memory_delete` order (fetch rowid, clean up vectors, then delete or
+    // tombstone) rather than only cleaning up vectors on a hard delete —
+    // a tombstoned memory's embeddings are stale the moment it stops being
+    // searchable, same as an incoming sync tombstone's are.
     let memory_rowid: Option<i64> = conn
         .query_row(
             "SELECT rowid FROM memories WHERE id = ? AND deleted_at IS NULL",
@@ -305,12 +325,7 @@ pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
             |r| r.get(0),
         )
         .ok();
-
-    let affected = conn.execute(
-        "DELETE FROM memories WHERE id = ? AND deleted_at IS NULL",
-        params![memory_id],
-    )?;
-    if affected == 0 {
+    if memory_rowid.is_none() {
         return Ok(false);
     }
 
@@ -319,6 +334,22 @@ pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
     // surviving `vec_chunks` rows.
     if let Some(memory_rowid) = memory_rowid {
         crate::vectors::delete_chunks_for_memory(conn, memory_rowid)?;
+    }
+
+    let affected = if crate::sync::sync_enabled() {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            params![now, now, memory_id],
+        )?
+    } else {
+        conn.execute(
+            "DELETE FROM memories WHERE id = ? AND deleted_at IS NULL",
+            params![memory_id],
+        )?
+    };
+    if affected == 0 {
+        return Ok(false);
     }
 
     // Entities themselves survive — other memories may still mention them.

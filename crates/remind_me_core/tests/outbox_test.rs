@@ -1,15 +1,30 @@
 //! Coverage for outbox growth and its pruning.
 //!
 //! The outbox triggers arrived with the generated schema and fire on every
-//! write. Nothing in this crate drains them, so without a retention rule the
-//! table grows without bound — carrying a full JSON copy of the memory each
-//! time.
+//! write while sync is configured (`#76`'s `sync_flags` gate — every test
+//! here runs with the three sync env vars set, via [`ensure_sync_enabled`],
+//! since this file is entirely about what accumulates once they do). Nothing
+//! in this crate drains the outbox on its own, so without a retention rule
+//! the table grows without bound — carrying a full JSON copy of the memory
+//! each time.
 
 use chrono::{Duration, Utc};
 use remind_me_core::db::queries;
-use remind_me_core::sync::{prune_outbox, DEFAULT_OUTBOX_RETENTION_DAYS};
+use remind_me_core::sync::{
+    prune_outbox, DEFAULT_OUTBOX_RETENTION_DAYS, HUB_URL_ENV, NODE_ID_ENV, SYNC_SECRET_ENV,
+};
 use remind_me_core::{Database, MemoryAddInput, MemorySearchInput};
 use rusqlite::Connection;
+
+/// Every test in this file wants sync on and never off, so setting these
+/// process-wide env vars needs no `ENV_LOCK`-style guard against other tests
+/// in the same binary racing it to a different value — there is no
+/// different value any test here ever wants.
+fn ensure_sync_enabled() {
+    std::env::set_var(NODE_ID_ENV, "node-outbox-test");
+    std::env::set_var(HUB_URL_ENV, "http://hub.example");
+    std::env::set_var(SYNC_SECRET_ENV, "shh");
+}
 
 fn add(conn: &Connection, content: &str) -> String {
     queries::add_memory(
@@ -67,6 +82,7 @@ fn backdate_outbox(conn: &Connection, days: i64) {
 
 #[test]
 fn writes_still_reach_the_outbox() {
+    ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     for i in 0..5 {
@@ -80,6 +96,7 @@ fn writes_still_reach_the_outbox() {
 
 #[test]
 fn reads_grow_the_outbox_too() {
+    ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     add(&conn, "quokka sighting");
@@ -97,6 +114,7 @@ fn reads_grow_the_outbox_too() {
 
 #[test]
 fn already_sent_rows_are_pruned_immediately() {
+    ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     add(&conn, "memory one");
@@ -117,6 +135,7 @@ fn already_sent_rows_are_pruned_immediately() {
 
 #[test]
 fn rows_inside_the_retention_window_survive() {
+    ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     add(&conn, "recent memory");
@@ -132,6 +151,7 @@ fn rows_inside_the_retention_window_survive() {
 
 #[test]
 fn rows_past_the_retention_window_are_pruned() {
+    ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     add(&conn, "stale memory");
@@ -143,6 +163,7 @@ fn rows_past_the_retention_window_are_pruned() {
 
 #[test]
 fn pruning_drops_orphaned_send_markers() {
+    ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     add(&conn, "memory one");
@@ -169,6 +190,7 @@ fn pruning_drops_orphaned_send_markers() {
 
 #[test]
 fn pruning_is_idempotent() {
+    ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     add(&conn, "memory one");
@@ -180,6 +202,7 @@ fn pruning_is_idempotent() {
 
 #[test]
 fn opening_a_database_prunes_it() {
+    ensure_sync_enabled();
     let dir = std::env::temp_dir().join(format!("rrm_outbox_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("memories.db");
@@ -202,6 +225,7 @@ fn opening_a_database_prunes_it() {
 
 #[test]
 fn a_realistic_mix_of_traffic_stays_bounded() {
+    ensure_sync_enabled();
     let dir = std::env::temp_dir().join(format!("rrm_outbox_mix_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("memories.db");
