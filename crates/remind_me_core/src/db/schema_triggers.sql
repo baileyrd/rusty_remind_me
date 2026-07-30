@@ -19,7 +19,9 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
         END;
 
 CREATE TRIGGER IF NOT EXISTS memories_outbox_ai
-        AFTER INSERT ON memories BEGIN
+        AFTER INSERT ON memories
+        WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+        BEGIN
             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
             VALUES (
                 NEW.id, 'insert',
@@ -46,14 +48,19 @@ CREATE TRIGGER IF NOT EXISTS memories_outbox_ai
                     'subject',            NEW.subject,
                     'predicate',          NEW.predicate,
                     'object',             NEW.object,
-                    'superseded_by',      NEW.superseded_by
+                    'superseded_by',      NEW.superseded_by,
+                    'doc_id',             NEW.doc_id,
+                    'chunk_index',        NEW.chunk_index,
+                    'deleted_at',         NEW.deleted_at
                 ),
-                datetime('now', 'utc')
+                strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00'
             );
         END;
 
 CREATE TRIGGER IF NOT EXISTS memories_outbox_au
-        AFTER UPDATE ON memories BEGIN
+        AFTER UPDATE ON memories
+        WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+        BEGIN
             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
             VALUES (
                 NEW.id, 'update',
@@ -80,10 +87,66 @@ CREATE TRIGGER IF NOT EXISTS memories_outbox_au
                     'subject',            NEW.subject,
                     'predicate',          NEW.predicate,
                     'object',             NEW.object,
-                    'superseded_by',      NEW.superseded_by
+                    'superseded_by',      NEW.superseded_by,
+                    'doc_id',             NEW.doc_id,
+                    'chunk_index',        NEW.chunk_index,
+                    'deleted_at',         NEW.deleted_at
                 ),
-                datetime('now', 'utc')
+                strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00'
             );
+        END;
+
+CREATE TRIGGER IF NOT EXISTS entities_outbox_ai
+        AFTER INSERT ON entities
+        WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+        BEGIN
+            INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
+            VALUES (NEW.id, 'insert', json_object(
+                'record_type', 'entity', 'id', NEW.id, 'name', NEW.name,
+                'kind', NEW.kind, 'aliases', NEW.aliases,
+                'created_at', NEW.created_at, 'updated_at', NEW.updated_at,
+                'node_id', NEW.node_id
+            ), strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00');
+        END;
+
+CREATE TRIGGER IF NOT EXISTS entities_outbox_au
+        AFTER UPDATE ON entities
+        WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+        BEGIN
+            INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
+            VALUES (NEW.id, 'update', json_object(
+                'record_type', 'entity', 'id', NEW.id, 'name', NEW.name,
+                'kind', NEW.kind, 'aliases', NEW.aliases,
+                'created_at', NEW.created_at, 'updated_at', NEW.updated_at,
+                'node_id', NEW.node_id
+            ), strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00');
+        END;
+
+CREATE TRIGGER IF NOT EXISTS entity_relations_outbox_ai
+        AFTER INSERT ON entity_relations
+        WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+        BEGIN
+            INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
+            VALUES (NEW.id, 'insert', json_object(
+                'record_type', 'entity_relation', 'id', NEW.id,
+                'subject_entity_id', NEW.subject_entity_id, 'relation', NEW.relation,
+                'object_entity_id', NEW.object_entity_id,
+                'created_at', NEW.created_at, 'updated_at', NEW.updated_at,
+                'node_id', NEW.node_id
+            ), strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00');
+        END;
+
+CREATE TRIGGER IF NOT EXISTS memory_entities_outbox_ai
+        AFTER INSERT ON memory_entities
+        WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+        BEGIN
+            INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
+            VALUES (NEW.memory_id, 'insert', json_object(
+                'record_type', 'memory_entity',
+                'id', NEW.memory_id || '|' || NEW.entity_id,
+                'memory_id', NEW.memory_id, 'entity_id', NEW.entity_id,
+                'created_at', NEW.created_at
+            ), strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00');
         END;
 
 CREATE TRIGGER IF NOT EXISTS memories_tags_ad AFTER DELETE ON memories

@@ -32,6 +32,8 @@ CREATE INDEX IF NOT EXISTS idx_memories_memory_type ON memories(memory_type);
 
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 
+CREATE INDEX IF NOT EXISTS idx_memories_source_capture_id ON memories(source_capture_id);
+
 CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
 
 CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
