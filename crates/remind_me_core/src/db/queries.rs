@@ -113,6 +113,14 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
     // `annotate_memories` so both behave identically.
     crate::entity::apply_entity_mentions(conn, &id, &input.entities)?;
 
+    // Best-effort: no embedder configured, or one that fails mid-request,
+    // leaves this memory keyword-searchable only — never a reason to fail
+    // the write that already succeeded. `remind_me_reindex` is the backstop
+    // for anything that lands here without an embedder available.
+    if let Some(embedder) = crate::embedder::available_embedder() {
+        let _ = crate::vectors::embed_and_store(conn, &embedder, &id, &input.content);
+    }
+
     get_memory_by_id(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
@@ -256,6 +264,16 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
         params_from_iter(bindings.iter()),
     )?;
 
+    // Only a content change invalidates the stored embeddings — category,
+    // tags and metadata don't change what the text means. Best-effort, same
+    // as `add_memory`: an embedding failure here does not undo the update
+    // that already committed.
+    if let Some(content) = &input.content {
+        if let Some(embedder) = crate::embedder::available_embedder() {
+            let _ = crate::vectors::embed_and_store(conn, &embedder, &input.memory_id, content);
+        }
+    }
+
     let memory =
         get_memory_by_id(conn, &input.memory_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     Ok(UpdateOutcome::Updated(Box::new(memory)))
@@ -277,12 +295,30 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
 /// and a cascade would reject that. This crate previously relied on a cascade
 /// it had added itself; regenerating the schema from `remind_me` removed it.
 pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
+    // Fetched before the delete: once the row is gone there is no `WHERE id
+    // = ?` left to find its rowid by, and that rowid is exactly what
+    // `vec_chunks` is keyed on.
+    let memory_rowid: Option<i64> = conn
+        .query_row(
+            "SELECT rowid FROM memories WHERE id = ? AND deleted_at IS NULL",
+            params![memory_id],
+            |r| r.get(0),
+        )
+        .ok();
+
     let affected = conn.execute(
         "DELETE FROM memories WHERE id = ? AND deleted_at IS NULL",
         params![memory_id],
     )?;
     if affected == 0 {
         return Ok(false);
+    }
+
+    // SQLite reuses freed rowids: left alone, a later memory landing on this
+    // same rowid would silently inherit these chunk vectors through the
+    // surviving `vec_chunks` rows.
+    if let Some(memory_rowid) = memory_rowid {
+        crate::vectors::delete_chunks_for_memory(conn, memory_rowid)?;
     }
 
     // Entities themselves survive — other memories may still mention them.
@@ -554,7 +590,7 @@ pub fn search_memories(
     // cannot leave this query selecting a stale subset — which is exactly how
     // `base_weight` slipped past here once.
     let mut sql = format!(
-        "SELECT {}, bm25(memories_fts) as fts_rank
+        "SELECT {}
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ? AND m.superseded_by IS NULL AND m.deleted_at IS NULL",
@@ -575,24 +611,36 @@ pub fn search_memories(
     sql.push_str(" ORDER BY bm25(memories_fts) LIMIT ?");
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![match_expr, (input.limit * 2) as i64], |row| {
-        let memory = parse_memory_row(row)?;
-        let fts_rank: f64 = row.get("fts_rank")?;
-        Ok(MemorySearchResult {
-            memory,
-            score: -fts_rank,
-            fts_score: Some(-fts_rank),
-            vec_score: None,
-            vitality_score: None,
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![match_expr, (input.limit * 2) as i64],
+        parse_memory_row,
+    )?;
 
-    let mut candidates = Vec::new();
+    let mut keyword_memories = Vec::new();
     for r in rows {
-        candidates.push(r?);
+        keyword_memories.push(r?);
     }
 
-    let mut ranked = rank_rrf(candidates, weights);
+    // Semantic augmentation is entirely optional: no embedder configured or
+    // reachable means an empty list, which `rank_rrf` treats as "semantic
+    // search did not run" rather than as a real empty result — see its own
+    // doc comment. Any failure during the search itself (the embedder
+    // rejects the query text, say) degrades the same way rather than
+    // failing the keyword search it would otherwise still have been able to
+    // answer.
+    let semantic_memories = match crate::embedder::available_embedder() {
+        Some(embedder) => crate::vectors::semantic_search(
+            conn,
+            &embedder,
+            &input.query,
+            input.limit * 2,
+            input.category.as_deref(),
+        )
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let mut ranked = rank_rrf(keyword_memories, semantic_memories, weights);
     ranked.truncate(input.limit);
 
     let final_results = trim_by_token_budget(ranked, input.token_budget);

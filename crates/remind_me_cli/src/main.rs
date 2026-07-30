@@ -1,7 +1,8 @@
 use remind_me_api::ApiServer;
 use remind_me_core::db::queries;
 use remind_me_core::{
-    entity, stats, wiki, wiki_import, Database, EntityInput, MemoryAddInput, MemorySearchInput,
+    entity, stats, updater, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
+    MemorySearchInput,
 };
 use remind_me_mcp::McpServer;
 use serde_json::{json, Value};
@@ -107,6 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open(&db_path)?;
 
     if args.len() < 2 || args[1] == "server" || args[1] == "mcp" {
+        // Non-blocking, and deliberately not inside McpServer::new: that
+        // constructor is also what the test suite uses to build a server
+        // per-test, and a background `git fetch` on every one of those
+        // would be slow, network-dependent, and racy across parallel tests.
+        updater::start_background_check();
         let server = McpServer::new(db);
         server.run_stdio_loop()?;
     } else {
