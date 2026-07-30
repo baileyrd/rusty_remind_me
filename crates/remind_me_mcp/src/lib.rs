@@ -1164,6 +1164,35 @@ impl McpServer {
                             report["remote"] =
                                 serde_json::to_value(remind_me_core::remote::remote_status())
                                     .unwrap_or(json!({}));
+                            // Embeddings (#90): `status::server_status` above
+                            // already reports config-only state without a
+                            // network call (its own stated contract);
+                            // `embedding_status` adds the live "and
+                            // reachable" probe (cached -- see
+                            // `available_embedder`), matching the
+                            // sync/webhook/remote overrides' shape: replace,
+                            // don't merge.
+                            report["embeddings"] =
+                                serde_json::to_value(remind_me_core::embedder::embedding_status())
+                                    .unwrap_or(json!({}));
+                            // Dashboard (#90): genuinely cross-process --
+                            // `rusty-remind-me api` is a separate OS process
+                            // from this one, so the only shared state is the
+                            // PID file it writes on start. An in-memory
+                            // database has nowhere to put one, which is not
+                            // an error: it just means there is no dashboard
+                            // to find.
+                            report["dashboard"] = match remind_me_core::pid::pid_file_path(&conn)
+                            {
+                                Ok(path) => serde_json::to_value(
+                                    remind_me_core::pid::dashboard_status(&path),
+                                )
+                                .unwrap_or(json!({})),
+                                Err(_) => serde_json::to_value(status::SubsystemStatus::NotImplemented {
+                                    reason: "in-memory database has no on-disk location for a dashboard PID file".to_string(),
+                                })
+                                .unwrap_or(json!({})),
+                            };
                             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                         }
                         Err(e) => {
@@ -1674,6 +1703,14 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Held by every test that reads or sets `REMIND_ME_EMBEDDING_BACKEND`
+    /// (a process-global env var): `remind_me_server_status`'s `embeddings`
+    /// override (`#90`) now reflects it, so a test asserting the unset
+    /// default must not race one that configures a backend. Same convention
+    /// as `remind_me_core`'s own `sync_test.rs`/`status_test.rs` `ENV_LOCK`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_mcp_initialize_dynamic_version() {
@@ -2415,6 +2452,7 @@ mod tests {
 
     #[test]
     fn test_reindex_is_registered_and_reports_degraded_without_an_embedder() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // No REMIND_ME_EMBEDDING_BACKEND in the test environment, so this
         // must report degraded rather than silently doing nothing.
         std::env::remove_var(remind_me_core::embedder::EMBEDDING_BACKEND_ENV);
@@ -2443,6 +2481,8 @@ mod tests {
 
     #[test]
     fn test_server_status_carries_the_webhook() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(remind_me_core::embedder::EMBEDDING_BACKEND_ENV);
         let db = Database::open_in_memory().unwrap();
         let server = McpServer::new(db);
 
@@ -2463,6 +2503,121 @@ mod tests {
         // connector (FT-05, #85) reports disabled the same way the others do.
         assert_eq!(report["remote"]["enabled"], false);
         assert_eq!(report["remote"]["host"], "127.0.0.1");
+        // #90: no backend configured, so embeddings is not-implemented --
+        // and an in-memory DB has no on-disk location for a dashboard PID
+        // file, so dashboard reports not-implemented too (not "not running",
+        // which would claim a check happened when none could).
+        assert_eq!(report["embeddings"]["state"], "not_implemented");
+        assert_eq!(report["dashboard"]["state"], "not_implemented");
+    }
+
+    #[test]
+    fn test_server_status_reports_embeddings_active_when_the_backend_is_configured_and_reachable() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // A fake Ollama daemon answering the "ping" probe `available_embedder`
+        // makes -- same shape as `ollama_embedder_test.rs`'s `fake_server`.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = serde_json::json!({ "embeddings": [[1.0, 0.0]] }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        std::env::set_var(remind_me_core::embedder::EMBEDDING_BACKEND_ENV, "ollama");
+        std::env::set_var(
+            remind_me_core::embedder::OLLAMA_URL_ENV,
+            format!("http://127.0.0.1:{port}"),
+        );
+        std::env::set_var(remind_me_core::embedder::EMBEDDING_DIM_ENV, "2");
+
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let report: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_server_status",
+            json!({}),
+        )))
+        .unwrap();
+
+        std::env::remove_var(remind_me_core::embedder::EMBEDDING_BACKEND_ENV);
+        std::env::remove_var(remind_me_core::embedder::OLLAMA_URL_ENV);
+        std::env::remove_var(remind_me_core::embedder::EMBEDDING_DIM_ENV);
+        handle.join().unwrap();
+
+        assert_eq!(
+            report["embeddings"]["state"], "active",
+            "expected active, got {:?}",
+            report["embeddings"]
+        );
+    }
+
+    #[test]
+    fn test_server_status_reports_dashboard_running_from_a_live_pid_file() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "rrm_mcp_dashboard_status_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("memories.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // A fake dashboard answering GET /health, exactly what
+        // `pid::dashboard_status`'s live check probes.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"status":"ok"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let pid_path = remind_me_core::pid::pid_file_path(&db.conn()).unwrap();
+        let record = remind_me_core::pid::write_pid_file(&pid_path, "127.0.0.1", port).unwrap();
+
+        let server = McpServer::new(db);
+        let report: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_server_status",
+            json!({}),
+        )))
+        .unwrap();
+
+        handle.join().unwrap();
+        remind_me_core::pid::remove_pid_file(&pid_path);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(report["dashboard"]["running"], true);
+        assert_eq!(report["dashboard"]["url"], record.url);
+        assert_eq!(report["dashboard"]["pid"], record.pid);
     }
 
     #[test]

@@ -2,18 +2,32 @@
 //!
 //! # Reporting absence honestly
 //!
-//! The reference reports on subsystems this crate does not have — a dashboard
-//! UI, an embedding backend, sync. Rather than emit a field that always reads
-//! "not running" as though it might one day read otherwise, each of those is
-//! reported as [`SubsystemStatus::NotImplemented`] carrying the reason. A
-//! caller can tell "this crate has no dashboard" apart from "the dashboard is
-//! down", which a bare boolean cannot express.
+//! `sync` and `dashboard` are subsystems this crate genuinely cannot answer
+//! for on its own: the sync worker only exists once the MCP server process
+//! instantiates one, and the dashboard is a wholly separate `rusty-remind-me
+//! api` process this crate has no handle to. Both are reported here as
+//! [`SubsystemStatus::NotImplemented`] carrying a reason, and both get
+//! overridden with live state at the MCP dispatch layer (`remind_me_mcp`'s
+//! `remind_me_server_status` arm), the same pattern `webhook`/`sync_peer`/
+//! `remote` already use. A caller can tell "this crate can't see a
+//! dashboard from here" apart from "the dashboard is down", which a bare
+//! boolean cannot express.
+//!
+//! `embeddings` is different: the embedding backend's configuration
+//! ([`crate::embedder::resolve_embedder`]) is read from environment
+//! variables the same way in every process, so this module can and does
+//! answer it directly — see below.
 //!
 //! # No network
 //!
-//! Nothing here makes a network call. The reference's embedding probe may hit
-//! the network and is flagged as a performance concern; a status tool that
-//! hangs is worse than one that omits a field.
+//! Nothing in `server_status` itself makes a network call. `embeddings`
+//! reflects configuration only ([`crate::embedder::resolve_embedder`]); it
+//! does not prove the configured backend is actually reachable, which needs
+//! a network probe ([`crate::embedder::available_embedder`]) the reference
+//! itself flags as a performance concern. The MCP dispatch layer calls
+//! [`crate::embedder::embedding_status`] to add that live "and reachable"
+//! check on top, same as it does for `dashboard`. A status tool that hangs
+//! is worse than one that omits a field.
 
 use crate::backup::{backup_dir, list_backups, BackupInfo};
 use crate::db::migrations::SCHEMA_VERSION;
@@ -122,10 +136,18 @@ pub fn server_status(conn: &Connection) -> Result<ServerStatus> {
         backup_count: backups.len(),
         latest_backup: backups.into_iter().next(),
         mcp: SubsystemStatus::Active,
-        dashboard: SubsystemStatus::missing("no dashboard UI in this crate"),
-        embeddings: SubsystemStatus::missing(
-            "no embedding backend in this crate; search is keyword-only",
+        dashboard: SubsystemStatus::missing(
+            "dashboard liveness needs a cross-process PID-file check; see remind_me_mcp's \
+             remind_me_server_status override",
         ),
+        embeddings: if crate::embedder::resolve_embedder().is_some() {
+            SubsystemStatus::Active
+        } else {
+            SubsystemStatus::missing(
+                "no embedding backend configured; set REMIND_ME_EMBEDDING_BACKEND=ollama to \
+                 enable semantic search",
+            )
+        },
         sync: SubsystemStatus::missing(
             "no sync engine in this crate; the outbox is written and pruned, never drained",
         ),

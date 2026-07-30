@@ -13,6 +13,7 @@ pub mod importer;
 pub mod mempalace_import;
 pub mod models;
 pub mod normalize;
+pub mod pid;
 pub mod remote;
 pub mod retrieval;
 pub mod stats;

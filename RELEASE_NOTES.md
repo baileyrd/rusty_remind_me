@@ -2,6 +2,50 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-30 — Live `dashboard`/`embeddings` status, dashboard PID-file liveness (#90)
+
+### Fixed
+- **`remind_me_server_status` no longer hardcodes `dashboard` and
+  `embeddings` as permanently missing.** Both subsystems are real elsewhere
+  in this workspace (`remind_me_api`'s dashboard, `remind_me_core`'s Ollama
+  embedding backend) but the status tool had never been wired up to see
+  them, so it told operators semantic search and the dashboard didn't exist
+  even when both were actively running.
+
+### Added
+- **`embeddings` status reflects real config and reachability.**
+  `crates/remind_me_core/src/status.rs`'s `server_status` now reports
+  `Active`/`NotImplemented` from `embedder::resolve_embedder()` (config
+  only, no network call — this module's own stated contract). The MCP
+  dispatch layer (`remind_me_mcp/src/lib.rs`'s `remind_me_server_status`
+  arm) overrides that with the new `embedder::embedding_status()`, which
+  adds the live, cached "and reachable" probe via `available_embedder()` —
+  matching the reference's own `_get_embedder()` check.
+- **`crates/remind_me_core/src/pid.rs`**: a PID-file liveness mechanism for
+  the dashboard, porting the reference's `remind_me_mcp/pid.py`. A JSON PID
+  file (`server.pid`, beside the database file) is written by
+  `rusty-remind-me api` on start and read cross-process by the MCP server;
+  liveness is proven by parsing the file *and* a `GET {url}/health` probe
+  (2s timeout) succeeding — a PID file whose health check fails is treated
+  as stale and removed, same outcome as the reference's `os.kill(pid, 0)`
+  staleness check without needing a new `libc` dependency (see the module's
+  doc comment for why that trade-off is safe).
+- **`rusty-remind-me api` refuses a double start** for the same database:
+  it checks `pid::dashboard_status` before binding and exits with an error
+  naming the already-running instance's URL and PID instead of silently
+  colliding on the port.
+- **`dashboard` status** in `remind_me_server_status` is now
+  `pid::dashboard_status` merged in by the MCP dispatch layer, the same
+  override pattern `sync`/`webhook`/`remote` already use — `running: true`
+  with the URL/PID/start time when a live dashboard is found, `running:
+  false` otherwise. An in-memory database (no on-disk location for a PID
+  file) reports `not_implemented` rather than a false "not running".
+- Tests: `crates/remind_me_core/tests/pid_test.rs` (PID-file write/read,
+  live-health-check "running", stale-file cleanup, malformed-file cleanup),
+  new cases in `status_test.rs` for `embeddings` configured/unconfigured,
+  and new `remind_me_mcp` dispatch tests covering both subsystems'
+  live-and-not-live cases end to end.
+
 ## 2026-07-30 — Single-user OAuth 2.1 authorization server for the remote connector (#86)
 
 ### Added

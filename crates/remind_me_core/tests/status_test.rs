@@ -3,9 +3,18 @@
 use remind_me_core::backup::create_backup;
 use remind_me_core::db::queries;
 use remind_me_core::db::schema::SCHEMA_VERSION;
+use remind_me_core::embedder::EMBEDDING_BACKEND_ENV;
 use remind_me_core::status::{server_status, SubsystemStatus};
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
+use std::sync::Mutex;
+
+/// Held by every test in this file that reads `report.embeddings`: that
+/// field now reflects `REMIND_ME_EMBEDDING_BACKEND`, a process-global env
+/// var, so a test asserting the unset (default) case must not race a test
+/// that sets it to `"ollama"` — same convention as `sync_test.rs`'s
+/// `ENV_LOCK`.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn add(conn: &Connection, content: &str) {
     queries::add_memory(
@@ -140,24 +149,65 @@ fn backups_are_inventoried_newest_first() {
 
 #[test]
 fn absent_subsystems_are_named_with_a_reason() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
     let db = Database::open_in_memory().unwrap();
 
     let report = server_status(&db.conn()).unwrap();
 
     assert!(matches!(report.mcp, SubsystemStatus::Active));
-    // Reported as not-implemented with a reason, not as "stopped". A bare
-    // false could not tell "this crate has no dashboard" apart from "the
-    // dashboard is down".
-    for status in [&report.dashboard, &report.embeddings, &report.sync] {
+    // `dashboard` and `sync` are genuinely cross-process (a separate
+    // `rusty-remind-me api` process, and a worker the MCP server owns) --
+    // `server_status` alone can never answer for either, which is why both
+    // stay reported as not-implemented with a reason here (the MCP dispatch
+    // layer overrides both with live state; see `remind_me_mcp`'s
+    // `remind_me_server_status` arm and `crates/remind_me_mcp/tests`).
+    for status in [&report.dashboard, &report.sync] {
         assert!(is_missing(status));
         if let SubsystemStatus::NotImplemented { reason } = status {
             assert!(!reason.is_empty(), "a reason must say something");
         }
     }
+    // `embeddings`, unlike those two, is config read the same way in every
+    // process -- with no backend configured, `server_status` itself already
+    // reports it accurately, no override needed to prove this case.
+    assert!(is_missing(&report.embeddings));
+}
+
+#[test]
+fn embeddings_status_is_active_when_a_backend_is_configured() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(EMBEDDING_BACKEND_ENV, "ollama");
+    let db = Database::open_in_memory().unwrap();
+
+    let report = server_status(&db.conn()).unwrap();
+
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    assert!(
+        matches!(report.embeddings, SubsystemStatus::Active),
+        "expected Active, got {:?}",
+        report.embeddings
+    );
+}
+
+#[test]
+fn embeddings_status_is_not_implemented_without_a_configured_backend() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    let db = Database::open_in_memory().unwrap();
+
+    let report = server_status(&db.conn()).unwrap();
+
+    assert!(is_missing(&report.embeddings));
+    if let SubsystemStatus::NotImplemented { reason } = &report.embeddings {
+        assert!(reason.contains(EMBEDDING_BACKEND_ENV));
+    }
 }
 
 #[test]
 fn the_report_serialises_with_the_subsystem_state_tagged() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
     let db = Database::open_in_memory().unwrap();
 
     let report = server_status(&db.conn()).unwrap();
