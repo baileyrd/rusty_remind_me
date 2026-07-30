@@ -78,13 +78,34 @@ Dated entries, newest first. One entry per merged pull request.
   forever. Fixed by matching on the record's own `payload["id"]` instead,
   for all four record types.
 
-### Scope — matches the epic's own suggested split, two slices in
-Per the issue's explicit instruction to split this epic: **`memories` and
-the knowledge-graph tables, hub sync only**. Still no Tailscale/static-peer
-discovery (the client only ever talks to one configured hub), no OAuth,
-and no `remind_me_revoke_clients` — each is its own follow-up issue, the
-same way `#59` was already split out of this epic for the outbox-growth
-defect.
+- **Peer discovery** — `sync::discover_peers` combines a static peer list
+  (`REMIND_ME_STATIC_PEERS`, a JSON array of `{"node_id", "url"}` objects)
+  with Tailscale's local API (`GET /localapi/v0/status` over a Unix
+  socket, `REMIND_ME_TAILSCALE_SOCKET` to override the platform-default
+  path). Every `Online` Tailscale peer with an address is a candidate,
+  addressed at `http://{ip}:{PEER_PORT}`; whether it's actually a
+  `remind_me` instance is decided by probing `/health` right before
+  syncing (`sync::probe_peer`), the same check the hub already gets — not
+  a tag or hostname filter at discovery time. Static peers are processed
+  first, so one wins a URL collision with a Tailscale-sourced duplicate.
+  The background `SyncWorker` now syncs (push + all four pulls) with the
+  hub, then every discovered peer in turn, skipping any that name this
+  node's own `node_id` or fail the health probe.
+- `docs/adr/0006-peer-discovery.md`, including one deliberate divergence:
+  a malformed `REMIND_ME_STATIC_PEERS` *value* degrades to an empty peer
+  list instead of crashing the process at startup the way the reference's
+  own unguarded `json.loads` does — matching this crate's consistent
+  graceful-degradation posture for every other optional feature, since the
+  reference's behavior here reads as an oversight rather than a
+  considered design choice. A malformed individual *entry* within an
+  otherwise-valid array is still skipped, matching the reference exactly.
+
+### Scope — matches the epic's own suggested split, three slices in
+Per the issue's explicit instruction to split this epic: **`memories`, the
+knowledge-graph tables, and peer discovery (static list + Tailscale)**.
+Still no OAuth and no `remind_me_revoke_clients` — its own follow-up
+issue, the same way `#59` was already split out of this epic for the
+outbox-growth defect.
 
 ### Known limitation: tombstone propagation is schema-limited
 `delete_memory` correctly tombstones the local row when sync is enabled,

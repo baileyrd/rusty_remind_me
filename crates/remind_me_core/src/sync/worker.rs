@@ -7,15 +7,16 @@
 
 use super::{prune_outbox, pull_remote, push_outbox};
 use crate::Database;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// `sync_log`/`sync_sends`' `remote_id` for the single configured hub —
-/// peer discovery (Tailscale, static peer list) is deferred to a follow-up
-/// slice, so this worker only ever talks to one remote.
+/// `sync_log`/`sync_sends`' `remote_id` for the single configured hub.
+/// Every other remote this worker syncs with (via [`super::discover_peers`])
+/// is keyed by its own `node_id` instead.
 pub const HUB_REMOTE_ID: &str = "hub";
 
 const SHUTDOWN_POLL: Duration = Duration::from_millis(200);
@@ -110,6 +111,39 @@ impl Drop for SyncWorker {
     }
 }
 
+/// Push and pull (all four tables) against one remote. One push drains the
+/// whole outbox regardless of which table's trigger wrote a given row --
+/// memories and graph-table rows go together, in one pass; pulls are
+/// per-table, each with its own cursor. Returns the first error
+/// encountered, if any -- one remote's failure never stops the rest of the
+/// tables from being tried against it, and never stops the cycle from
+/// moving on to the next remote.
+fn sync_with_remote(
+    conn: &Connection,
+    url: &str,
+    secret: &str,
+    node_id: &str,
+    remote_id: &str,
+) -> Option<String> {
+    let mut error = None;
+    if let Err(e) = push_outbox(conn, url, secret, node_id, remote_id) {
+        error = Some(format!("push to {remote_id} failed: {e}"));
+    }
+    if let Err(e) = pull_remote(conn, url, secret, node_id, remote_id) {
+        error.get_or_insert_with(|| format!("pull from {remote_id} failed: {e}"));
+    }
+    if let Err(e) = super::pull_entities(conn, url, secret, node_id, remote_id) {
+        error.get_or_insert_with(|| format!("pull entities from {remote_id} failed: {e}"));
+    }
+    if let Err(e) = super::pull_links(conn, url, secret, node_id, remote_id) {
+        error.get_or_insert_with(|| format!("pull links from {remote_id} failed: {e}"));
+    }
+    if let Err(e) = super::pull_entity_relations(conn, url, secret, node_id, remote_id) {
+        error.get_or_insert_with(|| format!("pull entity relations from {remote_id} failed: {e}"));
+    }
+    error
+}
+
 fn run_one_cycle(
     db: &Database,
     hub_url: &str,
@@ -118,26 +152,24 @@ fn run_one_cycle(
     state: &Mutex<WorkerState>,
 ) {
     let conn = db.conn();
-    let mut error = None;
+    let mut error = sync_with_remote(&conn, hub_url, secret, node_id, HUB_REMOTE_ID);
 
-    // One push drains the whole outbox regardless of which table's trigger
-    // wrote a given row -- memories and graph-table rows are pushed
-    // together, in one pass. Pulls are per-table (each has its own cursor).
-    if let Err(e) = push_outbox(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
-        error = Some(format!("push to hub failed: {e}"));
+    // Every discovered peer (static list plus Tailscale) gets the same
+    // treatment as the hub: probed first (the only "is this really a
+    // remind_me instance" check, matching the reference), skipped
+    // silently if unreachable or if it names this very node.
+    for peer in super::discover_peers() {
+        if peer.node_id == node_id {
+            continue;
+        }
+        if !super::probe_peer(&peer.url, secret) {
+            continue;
+        }
+        if let Some(e) = sync_with_remote(&conn, &peer.url, secret, node_id, &peer.node_id) {
+            error.get_or_insert(e);
+        }
     }
-    if let Err(e) = pull_remote(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
-        error.get_or_insert_with(|| format!("pull from hub failed: {e}"));
-    }
-    if let Err(e) = super::pull_entities(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
-        error.get_or_insert_with(|| format!("pull entities from hub failed: {e}"));
-    }
-    if let Err(e) = super::pull_links(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
-        error.get_or_insert_with(|| format!("pull links from hub failed: {e}"));
-    }
-    if let Err(e) = super::pull_entity_relations(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
-        error.get_or_insert_with(|| format!("pull entity relations from hub failed: {e}"));
-    }
+
     if let Err(e) = prune_outbox(&conn) {
         error.get_or_insert_with(|| format!("outbox prune failed: {e}"));
     }

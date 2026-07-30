@@ -1,12 +1,13 @@
 //! Multi-node sync: push the local outbox to a hub, pull its changes back.
 //!
-//! See `docs/adr/0004-sync-protocol-and-conflict-resolution.md` and
-//! `docs/adr/0005-graph-sync.md` for what this module does and does not
-//! implement yet. In short: `memories` and the knowledge-graph tables
-//! (`entities`/`entity_relations`/`memory_entities`), hub sync only (no
-//! Tailscale/static-peer discovery), no OAuth or `remind_me_revoke_clients`
-//! — each deferred to its own follow-up issue, exactly as the epic asked
-//! for this to be split.
+//! See `docs/adr/0004-sync-protocol-and-conflict-resolution.md`,
+//! `docs/adr/0005-graph-sync.md`, and `docs/adr/0006-peer-discovery.md` for
+//! what this module does and does not implement yet. In short: `memories`
+//! and the knowledge-graph tables (`entities`/`entity_relations`/
+//! `memory_entities`) sync against a configured hub and every discovered
+//! peer (a static list plus Tailscale's local API); no OAuth or
+//! `remind_me_revoke_clients` yet — deferred to its own follow-up issue,
+//! exactly as the epic asked for this to be split.
 //!
 //! Off unless [`NODE_ID_ENV`], [`HUB_URL_ENV`], and [`SYNC_SECRET_ENV`] are
 //! all set — the same default-off posture as the webhook endpoint (`#56`)
@@ -17,6 +18,7 @@ use rusqlite::{params, Connection, Result};
 
 mod graph;
 mod http;
+mod peers;
 mod pull;
 mod push;
 mod record;
@@ -27,6 +29,7 @@ pub use graph::{
     apply_incoming_record, upsert_entity_record, upsert_entity_relation_record, upsert_link_record,
     EntityRelationSyncRecord, EntitySyncRecord, GraphApplyError, LinkSyncRecord,
 };
+pub use peers::{discover_peers, probe_peer, Peer, STATIC_PEERS_ENV, TAILSCALE_SOCKET_ENV};
 pub use pull::{
     pull_entities, pull_entity_relations, pull_links, pull_remote, PullError, PullReport,
 };
