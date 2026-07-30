@@ -8,6 +8,7 @@ license.workspace = true
 remind_me_core.workspace = true
 remind_me_mcp.workspace = true
 remind_me_api.workspace = true
+remind_me_remote.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true

@@ -2,6 +2,74 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-30 — Remote MCP connector over Streamable HTTP (#85)
+
+### Added
+- **`remind_me_remote`**: a new workspace crate serving the MCP server as a
+  remote connector over real MCP Streamable HTTP transport — session-managed
+  SSE via the official `rmcp` (3.0.1) Rust MCP SDK, gated by the reference's
+  FT-05 secret-path/bearer auth (`remind_me_mcp/remote.py`'s
+  `SecretPathMiddleware` / `build_remote_app`'s no-issuer branch). Two ways
+  in, matching the reference: `GET`/`POST /mcp/<token>` (path segment,
+  constant-time compared, rewritten to `/mcp` before reaching the transport)
+  and `/mcp` directly with `Authorization: Bearer <token>`. `GET /health`
+  stays unauthenticated (SE-04 parity). Wrong token or wrong path both 404
+  identically — neither leaks whether the real endpoint exists. OAuth
+  (FT-07) and `remind_me_revoke_clients` are the separate, blocked-on-this
+  `#86`, out of scope here.
+- `tokio`/`axum`/`rmcp` are dependencies of `remind_me_remote` only —
+  `remind_me_core`, `remind_me_api`, `remind_me_mcp`, and `remind_me_cli`
+  stay synchronous and architecturally untouched, per the decision recorded
+  on `#57`. `remind_me_cli` gained one `remote` subcommand that calls into
+  `remind_me_remote::run_blocking` (which owns its own tokio runtime)
+  instead of gaining any async code of its own.
+- **A thin `rmcp::ServerHandler` adapter** (`remind_me_remote::handler::RemindMeHandler`),
+  not a reimplementation of tool/resource/prompt dispatch: investigation of
+  `rmcp` 3.0.1's actual API (its source, vendored and read directly — see
+  `docs/adr/0010-remote-mcp-transport-rmcp-typed-adapter.md`) found no raw
+  JSON-RPC passthrough mode, only a typed trait, so each handler method
+  builds the same JSON-RPC envelope the stdio transport sends and calls
+  `McpServer::handle_request` — the crate's one existing, already-tested
+  dispatch entry point — on `tokio::task::spawn_blocking`.
+- Default bind is loopback-only (`127.0.0.1:8768`,
+  `REMIND_ME_REMOTE_HOST`/`REMIND_ME_REMOTE_PORT`); binding wider without a
+  tunnel in front logs a startup warning (`remind_me_remote::warn_if_widened`,
+  backed by the pure, directly-tested `is_loopback_host`) — this app never
+  terminates TLS, matching the reference's own posture exactly.
+- **Token resolution** (`remind_me_core::remote::resolve_connector_token`):
+  `REMIND_ME_REMOTE_TOKEN` env var, else a token persisted at
+  `~/.remind_me/connector_token` (0600 on unix), generated on first use from
+  two concatenated `uuid` v4s (~244 bits of entropy) rather than a new `rand`
+  dependency for one call site. `remind_me_server_status` now merges in a
+  `remote` field (`enabled`, `host`, `port`, `token_file`, `token_configured`)
+  the same way it already merges in `webhook`/`sync_peer`/`sync` — matching
+  where the reference itself surfaces `get_remote_status()` (folded into its
+  own `remind_me_server_status`, not a separate tool).
+
+### Testing
+- 6 new unit tests in `remind_me_core::remote` (token/config resolution,
+  status reporting), 6 in `remind_me_remote` (auth path-rewriting, bind-host
+  classification, handler `Send`/`Sync`), and 7 HTTP integration tests
+  (`crates/remind_me_remote/tests/http_test.rs`) driving the real
+  axum/rmcp server end to end: health unauthenticated, missing/wrong bearer
+  401, wrong secret-path token and an unrelated path both 404 with an
+  identical body, a real `initialize` negotiating a session over actual SSE
+  framing (asserted directly, not assumed), and a real `remind_me_add` tool
+  call round-tripping through `McpServer::handle_request` over the bearer
+  path while reusing the session the secret-path form opened.
+- **Not yet validated: a real claude.ai custom connector.** This sandboxed
+  environment has no network path to reach one, so everything above proves
+  protocol shape and this crate's own auth/routing correctness against
+  `rmcp`'s real transport — not interop with an actual MCP client in the
+  wild. That validation is still outstanding and must be performed by a
+  human (add the tunneled `/mcp/<token>` URL as a claude.ai custom connector
+  and confirm tool calls succeed) before `#85` is considered fully done.
+
+### Docs
+- `docs/adr/0010-remote-mcp-transport-rmcp-typed-adapter.md`: the
+  `rmcp`-vs-hand-rolled decision, what its API investigation actually found,
+  and the `ServerHandler` adapter design.
+
 ## 2026-07-30 — Consolidate near-duplicate memories (#50)
 
 ### Added

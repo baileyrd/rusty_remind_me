@@ -1115,6 +1115,18 @@ impl McpServer {
                                     ),
                             )
                             .unwrap_or(json!({}));
+                            // The remote MCP connector (FT-05, #85) has no
+                            // running state to merge in the way the webhook/
+                            // sync do -- remind_me_remote::run() only exists
+                            // when the CLI process opts in, and this crate
+                            // stays synchronous, so there is no live server
+                            // handle here to ask. remind_me_core::remote::remote_status
+                            // reports config/token state the same way the
+                            // reference's get_remote_status() does, purely
+                            // from env vars and the token file.
+                            report["remote"] =
+                                serde_json::to_value(remind_me_core::remote::remote_status())
+                                    .unwrap_or(json!({}));
                             json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                         }
                         Err(e) => {
@@ -2301,6 +2313,10 @@ mod tests {
         assert_eq!(report["sync_peer"]["enabled"], false);
         assert_eq!(report["sync"]["enabled"], false);
         assert_eq!(report["schema_current"], true);
+        // No REMIND_ME_REMOTE_MCP in the test environment, so the remote
+        // connector (FT-05, #85) reports disabled the same way the others do.
+        assert_eq!(report["remote"]["enabled"], false);
+        assert_eq!(report["remote"]["host"], "127.0.0.1");
     }
 
     #[test]
