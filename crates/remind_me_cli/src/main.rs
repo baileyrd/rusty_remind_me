@@ -126,6 +126,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let api_server = ApiServer::new(db);
                 api_server.run(&addr)?;
             }
+            "remote" => {
+                // The only place this crate ever touches the async side of
+                // the workspace: remind_me_remote::run_blocking owns
+                // spinning up its own tokio runtime and blocks this thread
+                // on it, so this crate stays synchronous like every other
+                // subcommand here -- no `async fn`, no tokio dependency of
+                // its own. Bind host/port and the connector token are
+                // resolved from the environment inside run_blocking
+                // (REMIND_ME_REMOTE_HOST/_PORT/_TOKEN), matching how "api"
+                // above takes its port from argv while "server" takes its
+                // config from the environment.
+                let server = McpServer::new(db);
+                remind_me_remote::run_blocking(server)?;
+            }
             "search" => {
                 if args.len() < 3 {
                     eprintln!("Usage: rusty-remind-me search <query>");
@@ -254,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", serde_json::to_string_pretty(&stats::collect(&conn)?)?);
             }
             cmd => {
-                eprintln!("Unknown subcommand: {}. Available: configure, api, server, search, add, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);
+                eprintln!("Unknown subcommand: {}. Available: configure, api, remote, server, search, add, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);
                 std::process::exit(1);
             }
         }
