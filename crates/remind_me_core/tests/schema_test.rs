@@ -7,30 +7,25 @@
 
 use remind_me_core::db::migrations::SCHEMA_VERSION;
 use remind_me_core::db::queries;
+use remind_me_core::sync::{HUB_URL_ENV, NODE_ID_ENV, SYNC_SECRET_ENV};
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// `writes_still_reach_the_sync_outbox` is the only test here that touches
+/// the sync env vars (`#76`'s `sync_flags` gate means a write only reaches
+/// the outbox when sync is actually configured) — held for consistency with
+/// every other file that touches them, not because another test in this file
+/// currently races on it.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// The generated schema, as shipped. Comparing against these is comparing
 /// against `remind_me`, because they are dumped from it verbatim.
 const SCHEMA_TABLES: &str = include_str!("../src/db/schema_tables.sql");
 const SCHEMA_INDEXES: &str = include_str!("../src/db/schema_indexes.sql");
 const SCHEMA_TRIGGERS: &str = include_str!("../src/db/schema_triggers.sql");
-
-/// Objects this crate's own code creates, deliberately, beyond the generated
-/// schema — distinct from a real divergence, which is what the rest of this
-/// file exists to catch. `entities_outbox_ai`/`_au`, `entity_relations_outbox_ai`,
-/// and `memory_entities_outbox_ai` (`sync::graph::ensure_schema`, `#57`'s
-/// graph-sync slice) are this crate's own addition: there is no
-/// generated-schema outbox trigger for these three tables at all, only for
-/// `memories`.
-const OWN_ADDITIONS: &[&str] = &[
-    "entities_outbox_ai",
-    "entities_outbox_au",
-    "entity_relations_outbox_ai",
-    "memory_entities_outbox_ai",
-];
 
 struct TempDb(PathBuf);
 
@@ -118,7 +113,7 @@ fn assert_matches_schema(live: &Connection, kind: &str) {
         }
     }
     for name in actual.keys() {
-        if !want.contains_key(name) && !OWN_ADDITIONS.contains(&name.as_str()) {
+        if !want.contains_key(name) {
             problems.push(format!("  UNEXPECTED {} {}", kind, name));
         }
     }
@@ -325,6 +320,11 @@ fn a_legacy_database_is_reconciled_to_the_generated_schema() {
 
 #[test]
 fn writes_still_reach_the_sync_outbox() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(NODE_ID_ENV, "node-a");
+    std::env::set_var(HUB_URL_ENV, "http://hub.example");
+    std::env::set_var(SYNC_SECRET_ENV, "shh");
+
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     queries::add_memory(
@@ -353,4 +353,42 @@ fn writes_still_reach_the_sync_outbox() {
     let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(parsed["content"], "syncable");
     assert!(parsed.get("base_weight").is_some());
+
+    std::env::remove_var(NODE_ID_ENV);
+    std::env::remove_var(HUB_URL_ENV);
+    std::env::remove_var(SYNC_SECRET_ENV);
+}
+
+#[test]
+fn writes_do_not_reach_the_outbox_while_sync_is_unconfigured() {
+    // The `#76` regression case: memories_outbox_ai/au are gated on
+    // sync_flags.sync_enabled, so a write on a node that has never
+    // configured sync must not queue anything at all.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(NODE_ID_ENV);
+    std::env::remove_var(HUB_URL_ENV);
+    std::env::remove_var(SYNC_SECRET_ENV);
+
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    queries::add_memory(
+        &conn,
+        MemoryAddInput {
+            content: "not synced anywhere".into(),
+            category: "general".into(),
+            tags: vec![],
+            source: "manual".into(),
+            metadata: serde_json::json!({}),
+            subject: None,
+            predicate: None,
+            object: None,
+            entities: vec![],
+        },
+    )
+    .unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM sync_outbox", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }

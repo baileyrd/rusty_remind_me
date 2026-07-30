@@ -280,6 +280,10 @@ fn outbox_row_count(conn: &Connection, memory_id: &str, sent: bool) -> i64 {
 
 #[test]
 fn applying_an_incoming_record_marks_only_its_own_echo_as_sent() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(NODE_ID_ENV, "local-node");
+    std::env::set_var(HUB_URL_ENV, "http://hub.example");
+    std::env::set_var(SYNC_SECRET_ENV, "shh");
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     let id = add(&conn, "local content");
@@ -310,6 +314,9 @@ fn applying_an_incoming_record_marks_only_its_own_echo_as_sent() {
         1,
         "only this write's own echo is marked sent"
     );
+    std::env::remove_var(NODE_ID_ENV);
+    std::env::remove_var(HUB_URL_ENV);
+    std::env::remove_var(SYNC_SECRET_ENV);
 }
 
 // ---------------------------------------------------------------------------
@@ -499,8 +506,27 @@ impl Drop for TestHub {
     }
 }
 
+/// These tests only need a row sitting in `sync_outbox` before calling
+/// `push_outbox` -- `#76`'s `sync_flags` gate means a plain `add()` no
+/// longer queues one unless sync is actually configured, so every test here
+/// that pushes a locally-written memory holds `ENV_LOCK` and sets the three
+/// sync env vars first.
+fn enable_sync(node_id: &str) {
+    std::env::set_var(NODE_ID_ENV, node_id);
+    std::env::set_var(HUB_URL_ENV, "http://hub.example");
+    std::env::set_var(SYNC_SECRET_ENV, SECRET);
+}
+
+fn disable_sync() {
+    std::env::remove_var(NODE_ID_ENV);
+    std::env::remove_var(HUB_URL_ENV);
+    std::env::remove_var(SYNC_SECRET_ENV);
+}
+
 #[test]
 fn push_outbox_delivers_local_writes_to_a_real_hub() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("local-node");
     let hub = TestHub::start("hub-node");
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
@@ -523,10 +549,13 @@ fn push_outbox_delivers_local_writes_to_a_real_hub() {
         second.pushed, 0,
         "already-acknowledged rows are not re-sent"
     );
+    disable_sync();
 }
 
 #[test]
 fn push_outbox_reports_a_clear_error_when_the_hub_is_unreachable() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("local-node");
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
     add(&local_conn, "content");
@@ -544,10 +573,13 @@ fn push_outbox_reports_a_clear_error_when_the_hub_is_unreachable() {
     )
     .unwrap_err();
     assert!(!err.to_string().is_empty());
+    disable_sync();
 }
 
 #[test]
 fn push_outbox_is_refused_with_the_wrong_secret() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("local-node");
     let hub = TestHub::start("hub-node");
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
@@ -555,6 +587,7 @@ fn push_outbox_is_refused_with_the_wrong_secret() {
 
     let err = push_outbox(&local_conn, &hub.url, "wrong-secret", "local-node", "hub").unwrap_err();
     assert!(err.to_string().contains("401"), "got {err}");
+    disable_sync();
 }
 
 #[test]
@@ -620,6 +653,8 @@ fn pull_remote_excludes_records_this_node_originated() {
 
 #[test]
 fn a_full_push_then_pull_round_trip_between_two_nodes_converges() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("node-a");
     let hub = TestHub::start("hub-node");
     let node_a = Database::open_in_memory().unwrap();
     let node_a_conn = node_a.conn();
@@ -640,4 +675,5 @@ fn a_full_push_then_pull_round_trip_between_two_nodes_converges() {
         )
         .unwrap();
     assert_eq!(count, 1);
+    disable_sync();
 }

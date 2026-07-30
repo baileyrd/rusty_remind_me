@@ -105,30 +105,22 @@ once from the CLI's real `server`/`mcp` entry point — not from
 test, for the same reason `updater::start_background_check` isn't started
 there either (`#58`'s ADR-0003 makes the identical argument).
 
-## Known limitation: tombstone propagation is schema-limited, not code-limited
+## Resolved: tombstone propagation was schema-limited (`#76`, ADR-0007)
 
-The generated `schema_triggers.sql` already installed in this crate (dumped
-from an earlier `remind_me` snapshot, not this crate's file to hand-edit)
-writes `memories_outbox_ai`/`memories_outbox_au`'s JSON payload from a fixed
-23-column list ending at `superseded_by` — it does **not** include
-`deleted_at`, `doc_id`, or `chunk_index`. The currently-read reference
-source already includes `deleted_at` in its own outbox payload (per its
-`_upsert_records`' explicit tombstone handling), meaning the reference has
-evolved past what this repo's generated schema snapshot captures.
+This ADR originally recorded a known limitation here: the generated
+`schema_triggers.sql` this crate started from was dumped from an earlier
+`remind_me` snapshot whose `memories_outbox_ai`/`_au` wrote a fixed
+23-column payload ending at `superseded_by`, missing `deleted_at` (and
+`doc_id`/`chunk_index`) — so `delete_memory`'s tombstone had no way to
+propagate to another node, even though everything downstream of "the wire
+payload carries what the trigger actually writes" was implemented
+correctly.
 
-Concretely: `delete_memory` correctly tombstones the local row
-(`deleted_at` set, excluded from every read) when sync is enabled, but the
-`memories_outbox_au` trigger this fires still cannot encode `deleted_at` in
-its payload — so **a deletion does not yet propagate to another node**,
-even though everything downstream of "the wire payload carries the fields
-this schema's own trigger actually writes" is implemented correctly. This
-is a real, schema-generation-lag limitation, not a bug in this PR's own
-code, and not something hand-editing the generated trigger SQL is the
-right fix for (that file's own header says not to). Filed as a follow-up
-issue tracking a schema re-dump from a current reference database, since
-fixing it needs a regenerated `schema_triggers.sql`, `schema_tables.sql`
-having whatever else changed since, and this crate's own reconciler updated
-to match — out of scope for a conflict-resolution-engine PR.
+Fixed in `#76` (see ADR-0007 for the full account): the reference's real
+schema code was re-run directly (not hand-transcribed) to regenerate
+`schema_tables.sql`/`schema_indexes.sql`/`schema_triggers.sql`, and
+`SyncRecord`/`upsert_record` gained `deleted_at`, applied through the same
+LWW path as every other column. A tombstone now propagates correctly.
 
 **Re-embedding a synced memory is intentionally left to
 `remind_me_reindex` (`#49`), not done inline here.** This slice's

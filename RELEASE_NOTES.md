@@ -107,22 +107,49 @@ Still no OAuth and no `remind_me_revoke_clients` — its own follow-up
 issue, the same way `#59` was already split out of this epic for the
 outbox-growth defect.
 
-### Known limitation: tombstone propagation is schema-limited
-`delete_memory` correctly tombstones the local row when sync is enabled,
-but the currently-installed, generated `memories_outbox_au` trigger's
-payload (dumped from an earlier `remind_me` snapshot, not this crate's file
-to hand-edit) does not include `deleted_at` in its 23-column JSON snapshot
-— so a deletion does not yet propagate to another node, even though
-everything downstream of "the wire payload carries what this schema's own
-trigger actually writes" is implemented correctly. See ADR-0004's "Known
-limitation" section; a follow-up issue tracks the schema re-dump this
-actually needs.
+### Fixed: tombstone propagation, and every outbox trigger's `sync_flags` gate (#76)
+The generated `schema_*.sql` files were dumped from an earlier `remind_me`
+snapshot whose `memories_outbox_ai`/`_au` had no `WHEN` guard and a
+23-column payload ending at `superseded_by` — missing `doc_id`,
+`chunk_index`, and (critically) `deleted_at`, so a `delete_memory`
+tombstone had no way to reach another node at all. Re-running the
+reference's actual schema code (`db.py`'s `_ensure_schema`, imported
+standalone rather than hand-transcribed) against a fresh SQLite connection
+confirmed the current shape: both triggers gated on
+`sync_flags.sync_enabled = '1'`, a 26-column payload, and — a second,
+independent finding — the four graph-table outbox triggers
+(`entities_outbox_ai`/`_au`, `entity_relations_outbox_ai`,
+`memory_entities_outbox_ai`) are themselves part of the reference's
+generated schema, not something this crate needed to hand-roll. All three
+`schema_*.sql` files were regenerated from that dump; `sync::graph`'s
+hand-rolled trigger installer was removed entirely now that its
+triggers live in the generated file like every other one.
 
-Re-embedding a synced memory is deliberately left to `remind_me_reindex`
-(`#49`) rather than done inline here — `upsert_record` never calls the
-embedder, so a synced memory has no vector until the next reindex, exactly
-like any other bulk-arrived memory (`dbs`, MemPalace, chat/document
-import).
+Every outbox trigger firing at all is now conditional on
+`sync_flags.sync_enabled`, reconciled against the live configuration on
+every open by the new `sync::reconcile_sync_enabled_flag` — matching the
+reference's own `_reconcile_sync_enabled_flag` exactly, including its
+backfill-on-first-enable behavior for `memories`/`entities`/
+`memory_entities` (deliberately not `entity_relations`, matching a real
+omission in the reference rather than "fixing" it into a difference).
+A node that never configures sync now queues nothing in `sync_outbox` at
+all — closing the growth problem `#59`'s `prune_outbox` was a downstream
+workaround for, at the actual source, matching the reference.
+
+`SyncRecord` gained `deleted_at`, applied through the same last-write-wins
+path as every other column — this is what actually lets a tombstone
+propagate. `doc_id`/`chunk_index` remain unapplied on receipt, matching the
+reference's own receiving side exactly (it sends them for wire column-list
+parity but never reads them back either). See ADR-0007.
+
+Re-embedding a synced memory is still deliberately left to
+`remind_me_reindex` (`#49`) rather than done inline here — `upsert_record`
+never calls the embedder, so a synced memory has no vector until the next
+reindex, exactly like any other bulk-arrived memory (`dbs`, MemPalace,
+chat/document import). Hard-deleting old tombstones once every reachable
+peer has almost certainly observed them (the reference's
+`sync._compact_tombstones`) is not implemented here — a real, separate gap
+for its own follow-up, not folded into this fix.
 
 ## 2026-07-29 — Import a MemPalace ChromaDB store (#53)
 

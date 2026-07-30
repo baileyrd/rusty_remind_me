@@ -68,17 +68,24 @@ before writing any of this settled the open questions:
 
 ## Decision
 
-**New outbox triggers, installed by this crate's own code, not the
-generated schema.** There is no generated-schema outbox trigger for
-`entities`/`entity_relations`/`memory_entities` at all — only `memories`
-ships one. `sync::graph::ensure_schema` installs
+**New outbox triggers for `entities`/`entity_relations`/`memory_entities`,
+initially installed by this crate's own code, not the generated schema** —
+the schema dump this port started from predated the reference's own
+entity-graph outbox triggers, so `sync::graph::ensure_schema` hand-rolled
 `entities_outbox_ai`/`_au`, `entity_relations_outbox_ai`, and
-`memory_entities_outbox_ai`, the same way `#49`'s `vec_embeddings` table is
-this crate's own addition on top of the generated schema. No
-`sync_flags`-gated `WHEN` clause on any of them — matching this crate's
-already-installed (also ungated) `memories_outbox_*` triggers, and tracked
-alongside that same limitation in `#76`, rather than introducing
-inconsistent gating only for the new tables.
+`memory_entities_outbox_ai` to match what the reference's *source* showed,
+the same way `#49`'s `vec_embeddings` table is this crate's own addition on
+top of the generated schema. Un-gated at the time, matching this crate's
+then-also-ungated `memories_outbox_*` triggers, tracked as the same
+limitation in `#76`.
+
+**Superseded by `#76`/ADR-0007**: regenerating the schema dump from the
+reference's real, current schema code found that these four triggers are
+themselves part of the *generated* schema (added alongside the entity
+graph itself), each gated on `sync_flags.sync_enabled` like every other
+outbox trigger. `sync::graph::ensure_schema` was removed entirely — the
+triggers now live in `schema_triggers.sql`, gated, with no second,
+hand-rolled copy to keep in sync with it.
 
 **A dedicated sync-conflict function per record type**, not a reuse of the
 interactive tool functions: `upsert_entity_record` (LWW +

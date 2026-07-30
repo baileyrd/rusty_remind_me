@@ -13,9 +13,27 @@ use rusqlite::Connection;
 use serde_json::json;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const SECRET: &str = "hub-secret";
+
+/// `sync_flags.sync_enabled` (`#76`) means a node's own writes only reach
+/// its outbox once sync is actually configured — every test in this file that
+/// writes locally and expects to find the row in `sync_outbox` (directly, or
+/// indirectly via `push_outbox`) holds this for the duration of that write.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn enable_sync(node_id: &str) {
+    std::env::set_var(remind_me_core::sync::NODE_ID_ENV, node_id);
+    std::env::set_var(remind_me_core::sync::HUB_URL_ENV, "http://hub.example");
+    std::env::set_var(remind_me_core::sync::SYNC_SECRET_ENV, SECRET);
+}
+
+fn disable_sync() {
+    std::env::remove_var(remind_me_core::sync::NODE_ID_ENV);
+    std::env::remove_var(remind_me_core::sync::HUB_URL_ENV);
+    std::env::remove_var(remind_me_core::sync::SYNC_SECRET_ENV);
+}
 
 fn entity_row(
     conn: &Connection,
@@ -384,6 +402,8 @@ fn outbox_record_types(conn: &Connection) -> Vec<String> {
 
 #[test]
 fn creating_an_entity_queues_a_tagged_outbox_row() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("node-a");
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     entity::upsert_entity(
@@ -397,10 +417,13 @@ fn creating_an_entity_queues_a_tagged_outbox_row() {
     .unwrap();
 
     assert_eq!(outbox_record_types(&conn), vec!["entity"]);
+    disable_sync();
 }
 
 #[test]
 fn creating_a_relation_and_a_link_each_queue_their_own_tagged_outbox_row() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("node-a");
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     entity::upsert_entity(
@@ -427,6 +450,7 @@ fn creating_a_relation_and_a_link_each_queue_their_own_tagged_outbox_row() {
     let types = outbox_record_types(&conn);
     assert!(types.contains(&"entity_relation".to_string()));
     assert!(types.contains(&"memory_entity".to_string()));
+    disable_sync();
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +508,8 @@ impl Drop for TestHub {
 
 #[test]
 fn push_outbox_delivers_entities_relations_and_links_to_a_real_hub_in_one_pass() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("local-node");
     let hub = TestHub::start("hub-node");
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
@@ -528,6 +554,7 @@ fn push_outbox_delivers_entities_relations_and_links_to_a_real_hub_in_one_pass()
     assert_eq!(hub_entities, 2);
     assert_eq!(hub_relations, 1);
     assert_eq!(hub_links, 1);
+    disable_sync();
 }
 
 #[test]
@@ -594,6 +621,8 @@ fn pull_links_and_pull_entity_relations_apply_the_hubs_graph_rows() {
 
 #[test]
 fn a_two_node_entity_round_trip_converges_on_the_union_of_aliases() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("node-a");
     let hub = TestHub::start("hub-node");
     let node_a = Database::open_in_memory().unwrap();
     let node_a_conn = node_a.conn();
@@ -631,6 +660,7 @@ fn a_two_node_entity_round_trip_converges_on_the_union_of_aliases() {
         aliases.contains(&"A-alias".to_string()) && aliases.contains(&"B-alias".to_string()),
         "got {aliases:?}"
     );
+    disable_sync();
 }
 
 #[test]

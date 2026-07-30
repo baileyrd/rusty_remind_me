@@ -40,14 +40,6 @@ pub use worker::{
     disabled_status as sync_worker_disabled_status, SyncWorker, SyncWorkerStatus, HUB_REMOTE_ID,
 };
 
-/// Install this crate's own additions on top of the generated schema:
-/// the graph tables' outbox triggers (`#57`'s second slice) — there is no
-/// generated-schema equivalent for `entities`/`entity_relations`/
-/// `memory_entities`, only `memories` ships one.
-pub fn ensure_schema(conn: &Connection) -> Result<()> {
-    graph::ensure_schema(conn)
-}
-
 /// This node's identity in sync records. Empty (the default) means "no
 /// identity configured" — matching the reference's own `NODE_ID = ""`
 /// default, stamped onto every locally-created memory regardless of
@@ -107,6 +99,92 @@ pub fn sync_enabled() -> bool {
     !configured_node_id().is_empty()
         && !configured_hub_url().is_empty()
         && !configured_sync_secret().is_empty()
+}
+
+const NOW_ISO_EXPR: &str = "strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00'";
+
+/// Align `sync_flags.sync_enabled` with [`sync_enabled`], every time the
+/// schema is opened — matching the reference's own `_reconcile_sync_enabled_flag`,
+/// called on every startup, verbatim:
+///
+/// - already matches: no-op.
+/// - stored `"0"`, now enabled: the outbox is backfilled with an `insert` row
+///   for every current `memories`/`entities`/`memory_entities` row, so
+///   changes made while sync was off still reach a remote once it's
+///   configured. Matches the reference exactly in NOT backfilling
+///   `entity_relations` either — preserved rather than "fixed," since
+///   covering more tables than the reference does would make the two diverge
+///   on what a first sync actually sends.
+/// - now disabled (from any prior state): `sync_outbox`/`sync_sends` are
+///   cleared — nothing is left to drain.
+/// - unset (a fresh database) and now enabled: no backfill, matching the
+///   reference's own reasoning verbatim even though the reference's stated
+///   justification ("pre-gate triggers were unconditional, so the outbox is
+///   already complete") describes reference history this crate never had.
+///   Reproducing the exact stored/desired matrix rather than the reasoning
+///   behind one cell of it keeps this one reconciliation function, not two
+///   diverging ones for "true fresh" vs. "upgraded from an older,
+///   once-ungated build."
+pub fn reconcile_sync_enabled_flag(conn: &Connection) -> Result<()> {
+    use rusqlite::OptionalExtension;
+
+    let desired = if sync_enabled() { "1" } else { "0" };
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM sync_flags WHERE key = 'sync_enabled'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    if stored.as_deref() == Some(desired) {
+        return Ok(());
+    }
+
+    if desired == "1" && stored.as_deref() == Some("0") {
+        conn.execute_batch(&format!(
+            "INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
+             SELECT id, 'insert', json_object(
+                 'id', id, 'content', content, 'category', category, 'tags', tags,
+                 'source', source, 'metadata', metadata, 'created_at', created_at,
+                 'updated_at', updated_at, 'capture_id', capture_id, 'node_id', node_id,
+                 'client', client, 'accessed_at', accessed_at, 'access_count', access_count,
+                 'decay_rate', decay_rate, 'vitality', vitality, 'base_weight', base_weight,
+                 'status', status, 'memory_type', memory_type,
+                 'source_capture_id', source_capture_id, 'subject', subject,
+                 'predicate', predicate, 'object', object, 'superseded_by', superseded_by,
+                 'doc_id', doc_id, 'chunk_index', chunk_index, 'deleted_at', deleted_at
+             ), {now}
+             FROM memories;
+
+             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
+             SELECT id, 'insert', json_object(
+                 'record_type', 'entity', 'id', id, 'name', name, 'kind', kind,
+                 'aliases', aliases, 'created_at', created_at, 'updated_at', updated_at,
+                 'node_id', node_id
+             ), {now}
+             FROM entities;
+
+             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
+             SELECT memory_id, 'insert', json_object(
+                 'record_type', 'memory_entity',
+                 'id', memory_id || '|' || entity_id,
+                 'memory_id', memory_id, 'entity_id', entity_id, 'created_at', created_at
+             ), {now}
+             FROM memory_entities;",
+            now = NOW_ISO_EXPR
+        ))?;
+    } else if desired == "0" {
+        conn.execute_batch("DELETE FROM sync_outbox; DELETE FROM sync_sends;")?;
+    }
+
+    conn.execute(
+        "INSERT INTO sync_flags (key, value) VALUES ('sync_enabled', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![desired],
+    )?;
+
+    Ok(())
 }
 
 /// Days an unsent outbox row is kept before being pruned.

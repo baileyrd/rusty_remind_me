@@ -18,10 +18,14 @@
 //!   arrived yet: there is no foreign key, deliberately, so the row simply
 //!   waits — nothing here retries it, the missing row just stops being
 //!   missing whenever it eventually arrives.
-//! - There is no generated-schema outbox trigger for any of these three
-//!   tables at all (only `memories` ships one) — [`ensure_schema`] installs
-//!   this crate's own, the same way `#49`'s `vec_embeddings` table is this
-//!   crate's own addition on top of the generated schema.
+//! - The generated schema (`schema_triggers.sql`, regenerated in `#76`) ships
+//!   `entities_outbox_ai`/`_au`, `entity_relations_outbox_ai`, and
+//!   `memory_entities_outbox_ai` itself, gated on `sync_flags.sync_enabled`
+//!   exactly like `memories_outbox_ai`/`_au` — an earlier pass of this port
+//!   installed hand-rolled, ungated equivalents because the schema dump this
+//!   crate started from predated them; regenerating the dump found the real
+//!   ones, so the hand-rolled copies were removed rather than kept as a
+//!   second, diverging source of truth.
 
 use super::record::canon_ts;
 use chrono::Utc;
@@ -29,63 +33,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
-
-/// Install this crate's own outbox triggers for the graph tables. No
-/// `sync_flags`-gated `WHEN` clause — matching this crate's already-installed
-/// (also ungated) `memories_outbox_*` triggers, tracked alongside that same
-/// limitation in `#76`. `created_at` uses `datetime('now')` to match the
-/// existing memories triggers' own convention exactly (not the RFC3339 shape
-/// `prune_outbox`'s cutoff comparison expects) — a pre-existing, narrow
-/// imprecision in the already-shipped triggers this deliberately stays
-/// consistent with rather than half-fixing for graph rows only.
-pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TRIGGER IF NOT EXISTS entities_outbox_ai
-         AFTER INSERT ON entities BEGIN
-             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
-             VALUES (NEW.id, 'insert', json_object(
-                 'record_type', 'entity', 'id', NEW.id, 'name', NEW.name,
-                 'kind', NEW.kind, 'aliases', NEW.aliases,
-                 'created_at', NEW.created_at, 'updated_at', NEW.updated_at,
-                 'node_id', NEW.node_id
-             ), datetime('now'));
-         END;
-
-         CREATE TRIGGER IF NOT EXISTS entities_outbox_au
-         AFTER UPDATE ON entities BEGIN
-             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
-             VALUES (NEW.id, 'update', json_object(
-                 'record_type', 'entity', 'id', NEW.id, 'name', NEW.name,
-                 'kind', NEW.kind, 'aliases', NEW.aliases,
-                 'created_at', NEW.created_at, 'updated_at', NEW.updated_at,
-                 'node_id', NEW.node_id
-             ), datetime('now'));
-         END;
-
-         CREATE TRIGGER IF NOT EXISTS entity_relations_outbox_ai
-         AFTER INSERT ON entity_relations BEGIN
-             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
-             VALUES (NEW.id, 'insert', json_object(
-                 'record_type', 'entity_relation', 'id', NEW.id,
-                 'subject_entity_id', NEW.subject_entity_id, 'relation', NEW.relation,
-                 'object_entity_id', NEW.object_entity_id,
-                 'created_at', NEW.created_at, 'updated_at', NEW.updated_at,
-                 'node_id', NEW.node_id
-             ), datetime('now'));
-         END;
-
-         CREATE TRIGGER IF NOT EXISTS memory_entities_outbox_ai
-         AFTER INSERT ON memory_entities BEGIN
-             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
-             VALUES (NEW.memory_id, 'insert', json_object(
-                 'record_type', 'memory_entity',
-                 'id', NEW.memory_id || '|' || NEW.entity_id,
-                 'memory_id', NEW.memory_id, 'entity_id', NEW.entity_id,
-                 'created_at', NEW.created_at
-             ), datetime('now'));
-         END;",
-    )
-}
 
 #[derive(Debug)]
 pub struct GraphApplyError(pub String);

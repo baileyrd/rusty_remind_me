@@ -40,14 +40,18 @@ fn default_metadata() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
-/// One `memories` row as it travels the wire, matching the exact column set
-/// this crate's own installed `memories_outbox_ai`/`memories_outbox_au`
-/// triggers snapshot into `sync_outbox.payload` — see
-/// `crates/remind_me_core/src/db/schema_triggers.sql`. Deliberately does
-/// **not** include `doc_id`, `chunk_index`, or `deleted_at`: the currently
-/// generated trigger payload doesn't carry them either, which is a real,
-/// schema-generation-lag limitation on tombstone propagation, not something
-/// this type can paper over — see the ADR's "Known limitation" section.
+/// One `memories` row as it travels the wire, matching the column set this
+/// crate's `memories_outbox_ai`/`memories_outbox_au` triggers snapshot into
+/// `sync_outbox.payload` — see `crates/remind_me_core/src/db/schema_triggers.sql`.
+///
+/// Deliberately does **not** include `doc_id`/`chunk_index`: the reference's
+/// own outbox payload carries them (for wire column-list parity across every
+/// schema version) but its receiving side (`sync.py`'s `_upsert_one`) never
+/// reads them back off an incoming record either — chunking state isn't
+/// conflict-resolved over sync, only produced locally. `deleted_at` **is**
+/// included: unlike `doc_id`/`chunk_index`, the reference's `_upsert_one`
+/// does apply it, via the same LWW path as every other column, which is what
+/// lets a tombstone propagate at all (`#76`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
     pub id: String,
@@ -92,6 +96,8 @@ pub struct SyncRecord {
     pub object: Option<String>,
     #[serde(default)]
     pub superseded_by: Option<String>,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Debug)]
@@ -247,8 +253,8 @@ pub fn upsert_record(
                 id, content, category, tags, source, metadata, created_at, updated_at,
                 capture_id, node_id, client, accessed_at, access_count, decay_rate,
                 vitality, base_weight, status, memory_type, source_capture_id,
-                subject, predicate, object, superseded_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                subject, predicate, object, superseded_by, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 category = excluded.category,
@@ -270,7 +276,8 @@ pub fn upsert_record(
                 subject = excluded.subject,
                 predicate = excluded.predicate,
                 object = excluded.object,
-                superseded_by = excluded.superseded_by",
+                superseded_by = excluded.superseded_by,
+                deleted_at = excluded.deleted_at",
             params![
                 record.id,
                 record.content,
@@ -295,6 +302,7 @@ pub fn upsert_record(
                 record.predicate,
                 record.object,
                 record.superseded_by,
+                record.deleted_at,
             ],
         )?;
         let rowid: i64 = conn.query_row(

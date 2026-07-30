@@ -24,15 +24,15 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
 
     migrations::apply(conn)?;
 
-    // The graph tables (entities/entity_relations/memory_entities) have no
-    // generated-schema outbox trigger of their own -- this crate's own
-    // addition, installed after the generated schema, same as #49's
-    // vec_embeddings table.
-    crate::sync::ensure_schema(conn)?;
+    // Every outbox trigger (memories and the graph tables alike) is gated on
+    // sync_flags.sync_enabled -- align it with the current configuration on
+    // every open, exactly like the reference does, before anything else
+    // touches sync_outbox.
+    crate::sync::reconcile_sync_enabled_flag(conn)?;
 
-    // The outbox triggers came in with the generated schema and fire on every
-    // write, but nothing here drains them. Applying the reference's own
-    // retention rule on open keeps that from growing without bound.
+    // The outbox triggers fire on every write while the gate above is on, but
+    // nothing here drains them. Applying the reference's own retention rule
+    // on open keeps that from growing without bound.
     crate::sync::prune_outbox(conn)?;
 
     Ok(())
