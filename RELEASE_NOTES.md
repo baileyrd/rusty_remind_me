@@ -2,7 +2,7 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
-## 2026-07-29 — Multi-node sync: outbox drain and pull for `memories` (#57)
+## 2026-07-30 — Multi-node sync: `memories` and the knowledge graph (#57)
 
 ### Added
 - **Sync client**: `sync::push_outbox` drains this node's `sync_outbox` to a
@@ -50,13 +50,41 @@ Dated entries, newest first. One entry per merged pull request.
   by the MCP layer the same way `webhook`'s already is.
 - `docs/adr/0004-sync-protocol-and-conflict-resolution.md`.
 
-### Scope — this is the epic's own suggested first slice
-Per the issue's explicit instruction to split this epic, this PR is
-**`memories` only, hub sync only**: no knowledge-graph table sync, no
-Tailscale/static-peer discovery (the client only ever talks to one
-configured hub), no OAuth, and no `remind_me_revoke_clients` — each is its
-own follow-up issue, the same way `#59` was already split out of this epic
-for the outbox-growth defect.
+- **Knowledge-graph sync** — `entities`, `entity_relations`, and
+  `memory_entities` mention links now sync alongside `memories`, over three
+  new endpoints (`/sync/pull_entities`, `/sync/pull_links`,
+  `/sync/pull_entity_relations`), each with its own namespaced `sync_log`
+  cursor (`"{remote_id}#entities"` etc.). `sync::graph::ensure_schema`
+  installs this crate's own outbox triggers for these three tables — there
+  is no generated-schema equivalent, only `memories` ships one.
+- Entities get their own sync-specific conflict resolution
+  (`sync::upsert_entity_record`): LWW on `name`/`kind`/`node_id`, with
+  `aliases` always union-merging regardless of the winner — a distinct
+  function from the interactive `upsert_entity` used by direct tool calls,
+  which has its own different "existing kind wins" merge rule. Relations
+  and links are immutable insert-or-ignore, with no foreign key by design:
+  a link or relation may reference a memory/entity that hasn't arrived on
+  this node yet, and the row simply waits rather than erroring.
+- A push batch is naturally heterogeneous — every graph-table trigger
+  funnels into the same `sync_outbox` a memory row already uses, tagged
+  with a `record_type` key (absent means `"memory"`, for backward
+  compatibility). `sync::apply_incoming_record` dispatches each record in a
+  batch to the right conflict-resolution function.
+- `docs/adr/0005-graph-sync.md`, including a real bug this work caught
+  before it shipped: the outbox-push "did the peer accept this" check
+  originally matched on `sync_outbox.memory_id`, which for a link row
+  holds only the memory half of its identity, not its wire id
+  (`memory_id|entity_id`) — every link would have been silently retried
+  forever. Fixed by matching on the record's own `payload["id"]` instead,
+  for all four record types.
+
+### Scope — matches the epic's own suggested split, two slices in
+Per the issue's explicit instruction to split this epic: **`memories` and
+the knowledge-graph tables, hub sync only**. Still no Tailscale/static-peer
+discovery (the client only ever talks to one configured hub), no OAuth,
+and no `remind_me_revoke_clients` — each is its own follow-up issue, the
+same way `#59` was already split out of this epic for the outbox-growth
+defect.
 
 ### Known limitation: tombstone propagation is schema-limited
 `delete_memory` correctly tombstones the local row when sync is enabled,

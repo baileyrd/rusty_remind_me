@@ -18,6 +18,20 @@ const SCHEMA_TABLES: &str = include_str!("../src/db/schema_tables.sql");
 const SCHEMA_INDEXES: &str = include_str!("../src/db/schema_indexes.sql");
 const SCHEMA_TRIGGERS: &str = include_str!("../src/db/schema_triggers.sql");
 
+/// Objects this crate's own code creates, deliberately, beyond the generated
+/// schema — distinct from a real divergence, which is what the rest of this
+/// file exists to catch. `entities_outbox_ai`/`_au`, `entity_relations_outbox_ai`,
+/// and `memory_entities_outbox_ai` (`sync::graph::ensure_schema`, `#57`'s
+/// graph-sync slice) are this crate's own addition: there is no
+/// generated-schema outbox trigger for these three tables at all, only for
+/// `memories`.
+const OWN_ADDITIONS: &[&str] = &[
+    "entities_outbox_ai",
+    "entities_outbox_au",
+    "entity_relations_outbox_ai",
+    "memory_entities_outbox_ai",
+];
+
 struct TempDb(PathBuf);
 
 impl TempDb {
@@ -104,7 +118,7 @@ fn assert_matches_schema(live: &Connection, kind: &str) {
         }
     }
     for name in actual.keys() {
-        if !want.contains_key(name) {
+        if !want.contains_key(name) && !OWN_ADDITIONS.contains(&name.as_str()) {
             problems.push(format!("  UNEXPECTED {} {}", kind, name));
         }
     }

@@ -120,11 +120,23 @@ fn run_one_cycle(
     let conn = db.conn();
     let mut error = None;
 
+    // One push drains the whole outbox regardless of which table's trigger
+    // wrote a given row -- memories and graph-table rows are pushed
+    // together, in one pass. Pulls are per-table (each has its own cursor).
     if let Err(e) = push_outbox(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
         error = Some(format!("push to hub failed: {e}"));
     }
     if let Err(e) = pull_remote(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
         error.get_or_insert_with(|| format!("pull from hub failed: {e}"));
+    }
+    if let Err(e) = super::pull_entities(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
+        error.get_or_insert_with(|| format!("pull entities from hub failed: {e}"));
+    }
+    if let Err(e) = super::pull_links(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
+        error.get_or_insert_with(|| format!("pull links from hub failed: {e}"));
+    }
+    if let Err(e) = super::pull_entity_relations(&conn, hub_url, secret, node_id, HUB_REMOTE_ID) {
+        error.get_or_insert_with(|| format!("pull entity relations from hub failed: {e}"));
     }
     if let Err(e) = prune_outbox(&conn) {
         error.get_or_insert_with(|| format!("outbox prune failed: {e}"));

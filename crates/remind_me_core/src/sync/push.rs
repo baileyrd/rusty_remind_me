@@ -44,18 +44,28 @@ pub struct PushReport {
 }
 
 struct OutboxRow {
+    /// `sync_outbox.id` (rowid) -- what `sync_sends` records.
     id: i64,
-    memory_id: String,
+    /// The record's own wire id, read from `payload["id"]` -- the same id a
+    /// receiving peer reports back in `processed_ids`. For every record
+    /// type this equals the row's own identity (a memory/entity/relation's
+    /// real id, or a link's synthetic `memory_id|entity_id`) -- *not*
+    /// necessarily the `sync_outbox.memory_id` column, which for a link
+    /// row holds only the memory half.
+    wire_id: String,
     payload: Value,
 }
 
-/// `sync_outbox.payload` stores `tags`/`metadata` as JSON-encoded *strings*
-/// (the trigger's `json_object(...)` call snapshots the `memories` table's
-/// own TEXT columns verbatim) -- double-encoded on the wire is wrong, so
-/// this decodes them back into real JSON before a record is sent.
+/// `sync_outbox.payload` stores `tags`/`metadata` (memory records) and
+/// `aliases` (entity records) as JSON-encoded *strings* (the trigger's
+/// `json_object(...)` call snapshots each table's own TEXT column
+/// verbatim) -- double-encoded on the wire is wrong, so this decodes them
+/// back into real JSON before a record is sent. A key absent from a given
+/// record's payload (e.g. `aliases` on a memory record) is simply not
+/// found and left alone.
 fn decode_payload(mut payload: Value) -> Value {
     if let Some(object) = payload.as_object_mut() {
-        for key in ["tags", "metadata"] {
+        for key in ["tags", "metadata", "aliases"] {
             if let Some(Value::String(raw)) = object.get(key) {
                 if let Ok(decoded) = serde_json::from_str::<Value>(raw) {
                     object.insert(key.to_string(), decoded);
@@ -78,11 +88,21 @@ fn fetch_batch(
           ORDER BY id ASC LIMIT ?3",
     )?;
     let rows = stmt.query_map(params![after_id, remote_id, BATCH_SIZE as i64], |row| {
+        let memory_id_column: String = row.get(1)?;
         let payload_json: String = row.get(2)?;
+        let payload: Value = serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({}));
+        // `payload["id"]` is the record's real wire id for every type; the
+        // `memory_id` column fallback only matters if a malformed payload
+        // somehow lacks its own "id" key.
+        let wire_id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or(memory_id_column);
         Ok(OutboxRow {
             id: row.get(0)?,
-            memory_id: row.get(1)?,
-            payload: serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({})),
+            wire_id,
+            payload,
         })
     })?;
     rows.collect()
@@ -144,7 +164,7 @@ pub fn push_outbox(
                     processed.iter().filter_map(Value::as_str).collect();
                 batch
                     .iter()
-                    .filter(|r| processed.contains(r.memory_id.as_str()))
+                    .filter(|r| processed.contains(r.wire_id.as_str()))
                     .map(|r| r.id)
                     .collect()
             }

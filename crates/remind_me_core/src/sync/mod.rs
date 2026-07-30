@@ -1,11 +1,12 @@
 //! Multi-node sync: push the local outbox to a hub, pull its changes back.
 //!
-//! See `docs/adr/0004-sync-protocol-and-conflict-resolution.md` for what this
-//! module does and does not implement yet. In short: this is the epic's own
-//! suggested first slice — `memories` only, hub sync only (no Tailscale/
-//! static-peer discovery), no knowledge-graph tables, no OAuth or
-//! `remind_me_revoke_clients` — each deferred to its own follow-up issue,
-//! exactly as the epic asked for this to be split.
+//! See `docs/adr/0004-sync-protocol-and-conflict-resolution.md` and
+//! `docs/adr/0005-graph-sync.md` for what this module does and does not
+//! implement yet. In short: `memories` and the knowledge-graph tables
+//! (`entities`/`entity_relations`/`memory_entities`), hub sync only (no
+//! Tailscale/static-peer discovery), no OAuth or `remind_me_revoke_clients`
+//! — each deferred to its own follow-up issue, exactly as the epic asked
+//! for this to be split.
 //!
 //! Off unless [`NODE_ID_ENV`], [`HUB_URL_ENV`], and [`SYNC_SECRET_ENV`] are
 //! all set — the same default-off posture as the webhook endpoint (`#56`)
@@ -14,6 +15,7 @@
 use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, Result};
 
+mod graph;
 mod http;
 mod pull;
 mod push;
@@ -21,13 +23,27 @@ mod record;
 mod server;
 mod worker;
 
-pub use pull::{pull_remote, PullError, PullReport};
+pub use graph::{
+    apply_incoming_record, upsert_entity_record, upsert_entity_relation_record, upsert_link_record,
+    EntityRelationSyncRecord, EntitySyncRecord, GraphApplyError, LinkSyncRecord,
+};
+pub use pull::{
+    pull_entities, pull_entity_relations, pull_links, pull_remote, PullError, PullReport,
+};
 pub use push::{push_outbox, PushError, PushReport};
 pub use record::{upsert_record, ApplyOutcome, SyncApplyError, SyncRecord};
 pub use server::{serve_once, PeerServer, PeerServerConfig, PeerServerStatus, SyncPeer};
 pub use worker::{
     disabled_status as sync_worker_disabled_status, SyncWorker, SyncWorkerStatus, HUB_REMOTE_ID,
 };
+
+/// Install this crate's own additions on top of the generated schema:
+/// the graph tables' outbox triggers (`#57`'s second slice) — there is no
+/// generated-schema equivalent for `entities`/`entity_relations`/
+/// `memory_entities`, only `memories` ships one.
+pub fn ensure_schema(conn: &Connection) -> Result<()> {
+    graph::ensure_schema(conn)
+}
 
 /// This node's identity in sync records. Empty (the default) means "no
 /// identity configured" — matching the reference's own `NODE_ID = ""`

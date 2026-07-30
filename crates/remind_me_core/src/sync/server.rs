@@ -11,7 +11,7 @@
 //! self-contained, and this one additionally needs query-string parsing
 //! `webhook.rs`'s single fixed-path endpoint never had to do.
 
-use super::record::{upsert_record, SyncRecord};
+use super::graph::apply_incoming_record;
 use crate::Database;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -25,6 +25,9 @@ use std::time::Duration;
 pub const HEALTH_PATH: &str = "/health";
 pub const PUSH_PATH: &str = "/sync/push";
 pub const PULL_PATH: &str = "/sync/pull";
+pub const PULL_ENTITIES_PATH: &str = "/sync/pull_entities";
+pub const PULL_LINKS_PATH: &str = "/sync/pull_links";
+pub const PULL_ENTITY_RELATIONS_PATH: &str = "/sync/pull_entity_relations";
 
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_HEAD_BYTES: usize = 8 * 1024;
@@ -279,6 +282,10 @@ fn handle_health(config: &PeerServerConfig) -> Value {
     json!({ "status": "ok", "node_id": config.node_id, "time": chrono::Utc::now().to_rfc3339() })
 }
 
+/// A push batch is naturally heterogeneous — every graph-table trigger
+/// funnels into the same `sync_outbox`, so one page can carry `memory`,
+/// `entity`, `entity_relation`, and `memory_entity` records together.
+/// [`apply_incoming_record`] dispatches each on its own `record_type`.
 fn handle_push(conn: &Connection, body: &[u8]) -> (u16, Value) {
     let Ok(payload) = serde_json::from_slice::<Value>(body) else {
         return (400, json!({ "error": "malformed JSON" }));
@@ -290,11 +297,8 @@ fn handle_push(conn: &Connection, body: &[u8]) -> (u16, Value) {
     let mut processed_ids = Vec::new();
     let mut failed = 0usize;
     for record_value in records {
-        match serde_json::from_value::<SyncRecord>(record_value.clone()) {
-            Ok(record) => match upsert_record(conn, &record) {
-                Ok(_) => processed_ids.push(record.id),
-                Err(_) => failed += 1,
-            },
+        match apply_incoming_record(conn, record_value) {
+            Ok(wire_id) => processed_ids.push(wire_id),
             Err(_) => failed += 1,
         }
     }
@@ -389,6 +393,145 @@ fn handle_pull(conn: &Connection, query: &str) -> (u16, Value) {
     }
 }
 
+/// `(since, since_id, limit)`, shared by all four pull endpoints.
+fn cursor_params(query: &str) -> (String, String, usize) {
+    let since = query_param(query, "since")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_string());
+    let since_id = query_param(query, "since_id").unwrap_or_default();
+    let limit: usize = query_param(query, "limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_PULL_LIMIT)
+        .clamp(1, MAX_PULL_LIMIT);
+    (since, since_id, limit)
+}
+
+fn parse_entity_row(row: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let aliases_json: String = row.get("aliases")?;
+    Ok(json!({
+        "record_type": "entity",
+        "id": row.get::<_, String>("id")?,
+        "name": row.get::<_, String>("name")?,
+        "kind": row.get::<_, Option<String>>("kind")?,
+        "aliases": serde_json::from_str::<Value>(&aliases_json).unwrap_or_else(|_| json!([])),
+        "created_at": row.get::<_, String>("created_at")?,
+        "updated_at": row.get::<_, String>("updated_at")?,
+        "node_id": row.get::<_, Option<String>>("node_id")?,
+    }))
+}
+
+/// `entities` pulls keyset-paged on `(updated_at, id)`, exactly like
+/// `memories` — `exclude_node` is honored the same way.
+fn handle_pull_entities(conn: &Connection, query: &str) -> (u16, Value) {
+    let (since, since_id, limit) = cursor_params(query);
+    let exclude_node = query_param(query, "exclude_node").filter(|s| !s.is_empty());
+
+    let sql = format!(
+        "SELECT id, name, kind, aliases, created_at, updated_at, node_id FROM entities
+          WHERE (updated_at > ?1 OR (updated_at = ?1 AND id > ?2))
+            {exclude_clause}
+          ORDER BY updated_at ASC, id ASC
+          LIMIT ?3",
+        exclude_clause = if exclude_node.is_some() {
+            "AND (node_id IS NULL OR node_id != ?4)"
+        } else {
+            ""
+        },
+    );
+    let result = if let Some(exclude_node) = &exclude_node {
+        conn.prepare(&sql).and_then(|mut stmt| {
+            stmt.query_map(
+                params![since, since_id, limit as i64, exclude_node],
+                parse_entity_row,
+            )?
+            .collect::<rusqlite::Result<Vec<Value>>>()
+        })
+    } else {
+        conn.prepare(&sql).and_then(|mut stmt| {
+            stmt.query_map(params![since, since_id, limit as i64], parse_entity_row)?
+                .collect::<rusqlite::Result<Vec<Value>>>()
+        })
+    };
+
+    match result {
+        Ok(records) => (200, json!({ "records": records, "count": records.len() })),
+        Err(e) => (500, json!({ "error": e.to_string() })),
+    }
+}
+
+/// `memory_entities` links have no `updated_at` (immutable) and no
+/// single-column id, so this pages on `(created_at, memory_id||'|'||entity_id)`
+/// — the same synthetic composite key the wire `id` field carries.
+/// `exclude_node` is accepted (so an older client's query string doesn't 400)
+/// but not applied — `memory_entities` has no `node_id` column at all,
+/// matching the reference's own tolerated-but-unused parameter exactly.
+fn handle_pull_links(conn: &Connection, query: &str) -> (u16, Value) {
+    let (since, since_id, limit) = cursor_params(query);
+
+    let result = conn
+        .prepare(
+            "SELECT memory_id, entity_id, created_at FROM memory_entities
+              WHERE (created_at > ?1 OR (created_at = ?1 AND (memory_id || '|' || entity_id) > ?2))
+              ORDER BY created_at ASC, (memory_id || '|' || entity_id) ASC
+              LIMIT ?3",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![since, since_id, limit as i64], |row| {
+                let memory_id: String = row.get("memory_id")?;
+                let entity_id: String = row.get("entity_id")?;
+                Ok(json!({
+                    "record_type": "memory_entity",
+                    "id": format!("{memory_id}|{entity_id}"),
+                    "memory_id": memory_id,
+                    "entity_id": entity_id,
+                    "created_at": row.get::<_, String>("created_at")?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<Value>>>()
+        });
+
+    match result {
+        Ok(records) => (200, json!({ "records": records, "count": records.len() })),
+        Err(e) => (500, json!({ "error": e.to_string() })),
+    }
+}
+
+/// `entity_relations` pulls keyset-paged on `(created_at, id)` — relations
+/// already carry a real deterministic id, no synthetic key needed.
+/// `exclude_node` is likewise accepted but unused, matching the reference.
+fn handle_pull_entity_relations(conn: &Connection, query: &str) -> (u16, Value) {
+    let (since, since_id, limit) = cursor_params(query);
+
+    let result = conn
+        .prepare(
+            "SELECT id, subject_entity_id, relation, object_entity_id, created_at, updated_at, node_id
+               FROM entity_relations
+              WHERE (created_at > ?1 OR (created_at = ?1 AND id > ?2))
+              ORDER BY created_at ASC, id ASC
+              LIMIT ?3",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![since, since_id, limit as i64], |row| {
+                Ok(json!({
+                    "record_type": "entity_relation",
+                    "id": row.get::<_, String>("id")?,
+                    "subject_entity_id": row.get::<_, String>("subject_entity_id")?,
+                    "relation": row.get::<_, String>("relation")?,
+                    "object_entity_id": row.get::<_, String>("object_entity_id")?,
+                    "created_at": row.get::<_, String>("created_at")?,
+                    "updated_at": row.get::<_, String>("updated_at")?,
+                    "node_id": row.get::<_, Option<String>>("node_id")?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<Value>>>()
+        });
+
+    match result {
+        Ok(records) => (200, json!({ "records": records, "count": records.len() })),
+        Err(e) => (500, json!({ "error": e.to_string() })),
+    }
+}
+
 /// Handle one request on an already-accepted connection. Authentication
 /// comes before routing, matching the webhook endpoint's own reasoning: an
 /// unauthenticated caller must not be able to distinguish "wrong path" from
@@ -426,6 +569,21 @@ pub fn serve_once<S: Read + Write>(
         ("GET", PULL_PATH) => {
             drain_body(stream, &head.content_length, body_prefix.len());
             let (status, response) = handle_pull(conn, &head.query);
+            write_response(stream, status, &response)
+        }
+        ("GET", PULL_ENTITIES_PATH) => {
+            drain_body(stream, &head.content_length, body_prefix.len());
+            let (status, response) = handle_pull_entities(conn, &head.query);
+            write_response(stream, status, &response)
+        }
+        ("GET", PULL_LINKS_PATH) => {
+            drain_body(stream, &head.content_length, body_prefix.len());
+            let (status, response) = handle_pull_links(conn, &head.query);
+            write_response(stream, status, &response)
+        }
+        ("GET", PULL_ENTITY_RELATIONS_PATH) => {
+            drain_body(stream, &head.content_length, body_prefix.len());
+            let (status, response) = handle_pull_entity_relations(conn, &head.query);
             write_response(stream, status, &response)
         }
         ("POST", PUSH_PATH) => {
@@ -467,7 +625,17 @@ pub fn serve_once<S: Read + Write>(
             let (status, response) = handle_push(conn, &body);
             write_response(stream, status, &response)
         }
-        (method, path) if path == HEALTH_PATH || path == PULL_PATH || path == PUSH_PATH => {
+        (method, path)
+            if [
+                HEALTH_PATH,
+                PULL_PATH,
+                PUSH_PATH,
+                PULL_ENTITIES_PATH,
+                PULL_LINKS_PATH,
+                PULL_ENTITY_RELATIONS_PATH,
+            ]
+            .contains(&path) =>
+        {
             drain_body(stream, &head.content_length, body_prefix.len());
             let _ = method;
             write_response(stream, 405, &json!({ "error": "method not allowed" }))
