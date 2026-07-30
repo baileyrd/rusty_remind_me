@@ -75,6 +75,80 @@ pub fn health(_conn: &Connection, _wiki: &Wiki, _req: &Request, _params: &Params
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard (#78)
+// ---------------------------------------------------------------------------
+
+/// `dashboard/App.jsx`, vendored verbatim from the reference — a
+/// self-contained React component that talks only to
+/// `window.location.origin + "/api"`, so it runs unmodified against this
+/// crate's own `/api/*` routes. Not this crate's file to hand-edit, the same
+/// convention the generated `schema_*.sql` files already established:
+/// regenerate by re-copying from the reference, don't patch the copy.
+const DASHBOARD_JSX: &str = include_str!("dashboard/App.jsx");
+
+/// The reference's own `_build_dashboard_html()` wrapper, reproduced
+/// exactly: pinned CDN React/ReactDOM/Babel builds (with the reference's own
+/// Subresource Integrity hashes, HY-04 — a compromised or substituted CDN
+/// response cannot execute), the JSX embedded in a `text/babel` script
+/// block. Requires network access to unpkg.com on first load, same
+/// limitation as the reference: neither vendors the CDN assets themselves.
+fn dashboard_html() -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remind Me — Memory Dashboard</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #0a0a0f; color: #e4e4ed; font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif; }}
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+  ::-webkit-scrollbar {{ width: 6px; }}
+  ::-webkit-scrollbar-track {{ background: transparent; }}
+  ::-webkit-scrollbar-thumb {{ background: #2a2a3a; border-radius: 3px; }}
+  ::selection {{ background: rgba(99,102,241,0.25); }}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+        integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z"
+        crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+        integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1"
+        crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"
+        integrity="sha384-ezQ6HS3FLspd9te19o2McUV6FAK091+GG7KO54f/R8DKgCDi7fULhapNrd5LY+vG"
+        crossorigin="anonymous"></script>
+<script type="text/babel">
+{jsx}
+</script>
+</body>
+</html>"#,
+        jsx = DASHBOARD_JSX
+    )
+}
+
+/// Serve the dashboard as a single-page app — the reference's own
+/// `Route("/", index)`, part of the same routes/middleware set as `/api/*`
+/// (this crate's `ROUTES` table and CORS policy, not a separate server).
+pub fn dashboard(
+    _conn: &Connection,
+    _wiki: &Wiki,
+    _req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    (
+        200,
+        Body::Raw {
+            content_type: "text/html; charset=utf-8",
+            payload: dashboard_html(),
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Stats / vitality
 // ---------------------------------------------------------------------------
 
@@ -707,6 +781,11 @@ pub const ROUTES: &[Route] = &[
         methods: &["GET"],
         pattern: "/health",
         handler: health,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/",
+        handler: dashboard,
     },
     Route {
         methods: &["GET"],

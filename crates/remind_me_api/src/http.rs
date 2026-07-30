@@ -33,6 +33,11 @@ pub struct Request {
     pub query: HashMap<String, String>,
     pub authorization: String,
     pub content_type: String,
+    /// The `Origin` header, empty when absent -- what a CORS decision is
+    /// made against. Only ever sent by a browser; a direct `curl`/script
+    /// caller has none, which is fine: CORS is a browser-enforced policy,
+    /// nothing here needs it to work non-interactively.
+    pub origin: String,
     pub body: Vec<u8>,
 }
 
@@ -137,16 +142,22 @@ pub enum ContentLength {
     Value(usize),
 }
 
+/// Boxed so `HeadOutcome` (whose other variants carry nothing) stays small —
+/// this struct is the one variant with real data, not a shared type used
+/// elsewhere.
+struct CompleteHead {
+    method: String,
+    path: String,
+    query: HashMap<String, String>,
+    authorization: String,
+    content_type: String,
+    origin: String,
+    content_length: ContentLength,
+    body_prefix: Vec<u8>,
+}
+
 enum HeadOutcome {
-    Complete {
-        method: String,
-        path: String,
-        query: HashMap<String, String>,
-        authorization: String,
-        content_type: String,
-        content_length: ContentLength,
-        body_prefix: Vec<u8>,
-    },
+    Complete(Box<CompleteHead>),
     TooLarge,
     /// The client hung up, or sent something that is not an HTTP request line.
     Unusable,
@@ -197,6 +208,7 @@ fn read_head<R: Read>(stream: &mut R) -> io::Result<HeadOutcome> {
 
     let mut authorization = String::new();
     let mut content_type = String::new();
+    let mut origin = String::new();
     let mut content_length = ContentLength::Absent;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -206,6 +218,7 @@ fn read_head<R: Read>(stream: &mut R) -> io::Result<HeadOutcome> {
         match name.trim().to_ascii_lowercase().as_str() {
             "authorization" => authorization = value.to_string(),
             "content-type" => content_type = value.to_string(),
+            "origin" => origin = value.to_string(),
             "content-length" => {
                 content_length = match value.parse::<usize>() {
                     Ok(n) => ContentLength::Value(n),
@@ -216,15 +229,16 @@ fn read_head<R: Read>(stream: &mut R) -> io::Result<HeadOutcome> {
         }
     }
 
-    Ok(HeadOutcome::Complete {
+    Ok(HeadOutcome::Complete(Box::new(CompleteHead {
         method: method.to_string(),
         path,
         query,
         authorization,
         content_type,
+        origin,
         content_length,
         body_prefix,
-    })
+    })))
 }
 
 /// Read and discard a pending body before an early rejection.
@@ -246,6 +260,28 @@ fn drain_body<R: Read>(stream: &mut R, declared: &ContentLength, already_read: u
             Ok(read) => remaining -= read,
         }
     }
+}
+
+/// The reference's own CORS policy, confirmed directly from
+/// `remind_me_mcp/api.py`'s `CORSMiddleware` setup
+/// (`allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?"`,
+/// `allow_methods=["*"]`, `allow_headers=["*"]`) rather than assumed.
+///
+/// `None` when `origin` is empty (no `Origin` header — not a browser
+/// request, CORS is irrelevant) or doesn't match; a caller adds no CORS
+/// headers in that case, which is what makes a non-matching cross-origin
+/// browser request fail closed rather than silently wide open.
+pub fn cors_allowed_origin(origin: &str) -> Option<&str> {
+    let rest = origin.strip_prefix("http://")?;
+    let (host, port) = rest.split_once(':').unzip();
+    let host = host.unwrap_or(rest);
+    if host != "localhost" && host != "127.0.0.1" {
+        return None;
+    }
+    if let Some(port) = port {
+        port.parse::<u16>().ok()?;
+    }
+    Some(origin)
 }
 
 fn reason_phrase(status: u16) -> &'static str {
@@ -277,6 +313,20 @@ pub enum Body {
 }
 
 pub fn write_response<W: Write>(stream: &mut W, status: u16, body: Body) -> io::Result<()> {
+    write_response_cors(stream, status, body, None)
+}
+
+/// As [`write_response`], additionally reflecting `cors_origin` (the result
+/// of [`cors_allowed_origin`]) as `Access-Control-Allow-Origin` plus the
+/// reference's own blanket `allow_methods`/`allow_headers` -- `None` adds no
+/// CORS headers at all, exactly as a non-matching or absent `Origin` gets
+/// from the reference's `CORSMiddleware`.
+pub fn write_response_cors<W: Write>(
+    stream: &mut W,
+    status: u16,
+    body: Body,
+    cors_origin: Option<&str>,
+) -> io::Result<()> {
     let (content_type, payload) = match body {
         Body::Json(value) => (
             "application/json",
@@ -287,16 +337,26 @@ pub fn write_response<W: Write>(stream: &mut W, status: u16, body: Body) -> io::
             payload,
         } => (content_type, payload.into_bytes()),
     };
+    let cors_headers = match cors_origin {
+        Some(origin) => format!(
+            "Access-Control-Allow-Origin: {origin}\r\n\
+             Access-Control-Allow-Methods: *\r\n\
+             Access-Control-Allow-Headers: *\r\n"
+        ),
+        None => String::new(),
+    };
     write!(
         stream,
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
          Content-Length: {}\r\n\
+         {}\
          Connection: close\r\n\r\n",
         status,
         reason_phrase(status),
         content_type,
-        payload.len()
+        payload.len(),
+        cors_headers,
     )?;
     stream.write_all(&payload)?;
     stream.flush()
@@ -307,24 +367,17 @@ pub fn write_response<W: Write>(stream: &mut W, status: u16, body: Body) -> io::
 /// `Ok(None)` means nothing usable arrived (a closed connection, or garbage
 /// that is not an HTTP request line) — there is nothing to answer.
 pub fn read_request<S: Read + Write>(stream: &mut S) -> io::Result<Option<Request>> {
-    let (method, path, query, authorization, content_type, content_length, body_prefix) =
+    let (method, path, query, authorization, content_type, origin, content_length, body_prefix) =
         match read_head(stream)? {
-            HeadOutcome::Complete {
-                method,
-                path,
-                query,
-                authorization,
-                content_type,
-                content_length,
-                body_prefix,
-            } => (
-                method,
-                path,
-                query,
-                authorization,
-                content_type,
-                content_length,
-                body_prefix,
+            HeadOutcome::Complete(head) => (
+                head.method,
+                head.path,
+                head.query,
+                head.authorization,
+                head.content_type,
+                head.origin,
+                head.content_length,
+                head.body_prefix,
             ),
             HeadOutcome::TooLarge => {
                 write_response(
@@ -384,6 +437,7 @@ pub fn read_request<S: Read + Write>(stream: &mut S) -> io::Result<Option<Reques
         query,
         authorization,
         content_type,
+        origin,
         body,
     }))
 }

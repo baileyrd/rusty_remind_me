@@ -38,10 +38,15 @@
 //! preflight, so requiring it closes a CSRF hole independent of whether auth
 //! is configured.
 //!
-//! CORS itself is not implemented: the reference's is there to let its
-//! bundled dashboard call this API from a browser tab, and this crate has no
-//! dashboard to serve (no `/` route, no JSX asset pipeline — a gap in its own
-//! right, tracked separately). Nothing here needs a browser origin to work.
+//! **`GET /` serves the dashboard** (`#78`): the reference's own
+//! `dashboard/App.jsx`, vendored verbatim — a client-side React component
+//! that only ever calls `window.location.origin + "/api"`, so it needed no
+//! adaptation to run against this crate's own `/api/*` routes. CORS
+//! ([`http::cors_allowed_origin`]) matches the reference's `CORSMiddleware`
+//! exactly (`allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?"`,
+//! every method and header allowed), confirmed from source rather than
+//! assumed, and applied to every response — not just `/api/*` — the same way
+//! Starlette's middleware wraps the whole app.
 //!
 //! # One request at a time
 //!
@@ -134,31 +139,42 @@ impl ApiServer {
         let Some(request) = http::read_request(stream)? else {
             return Ok(());
         };
+        let cors = http::cors_allowed_origin(&request.origin);
+
+        // A CORS preflight never carries auth and never reaches a real route
+        // -- answered here, uniformly, before anything else looks at the
+        // request. A non-matching origin gets a bare 200 with no CORS
+        // headers, which is what makes the browser refuse to read the
+        // actual response it's asking permission to send.
+        if request.method == "OPTIONS" {
+            return http::write_response_cors(stream, 200, Body::Json(json!({})), cors);
+        }
 
         if request.path == "/health" {
             let (status, body) =
                 routes::health(&self.db.conn(), &self.wiki, &request, &Default::default());
-            return http::write_response(stream, status, body);
+            return http::write_response_cors(stream, status, body, cors);
         }
 
         if request.path.starts_with("/api/") {
             if let Some(response) = self.check_auth(&request) {
-                return http::write_response(stream, response.0, response.1);
+                return http::write_response_cors(stream, response.0, response.1, cors);
             }
             if MUTATING_METHODS.contains(&request.method.as_str()) {
                 let content_type = request.content_type.split(';').next().unwrap_or("").trim();
                 if content_type != "application/json" {
-                    return http::write_response(
+                    return http::write_response_cors(
                         stream,
                         415,
                         Body::Json(json!({ "error": "Content-Type must be application/json" })),
+                        cors,
                     );
                 }
             }
         }
 
         let (status, body) = self.dispatch(&request);
-        http::write_response(stream, status, body)
+        http::write_response_cors(stream, status, body, cors)
     }
 
     /// `None` when the request may proceed; `Some((status, body))` with the

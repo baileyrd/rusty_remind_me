@@ -2,6 +2,45 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-30 — Serve the dashboard, and CORS to match (#78)
+
+### Added
+- **`GET /` serves the dashboard**: `remind_me_mcp/dashboard/App.jsx`
+  vendored verbatim (a backend-agnostic client-side React component that
+  only ever calls `window.location.origin + "/api"`, so it needed no
+  adaptation) into `crates/remind_me_api/src/dashboard/App.jsx`, wrapped in
+  the reference's own `_build_dashboard_html()` HTML exactly — same pinned
+  CDN React/ReactDOM/Babel builds, same Subresource Integrity hashes.
+  Registered in the same `ROUTES` table as every `/api/*` route, and
+  unauthenticated even when `REMIND_ME_API_KEY` is set, matching the
+  reference.
+- **CORS**, matching the reference's `CORSMiddleware` exactly
+  (`allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?"`,
+  confirmed from source; every method and header allowed): a hand-rolled
+  origin matcher (`http::cors_allowed_origin`), no new `regex` dependency,
+  applied to **every** response this server sends via a new
+  `write_response_cors` — not just `/api/*` — the same way Starlette's
+  middleware wraps the whole app. A non-matching or absent `Origin` gets no
+  CORS headers at all, which is what makes the browser refuse a
+  cross-origin response rather than this crate silently allowing everything.
+- `OPTIONS` (a CORS preflight) is answered uniformly before routing or auth
+  — 200 with CORS headers if the origin matches, none if it doesn't —
+  matching the reference's own preflight handling.
+
+### Notes
+`docs/adr/0002-dashboard-vendored-jsx-and-cors.md` records the decision and
+one deliberate scope cut: `sidecars.py` (Windows Job Object process
+supervision for an SSH tunnel and, optionally, a separate dashboard-UI
+process) is out of scope here — it's driven from the sync loop in the
+reference, so `#57` is its more natural home if it's ported at all.
+
+The dashboard still requires network access to `unpkg.com` on first load,
+exactly like the reference — an inherited limitation, not a regression.
+Verified live: `GET /` serves correct HTML end to end and the page reaches
+`#root` with zero errors when there's direct network access to the CDN;
+only the three CDN `<script>` fetches fail without it, matching the
+reference's own stated offline limitation.
+
 ## 2026-07-29 — Import a MemPalace ChromaDB store (#53)
 
 ### Added
