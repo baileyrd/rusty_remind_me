@@ -280,6 +280,7 @@ impl Watcher {
 
     /// Run one scan pass.
     pub fn scan_once(&mut self, conn: &Connection) -> ScanCounts {
+        let _span = crate::telemetry::maybe_span("watcher.scan");
         let mut counts = ScanCounts::default();
         let now = now_seconds();
         let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();

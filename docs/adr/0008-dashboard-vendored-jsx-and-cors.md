@@ -1,4 +1,4 @@
-# ADR-0002: Serve the dashboard by vendoring `App.jsx` verbatim; CORS matches the reference exactly
+# ADR-0008: Serve the dashboard by vendoring `App.jsx` verbatim; CORS matches the reference exactly
 
 Status: Accepted
 Date: 2026-07-30

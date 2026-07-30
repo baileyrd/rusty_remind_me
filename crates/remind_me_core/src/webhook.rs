@@ -546,6 +546,7 @@ fn mark_ingest_channel(conn: &Connection, import_id: &str) -> rusqlite::Result<u
 /// rather than `400`: the request was well-formed, it was the content that
 /// could not be used.
 fn ingest(conn: &Connection, request: &IngestRequest, counters: &WebhookCounters) -> (u16, Value) {
+    let mut span = crate::telemetry::maybe_span("webhook.ingest");
     let outcome = import_bytes(
         conn,
         request.content.as_bytes(),
@@ -560,6 +561,7 @@ fn ingest(conn: &Connection, request: &IngestRequest, counters: &WebhookCounters
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {
+            span.mark_error();
             let reason = e.to_string();
             counters.record_error(&reason);
             return (

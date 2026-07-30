@@ -28,7 +28,7 @@ Dated entries, newest first. One entry per merged pull request.
   matching the reference's own preflight handling.
 
 ### Notes
-`docs/adr/0002-dashboard-vendored-jsx-and-cors.md` records the decision and
+`docs/adr/0008-dashboard-vendored-jsx-and-cors.md` records the decision and
 one deliberate scope cut: `sidecars.py` (Windows Job Object process
 supervision for an SSH tunnel and, optionally, a separate dashboard-UI
 process) is out of scope here — it's driven from the sync loop in the
@@ -40,6 +40,44 @@ Verified live: `GET /` serves correct HTML end to end and the page reaches
 `#root` with zero errors when there's direct network access to the CDN;
 only the three CDN `<script>` fetches fail without it, matching the
 reference's own stated offline limitation.
+
+## 2026-07-30 — Optional OpenTelemetry tracing (#77)
+
+### Added
+- **`telemetry::maybe_span(name)`**, matching `remind_me_mcp/telemetry.py`'s
+  `maybe_span()` exactly in shape: a guard that is a genuine no-op whenever
+  tracing is disabled, unconfigured, or has permanently failed — a call
+  site never has to branch on whether tracing is on. `Span::mark_error()`
+  records that the operation the span timed failed (`status.code = ERROR`
+  on export, `OK` otherwise).
+- Instrumented at all four of the reference's boundaries — every MCP tool
+  call (`tool.{name}`), each folder-watcher scan pass (`watcher.scan`), each
+  webhook ingest request (`webhook.ingest`), and (now that `#57`'s sync
+  worker exists) each sync cycle (`sync.cycle`), marked as an error span when
+  the cycle records a failure against any remote.
+- `REMIND_ME_OTEL_ENABLED` (off unless `true`/`1`/`yes`), `REMIND_ME_OTEL_ENDPOINT`
+  (defaults to the real OTLP exporter default, `http://localhost:4318/v1/traces`,
+  confirmed against the spec rather than the bare host:port the env var's own
+  doc-comment paraphrases), `REMIND_ME_OTEL_SERVICE_NAME` (defaults to
+  `remind-me-mcp`) — matching the reference's three config vars.
+- A hand-rolled OTLP/HTTP JSON exporter (`resourceSpans`/`scopeSpans`/`spans`,
+  hex-encoded ids, nanosecond timestamps), not the real OTEL SDK — full
+  reasoning in `docs/adr/0002-otel-tracing-hand-rolled-otlp-http-export.md`.
+  Spans export from a dedicated background thread over a bounded channel
+  (the same shape `SyncWorker` already uses) so a slow or unreachable
+  collector never blocks the tool call, watcher pass, webhook request, or
+  sync cycle the span is timing; a full channel just drops the span.
+- Any export failure permanently disables tracing for the rest of the run,
+  matching the reference's `_get_tracer()` exactly, reported via a queryable
+  `telemetry::last_error()` rather than a logging framework this crate
+  doesn't otherwise depend on.
+
+### Notes
+`telemetry::is_enabled()` is not yet wired into `remind_me_server_status` —
+the reference's own `ServerStatus` has only `Active`/`NotImplemented`
+variants, neither of which fits "built here, but off by configuration"
+correctly; extending that enum is a separate, small follow-up rather than an
+unrequested change bundled into this one.
 
 ## 2026-07-30 — Fix a flaky graph-sync test (#81)
 

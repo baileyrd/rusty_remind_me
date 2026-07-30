@@ -151,6 +151,7 @@ fn run_one_cycle(
     node_id: &str,
     state: &Mutex<WorkerState>,
 ) {
+    let mut span = crate::telemetry::maybe_span("sync.cycle");
     let conn = db.conn();
     let mut error = sync_with_remote(&conn, hub_url, secret, node_id, HUB_REMOTE_ID);
 
@@ -174,6 +175,10 @@ fn run_one_cycle(
         error.get_or_insert_with(|| format!("outbox prune failed: {e}"));
     }
     drop(conn);
+
+    if error.is_some() {
+        span.mark_error();
+    }
 
     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
     guard.cycles += 1;
