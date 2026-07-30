@@ -2,6 +2,59 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-07-30 — Consolidate near-duplicate memories (#50)
+
+### Added
+- **`remind_me_consolidate`**: finds clusters of near-duplicate memories by
+  embedding similarity and merges them into one canonical representative,
+  reusing the `superseded_by` supersession mechanism already in this crate
+  (the same one `supersede_contradicting_facts` uses for contradictions)
+  rather than a new schema concept. Unblocked by `#49` landing on `main`
+  (`vec_chunks`/cosine similarity).
+- **Pure clustering/merge layer** (`remind_me_core::consolidation`), mirroring
+  the reference's split between `consolidation.py` (no DB access) and
+  `tools/lifecycle.py` (the DB-touching handler): `find_clusters` groups
+  memories via Union-Find over pairwise cosine similarity — transitive, so
+  A~B and B~C cluster all three even when cos(A, C) itself falls short —
+  `pick_canonical` selects the highest-vitality member (tie-broken by most
+  recent `accessed_at`, keeping the *first* tie like Python's `max()` rather
+  than Rust's `Iterator::max_by`, which keeps the last), and `merge_cluster`
+  combines content and sums access counts across the merged memories.
+- **Two-phase, safe by default**: `dry_run` (the default `true`) reports
+  clusters — canonical, members, and each member's similarity to the
+  canonical — without touching the store. Actually merging a cluster when
+  `dry_run: false` requires a `summaries: {canonical_id: summary}` entry for
+  it (an LLM-authored distillation, produced client-side exactly like
+  `remind_me_decompose`/`remind_me_normalize_apply` already are); a cluster
+  found but missing a summary is reported in `skipped_no_summary`, never
+  silently merged with a raw line union — the reference's own `#55` fix,
+  confirmed from its current source rather than an older description of it.
+  A merge updates the canonical's content/access_count/tags/vitality,
+  supersedes every other member, and best-effort re-embeds the canonical
+  with the merged content.
+- `similarity_threshold` (default 0.85, clamped 0.5..=1.0), `limit` (default
+  500, clamped 10..=5000, capping the SQL fetch) and a second, independent
+  `CONSOLIDATE_MAX_CANDIDATES` (1500) ceiling on the clustering step's own
+  O(n^2) comparison cost — both matching the reference. Bounds are clamped
+  rather than rejected, this port's established convention elsewhere (e.g.
+  `EntityTraverseInput::hops`) even though the reference's Pydantic model
+  itself rejects out-of-range input.
+- 22 new tests: 13 pure unit tests inline in `consolidation.rs` (no
+  clustering below threshold, a transitive three-member chain, `max_candidates`
+  truncation, canonical selection and its tie-break including the
+  first-vs-last-max distinction, line de-duplication, access-count summing,
+  tag merging) and 9 integration tests in `consolidate_test.rs` (category
+  scoping, `limit` capping the candidate pool before clustering ever runs,
+  dry-run leaving the store untouched even with a summary supplied, a
+  missing-summary cluster being skipped not merged, and a superseded member
+  dropping out of a later consolidation pass).
+
+### Notes
+The reference's re-embed of the merged canonical is a fire-and-forget async
+background task; this crate has no async runtime, so it re-embeds
+synchronously, best-effort, in the same place every other content-mutating
+write in this crate already does it (`add_memory`, `apply_normalizations`).
+
 ## 2026-07-30 — Fix an ADR numbering collision
 
 ### Fixed

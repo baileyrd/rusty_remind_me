@@ -295,6 +295,57 @@ pub struct ReclassifyBatchResult {
 /// The value `memory_type` holds until something classifies it.
 pub const UNCLASSIFIED: &str = "unclassified";
 
+/// Input model for `remind_me_consolidate`.
+///
+/// Two-step workflow, matching the reference's issue #55 update: call with
+/// `dry_run: true` (the default) to see the clusters a threshold finds, then
+/// write a short `summaries` entry per cluster worth merging and call again
+/// with `dry_run: false`. A cluster whose canonical id has no entry in
+/// `summaries` is reported in `skipped_no_summary`, not merged with a raw
+/// line union.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidateInput {
+    /// Minimum cosine similarity to cluster memories together. Clamped to
+    /// `CONSOLIDATE_SIMILARITY_MIN..=CONSOLIDATE_SIMILARITY_MAX` rather than
+    /// rejected, matching this port's convention elsewhere (e.g.
+    /// `EntityTraverseInput::hops`).
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f64,
+    /// If true (the default), report clusters without modifying data.
+    #[serde(default = "default_consolidate_dry_run")]
+    pub dry_run: bool,
+    /// Limit consolidation to this category.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Maximum memories to consider. Clamped to
+    /// `CONSOLIDATE_LIMIT_MIN..=CONSOLIDATE_LIMIT_MAX`.
+    #[serde(default = "default_consolidate_limit")]
+    pub limit: usize,
+    /// `{canonical_id: summary}`, one entry per cluster (from a prior
+    /// `dry_run: true` call) to actually merge when `dry_run` is false.
+    #[serde(default)]
+    pub summaries: Option<std::collections::HashMap<String, String>>,
+}
+
+fn default_similarity_threshold() -> f64 {
+    0.85
+}
+
+fn default_consolidate_dry_run() -> bool {
+    true
+}
+
+fn default_consolidate_limit() -> usize {
+    500
+}
+
+/// Inclusive bounds the reference enforces on `similarity_threshold`.
+pub const CONSOLIDATE_SIMILARITY_MIN: f64 = 0.5;
+pub const CONSOLIDATE_SIMILARITY_MAX: f64 = 1.0;
+/// Inclusive bounds the reference enforces on `limit`.
+pub const CONSOLIDATE_LIMIT_MIN: usize = 10;
+pub const CONSOLIDATE_LIMIT_MAX: usize = 5000;
+
 /// Input model for `remind_me_feedback`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackInput {

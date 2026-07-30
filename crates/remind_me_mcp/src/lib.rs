@@ -10,6 +10,7 @@
 
 use remind_me_core::{
     backup, capture,
+    consolidation::consolidate,
     db::queries,
     dbs_import, entity, export, importer, mempalace_import, normalize, stats, status,
     sync::{SyncPeer, SyncWorker},
@@ -17,17 +18,18 @@ use remind_me_core::{
     webhook::Webhook,
     wiki,
     wiki_fs::Wiki,
-    wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database,
-    DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput,
-    ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput,
-    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN,
-    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
-    EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX,
-    IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
-    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
-    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
+    ConsolidateInput, Database, DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput,
+    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
+    MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
+    NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
+    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
+    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
+    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
+    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX,
+    MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
+    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -760,6 +762,20 @@ impl McpServer {
                                         }
                                     },
                                     "required": ["title"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_consolidate",
+                                "description": "Find clusters of near-duplicate memories by embedding similarity and optionally merge them into one canonical representative. dry_run (default true) reports clusters — canonical, members, and each member's similarity to the canonical — without changing anything. To actually merge, review the report, write a short summary per cluster you want consolidated, then call again with dry_run=false and summaries={canonical_id: summary}; a cluster with no matching summary is skipped, not merged with a raw concatenation.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "similarity_threshold": { "type": "number", "default": 0.85, "minimum": CONSOLIDATE_SIMILARITY_MIN, "maximum": CONSOLIDATE_SIMILARITY_MAX, "description": "Minimum cosine similarity to cluster memories together. Higher = stricter." },
+                                        "dry_run": { "type": "boolean", "default": true, "description": "If true, report clusters without modifying data. Set false to auto-merge." },
+                                        "category": { "type": "string", "description": "Limit consolidation to this category" },
+                                        "limit": { "type": "integer", "default": 500, "minimum": CONSOLIDATE_LIMIT_MIN, "maximum": CONSOLIDATE_LIMIT_MAX, "description": "Maximum memories to consider (prevents runaway on large vaults)" },
+                                        "summaries": { "type": "object", "additionalProperties": { "type": "string" }, "description": "{canonical_id: summary}, one entry per cluster (from a prior dry_run=true call) you want consolidated. Required to actually merge a cluster when dry_run=false." }
+                                    }
                                 }
                             },
                             {
@@ -1525,6 +1541,22 @@ impl McpServer {
                             json!({ "isError": true, "content": [{ "type": "text", "text": format!("Stats error: {}", e) }] })
                         }
                     },
+                    "remind_me_consolidate" => {
+                        let input: Result<ConsolidateInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(consolidate_input) => match consolidate(&conn, &consolidate_input) {
+                                Ok(report) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Consolidate error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid consolidate input: {}", e) }] })
+                            }
+                        }
+                    }
                     _ => {
                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("Unknown tool: {}", tool_name) }] })
                     }
@@ -1885,6 +1917,40 @@ mod tests {
         assert_eq!(body["total_memories"], 1);
         assert_eq!(body["vault_health_score"], "100%");
         assert!(body["vitality_buckets"].is_object());
+    }
+
+    #[test]
+    fn test_consolidate_tool_is_registered_and_defaults_to_a_safe_dry_run() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tool = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_consolidate")
+            .expect("remind_me_consolidate not in tools/list");
+        let schema = &tool["inputSchema"]["properties"];
+        assert_eq!(schema["dry_run"]["default"], true);
+        assert_eq!(schema["similarity_threshold"]["default"], 0.85);
+        assert_eq!(schema["similarity_threshold"]["minimum"], 0.5);
+        assert_eq!(schema["similarity_threshold"]["maximum"], 1.0);
+        assert_eq!(schema["limit"]["default"], 500);
+        assert_eq!(schema["limit"]["minimum"], 10);
+        assert_eq!(schema["limit"]["maximum"], 5000);
+
+        // No embedder is configured in this test harness, so nothing has a
+        // chunk-0 vector -- the round trip still exercises real dispatch and
+        // must report cleanly rather than erroring.
+        call(&server, "remind_me_add", json!({ "content": "a memory" }));
+        let result = call(&server, "remind_me_consolidate", json!({}));
+        assert!(result.get("isError").is_none(), "call failed: {:?}", result);
+
+        let body: Value = serde_json::from_str(&text_of(&result)).unwrap();
+        assert_eq!(body["clusters_found"], 0);
+        assert_eq!(body["message"], "No eligible memories found");
     }
 
     /// A server whose wiki lives in its own scratch directory.
