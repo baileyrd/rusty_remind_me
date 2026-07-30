@@ -10,18 +10,18 @@
 
 use remind_me_core::{
     backup, capture, db::queries, dbs_import, entity, export, importer, mempalace_import,
-    normalize, stats, status, updater, vitality, watcher, webhook::Webhook, wiki, wiki_fs::Wiki,
-    wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput, Database,
-    DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput, EntityTraverseInput,
-    ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput,
-    NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN,
-    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
-    EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX,
-    IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
-    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
-    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    normalize, stats, status, updater, vectors, vitality, watcher, webhook::Webhook, wiki,
+    wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput,
+    ChatImportInput, Database, DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput,
+    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
+    MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
+    NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, DBS_IMPORT_LIMIT_MAX,
+    DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX,
+    DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
+    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX,
+    MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
+    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -463,6 +463,11 @@ impl McpServer {
                                         "force": { "type": "boolean", "default": false, "description": "Skip the uncommitted-changes guard. Does not bypass the fast-forward-only pull." }
                                     }
                                 }
+                            },
+                            {
+                                "name": "remind_me_reindex",
+                                "description": "Rebuild vector embeddings for every memory that doesn't have one yet. Existing embeddings are preserved; only missing ones are generated. Run this after configuring REMIND_ME_EMBEDDING_BACKEND, or after a bulk import that ran before an embedder was available. Reports 'degraded' when no embedder is configured or reachable, rather than silently doing nothing.",
+                                "inputSchema": { "type": "object", "properties": {} }
                             },
                             {
                                 "name": "remind_me_webhook_status",
@@ -1004,6 +1009,14 @@ impl McpServer {
                             json!({ "isError": true, "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
                         }
                     }
+                    "remind_me_reindex" => match vectors::reindex(&conn) {
+                        Ok(result) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Reindex error: {}", e) }] })
+                        }
+                    },
                     "remind_me_import_dbs" => {
                         let input: Result<DbsImportInput, _> = serde_json::from_value(args);
                         match input {
@@ -2139,6 +2152,34 @@ mod tests {
             self_update["inputSchema"]["properties"]["force"]["default"],
             false
         );
+    }
+
+    #[test]
+    fn test_reindex_is_registered_and_reports_degraded_without_an_embedder() {
+        // No REMIND_ME_EMBEDDING_BACKEND in the test environment, so this
+        // must report degraded rather than silently doing nothing.
+        std::env::remove_var(remind_me_core::embedder::EMBEDDING_BACKEND_ENV);
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let req = json!({ "jsonrpc": "2.0", "id": 14, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let tool = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_reindex")
+            .expect("remind_me_reindex not in tools/list");
+        assert!(tool["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+
+        let report: Value =
+            serde_json::from_str(&text_of(&call(&server, "remind_me_reindex", json!({})))).unwrap();
+
+        assert_eq!(report["degraded"], true);
+        assert_eq!(report["embedded"], 0);
     }
 
     #[test]
