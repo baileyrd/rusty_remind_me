@@ -40,6 +40,137 @@ variants, neither of which fits "built here, but off by configuration"
 correctly; extending that enum is a separate, small follow-up rather than an
 unrequested change bundled into this one.
 
+## 2026-07-29 — `remind_me_check_update` and `remind_me_self_update` (#58)
+
+### Added
+- **`remind_me_check_update`** — read-only, no inputs. Fetches from
+  `origin` and compares `HEAD` against `origin/main`, reporting whether an
+  update is available, how many commits behind, and (up to 10) their
+  one-line messages. Ports the reference's `check_for_update()` directly —
+  nothing about this step depends on how the running binary was built or
+  installed.
+- **`remind_me_self_update(force: bool = false)`** — `git pull --ff-only`
+  (refusing a working tree with uncommitted changes unless `force` is set),
+  followed by `cargo build --release --workspace` in place of the
+  reference's `pip install -e .`. Always reports `restart_required: true`
+  on success. `force` only bypasses the dirty-tree guard, never the
+  fast-forward-only pull — a diverged local history is refused either way,
+  verified directly against the reference's `perform_update()` rather than
+  assumed. A build failure after a successful pull is rolled back
+  automatically (`git reset --hard` to the pre-pull commit); if the
+  rollback itself fails, the error names the exact manual recovery command.
+- A background startup check (`start_background_check`, called once from
+  the CLI's actual `server`/`mcp` entry point — deliberately not from
+  `McpServer::new`, which the test suite also uses to build a server per
+  test) that surfaces a one-shot notice on whatever tool call happens to
+  come first afterward, then clears. `REMIND_ME_AUTO_UPDATE_CHECK=false`
+  skips it; the two manual tools are unaffected either way.
+- `docs/adr/0003-self-update-strategy.md` — records the decision the issue
+  required before implementing: the reference's own mechanism (`git pull`
+  + `pip install -e .`, coherent because an editable install's source tree
+  *is* the running installation) has no equivalent for a compiled binary,
+  so self-update here means "pull and rebuild, then require a restart,"
+  not "fetch a prebuilt release binary and swap it" (no release pipeline
+  exists to fetch from) and not "check-only" (the issue names that as the
+  fallback if a real update path isn't worth porting — rebuilding is a
+  small addition on top of the git plumbing the read-only check already
+  needs). Also records why repository discovery walks up from the
+  process's current working directory rather than the executable's own
+  path, unlike the reference.
+
+### Notes
+Repository discovery requires running `remind_me_check_update`/
+`remind_me_self_update` from inside the repository (or a subdirectory of
+it) — a real, stated divergence from the reference, not a silent
+approximation. A `cargo install`ed binary has no fixed relationship to the
+source tree that produced it the way an editable pip install's package
+files always live inside the repo they came from, so there is no
+executable-path-based discovery to fall back to; self-update is only a
+coherent operation at all when it's clear which checkout it means.
+
+Tested against real, disposable git repositories under a temp directory
+(a local filesystem "origin" plus a clone of it — git treats a path remote
+exactly like any other, no network needed): up to date, behind by N
+commits with correct messages, an unreachable origin, a dirty tree refused
+without `force`, `force` still refusing a diverged (non-fast-forward)
+history, a successful pull-and-build, and a build failure's automatic
+rollback. The MCP-level test suite deliberately does not invoke either
+tool end to end — unlike every other tool tested there, both discover
+their repository from the test binary's own working directory, which
+inside this workspace's test suite is this very checkout; running
+`remind_me_self_update` for real there would rebuild the actual repository
+under test. Registration and input schemas are asserted instead, with the
+behavioral coverage living entirely in `updater.rs`'s own unit tests
+against disposable repos.
+
+## 2026-07-29 — Embeddings and semantic search, plus `remind_me_reindex` (#49)
+
+### Added
+- **Semantic search**, wired into the existing RRF fusion in `retrieval.rs`:
+  `rank_rrf` now takes both a keyword-ranked list and a semantic-ranked
+  list and fuses them, so `MemorySearchResult.vec_score` is finally real
+  instead of always `None`. A memory found by only one list is not
+  penalized to zero on the other — it gets the same past-the-end penalty
+  rank the vitality term already used for a dormant memory. When semantic
+  search never ran at all (no embedder configured or reachable), `vec_score`
+  reports `None`, not a misleading constant score that would look like it
+  carried information.
+- **`remind_me_reindex`** — a new MCP tool, no inputs, matching the
+  reference exactly: embeds every memory that has no vector yet, leaving
+  existing embeddings untouched. Safe to run repeatedly, and reports
+  `degraded: true` (rather than silently doing nothing) when no embedder is
+  configured or reachable.
+- An embedding backend behind a new `Embedder` trait
+  (`crates/remind_me_core/src/embedder.rs`), implemented for a local
+  **Ollama** daemon's `POST /api/embed` — a hand-rolled HTTP client over
+  `std::net::TcpStream`, the same pattern already established for the
+  webhook endpoint (#56) and the HTTP API (#48). Off unless
+  `REMIND_ME_EMBEDDING_BACKEND=ollama` is set, matching the folder watcher
+  and webhook convention that the heavier optional feature stays off until
+  asked for. `add`/`update` embed inline when an embedder is available;
+  every other write path (bulk imports, capture, decompose, normalize)
+  relies on `remind_me_reindex` as its backstop.
+- `docs/adr/0002-embeddings-ollama-and-brute-force-vectors.md` — records the
+  backend decision the issue required before writing any of this: Ollama
+  over an in-process ONNX Runtime engine (verified feasible, not chosen, for
+  scope reasons), and a new `vec_embeddings` table over `sqlite-vec`'s
+  `vec0` virtual table (no mature Rust binding exists, and bundling a
+  second native shared library per platform contradicts this port's
+  established dependency-avoidance pattern).
+
+### Notes
+**The issue's acceptance criteria says vectors are stored in `vec_chunks`
+itself; that isn't what the reference actually does.** Reading `db.py`
+showed the reference's real vector store is `memories_vec`, a separate
+`sqlite-vec` `vec0` virtual table — `vec_chunks` is only ever the rowid map
+back to `memory_rowid`/`chunk_ix`, in the reference as much as in this
+crate's own already-generated schema. This port introduces its own
+`vec_embeddings(vec_rowid, embedding)` table instead of attempting to load
+`sqlite-vec` as a runtime extension, created by this crate's own code (not
+added to `schema_tables.sql`, which is generated verbatim from the
+reference's `sqlite_master` and is not this crate's file to hand-edit). A
+database shared with `remind_me` is unaffected either way: neither side
+reads or writes the other's vector table.
+
+Vectors are stored as raw float32 bytes with dimension inferred from
+`len(bytes) / 4`, matching the reference's own convention exactly, so a
+384/768/1024-dimensional model all round-trip without a schema change.
+Semantic search itself is a brute-force cosine-similarity scan in Rust, not
+a SQL `MATCH` — identical retrieval quality to the reference's own exact
+scan below its `ANN_MIN_CHUNKS` threshold, just a different mechanism for
+getting there.
+
+ANN (explicitly optional in the issue, and only consulted above a chunk-count
+threshold most vaults will never reach), reranking, and query expansion are
+out of scope for this change — see ADR-0002's "Alternatives considered" and
+"Consequences" for why, and what would have to be revisited to add any of
+them later.
+
+Deleting a memory now also deletes its `vec_chunks`/`vec_embeddings` rows —
+needed because SQLite reuses freed rowids, so without this cleanup a new
+memory landing on a deleted one's old rowid would silently inherit its
+stale vectors.
+
 ## 2026-07-29 — Import a MemPalace ChromaDB store (#53)
 
 ### Added
