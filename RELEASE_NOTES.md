@@ -2,6 +2,32 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-01 — Pre-migration snapshot guard (#95)
+
+### Added
+- **Schema reconciliation now snapshots the database before it changes
+  anything**, closing the gap where a bad migration against the single
+  SQLite file holding someone's memory store had no way back. Matches the
+  reference's `_maybe_snapshot_before_migration`: triggered only when
+  reconciliation actually has pending work to do (the on-disk version stamp
+  is behind `SCHEMA_VERSION`, or a table already present differs from the
+  generated schema — a rename or added column included, since either changes
+  the table's stored DDL), skipped for a brand-new database with no rows in
+  `memories` yet, and non-fatal on failure: a snapshot that can't be created
+  (e.g. the `backups/` directory can't be written) is swallowed rather than
+  blocking the migration it exists to protect against. Reuses
+  `crates/remind_me_core/src/backup.rs`'s existing `create_backup` — no new
+  backup logic. New logic lives in
+  `crates/remind_me_core/src/db/migrations.rs`
+  (`migration_pending`/`has_existing_data`/`snapshot_before_migration`),
+  called from `apply()` before any table is touched.
+- Tests: `crates/remind_me_core/tests/migration_snapshot_test.rs` — a
+  brand-new database takes no snapshot, an up-to-date database with data
+  takes no snapshot on reopen, a legacy-shaped database with data is
+  snapshotted (and one with no rows is not), an old version stamp is
+  snapshotted under a label reflecting that version, and a snapshot failure
+  does not block the migration.
+
 ## 2026-07-30 — Live `dashboard`/`embeddings` status, dashboard PID-file liveness (#90)
 
 ### Fixed
