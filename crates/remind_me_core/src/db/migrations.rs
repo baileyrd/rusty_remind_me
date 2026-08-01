@@ -259,6 +259,64 @@ fn rename_legacy_columns(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Whether reconciliation has anything to do: the on-disk version stamp is
+/// behind [`SCHEMA_VERSION`], or a table already present differs from the
+/// generated schema.
+///
+/// A missing table is not counted — plain creation on a brand-new database
+/// isn't a migration in the sense this guards against, and is separately
+/// excluded by [`has_existing_data`]. Comparing full DDL text (via
+/// [`differs_from_schema`]) rather than just table presence means a rename or
+/// an added column is caught here too, since either changes the stored SQL.
+fn migration_pending(conn: &Connection) -> Result<bool> {
+    let current_version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current_version != SCHEMA_VERSION {
+        return Ok(true);
+    }
+
+    let reference = pristine()?;
+    let mut names = reference.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
+    let tables: Vec<String> = names.query_map([], |r| r.get(0))?.collect::<Result<_>>()?;
+    for table in &tables {
+        if differs_from_schema(conn, table)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the database already holds data worth protecting.
+///
+/// Mirrors the reference's own check: a brand-new database — detected by the
+/// `memories` table not existing yet, or existing but empty — has nothing to
+/// roll back to, so there is no reason to snapshot it.
+fn has_existing_data(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "memories")? {
+        return Ok(false);
+    }
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM memories LIMIT 1)", [], |r| {
+        r.get(0)
+    })
+}
+
+/// Snapshot the database before a pending migration runs (issue #95, matching
+/// upstream's pre-migration snapshot guard).
+///
+/// Skipped when there is no pending reconciliation work (a plain re-open of an
+/// already-current database), and skipped for a brand-new database with no
+/// data to protect. A snapshot failure is swallowed rather than propagated —
+/// it must never block startup or the migration it exists to protect against,
+/// exactly as the reference logs and proceeds rather than raising.
+fn snapshot_before_migration(conn: &Connection) -> Result<()> {
+    if !migration_pending(conn)? || !has_existing_data(conn)? {
+        return Ok(());
+    }
+
+    let current_version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let _ = crate::backup::create_backup(conn, &format!("pre-migration-v{}", current_version));
+    Ok(())
+}
+
 /// Populate derived tables for rows that predate the triggers maintaining them.
 ///
 /// Triggers only fire on writes that happen *after* they exist. A database
@@ -303,6 +361,10 @@ fn backfill_derived(conn: &Connection, force_fts_rebuild: bool) -> Result<()> {
 /// The version is written last, so a database only ever claims
 /// [`SCHEMA_VERSION`] once it actually has that schema.
 pub fn apply(conn: &Connection) -> Result<()> {
+    // Before anything below mutates the database: a snapshot only reflects
+    // the pre-migration state if it is taken before the first write.
+    snapshot_before_migration(conn)?;
+
     conn.execute_batch(SCHEMA_TABLES)?;
 
     rename_legacy_columns(conn)?;
