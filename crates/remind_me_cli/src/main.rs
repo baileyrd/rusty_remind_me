@@ -121,10 +121,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 configure_mcp_clients()?;
             }
             "api" => {
-                let port = args.get(2).cloned().unwrap_or_else(|| "8080".to_string());
-                let addr = format!("127.0.0.1:{}", port);
+                let port_arg = args.get(2).cloned().unwrap_or_else(|| "8080".to_string());
+                let port: u16 = port_arg.parse().map_err(|_| {
+                    format!("invalid port {:?}; expected a number 0-65535", port_arg)
+                })?;
+                let host = "127.0.0.1";
+                let addr = format!("{}:{}", host, port);
+
+                // #90: refuse a double start for the same DB, matching the
+                // reference's `--serve-ui` guard in `__main__.py`. An
+                // in-memory database has nowhere to put a PID file -- that
+                // is not an error, it just means this protection is
+                // unavailable, same as an in-memory DB having no backup
+                // directory (`status::server_status`).
+                let pid_path = match remind_me_core::pid::pid_file_path(&db.conn()) {
+                    Ok(path) => Some(path),
+                    Err(remind_me_core::pid::PidError::InMemory) => {
+                        eprintln!(
+                            "Warning: in-memory database has no on-disk location for a PID \
+                             file; double-start protection is unavailable."
+                        );
+                        None
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if let Some(path) = &pid_path {
+                    let status = remind_me_core::pid::dashboard_status(path);
+                    if status.running {
+                        eprintln!(
+                            "Dashboard is already running at {} (PID {}). Stop it first or use \
+                             a different port with `rusty-remind-me api <port>`.",
+                            status.url.as_deref().unwrap_or("unknown"),
+                            status
+                                .pid
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| "unknown".to_string()),
+                        );
+                        std::process::exit(1);
+                    }
+                    remind_me_core::pid::write_pid_file(path, host, port)?;
+                }
+
                 let api_server = ApiServer::new(db);
-                api_server.run(&addr)?;
+                let result = api_server.run(&addr);
+                if let Some(path) = &pid_path {
+                    remind_me_core::pid::remove_pid_file(path);
+                }
+                result?;
             }
             "remote" => {
                 // The only place this crate ever touches the async side of

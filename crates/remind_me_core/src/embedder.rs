@@ -430,6 +430,36 @@ pub fn available_embedder() -> Option<OllamaEmbedder> {
     ok.then_some(embedder)
 }
 
+/// What `remind_me_server_status` reports for the embedding backend.
+///
+/// Unlike [`resolve_embedder`] (config only) this calls [`available_embedder`],
+/// which makes a network probe — cached, per `AVAILABILITY_SUCCESS_TTL`/
+/// `AVAILABILITY_FAILURE_TTL` above, so this does not cost a real
+/// round-trip on every status check. `crate::status::server_status` never
+/// calls this itself (its own "no network" contract, see that module's
+/// docs); it is for the MCP dispatch layer's live-override of `embeddings`,
+/// the same way `sync`/`webhook`/`remote` are overridden with process-local
+/// state `server_status` cannot see.
+pub fn embedding_status() -> crate::status::SubsystemStatus {
+    use crate::status::SubsystemStatus;
+    if resolve_embedder().is_none() {
+        return SubsystemStatus::NotImplemented {
+            reason: "no embedding backend configured; set REMIND_ME_EMBEDDING_BACKEND=ollama \
+                     to enable semantic search"
+                .to_string(),
+        };
+    }
+    if available_embedder().is_some() {
+        SubsystemStatus::Active
+    } else {
+        SubsystemStatus::NotImplemented {
+            reason: "REMIND_ME_EMBEDDING_BACKEND=ollama is configured but the Ollama daemon is \
+                     unreachable"
+                .to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
