@@ -224,6 +224,28 @@ pub fn semantic_search(
     limit: usize,
     category: Option<&str>,
 ) -> Result<Vec<Memory>, VectorError> {
+    Ok(
+        semantic_search_scored(conn, embedder, query, limit, category)?
+            .into_iter()
+            .map(|(memory, _similarity)| memory)
+            .collect(),
+    )
+}
+
+/// Same as [`semantic_search`], but keeps each memory's raw cosine
+/// similarity alongside it (highest first) instead of discarding it.
+///
+/// [`crate::retrieval::rank_rrf`]'s `"score"` fusion mode needs the actual
+/// match *magnitude*, not just list position, to normalize against — this is
+/// that magnitude's only source, since nothing else in this crate computes
+/// it.
+pub fn semantic_search_scored(
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    query: &str,
+    limit: usize,
+    category: Option<&str>,
+) -> Result<Vec<(Memory, f32)>, VectorError> {
     let query_vector = embedder
         .embed(&[query.to_string()], EmbedRole::Query)?
         .into_iter()
@@ -279,9 +301,9 @@ pub fn semantic_search(
     ranked.truncate(limit);
 
     let mut memories = Vec::with_capacity(ranked.len());
-    for (rowid, _similarity) in ranked {
+    for (rowid, similarity) in ranked {
         if let Some(memory) = get_memory_by_rowid(conn, rowid)? {
-            memories.push(memory);
+            memories.push((memory, similarity));
         }
     }
     Ok(memories)
