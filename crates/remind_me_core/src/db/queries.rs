@@ -9,7 +9,10 @@ use crate::models::{
     UnclassifiedMemory, UpdateOutcome, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, LIST_LIMIT_MAX,
     LIST_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNCLASSIFIED,
 };
-use crate::retrieval::{choose_rrf_weights, rank_rrf, trim_by_token_budget};
+use crate::retrieval::{
+    choose_rrf_weights, rank_rrf, rrf_k_from_env, trim_by_token_budget, RrfConfig, RrfFusion,
+    RrfSignals,
+};
 use crate::vitality::{
     calculate_vitality, get_decay_rate, get_source_prior, get_type_prior, EFFECTIVE_VITALITY_FN,
     VITALITY_FLOOR,
@@ -619,9 +622,12 @@ pub fn search_memories(
 
     // Derived from MEMORY_COLUMNS rather than spelled out, so adding a column
     // cannot leave this query selecting a stale subset — which is exactly how
-    // `base_weight` slipped past here once.
+    // `base_weight` slipped past here once. `bm25_score` rides along as a
+    // trailing extra column -- `parse_memory_row` only ever looks up columns
+    // by name, so it ignores it, and `RrfFusion::Score` mode needs the raw
+    // magnitude alongside the memory it belongs to.
     let mut sql = format!(
-        "SELECT {}
+        "SELECT {}, bm25(memories_fts) AS bm25_score
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ? AND m.superseded_by IS NULL AND m.deleted_at IS NULL",
@@ -642,14 +648,18 @@ pub fn search_memories(
     sql.push_str(" ORDER BY bm25(memories_fts) LIMIT ?");
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        params![match_expr, (input.limit * 2) as i64],
-        parse_memory_row,
-    )?;
+    let rows = stmt.query_map(params![match_expr, (input.limit * 2) as i64], |row| {
+        let memory = parse_memory_row(row)?;
+        let bm25_score: f64 = row.get("bm25_score")?;
+        Ok((memory, bm25_score))
+    })?;
 
     let mut keyword_memories = Vec::new();
+    let mut keyword_bm25 = std::collections::HashMap::new();
     for r in rows {
-        keyword_memories.push(r?);
+        let (memory, bm25_score) = r?;
+        keyword_bm25.insert(memory.id.clone(), bm25_score);
+        keyword_memories.push(memory);
     }
 
     // Semantic augmentation is entirely optional: no embedder configured or
@@ -659,19 +669,38 @@ pub fn search_memories(
     // rejects the query text, say) degrades the same way rather than
     // failing the keyword search it would otherwise still have been able to
     // answer.
-    let semantic_memories = match crate::embedder::available_embedder() {
-        Some(embedder) => crate::vectors::semantic_search(
-            conn,
-            &embedder,
-            &input.query,
-            input.limit * 2,
-            input.category.as_deref(),
-        )
-        .unwrap_or_default(),
-        None => Vec::new(),
+    let (semantic_memories, semantic_similarity) = match crate::embedder::available_embedder() {
+        Some(embedder) => {
+            let scored = crate::vectors::semantic_search_scored(
+                conn,
+                &embedder,
+                &input.query,
+                input.limit * 2,
+                input.category.as_deref(),
+            )
+            .unwrap_or_default();
+            let mut memories = Vec::with_capacity(scored.len());
+            let mut similarity = std::collections::HashMap::with_capacity(scored.len());
+            for (memory, sim) in scored {
+                similarity.insert(memory.id.clone(), sim as f64);
+                memories.push(memory);
+            }
+            (memories, similarity)
+        }
+        None => (Vec::new(), std::collections::HashMap::new()),
     };
 
-    let mut ranked = rank_rrf(keyword_memories, semantic_memories, weights);
+    let config = RrfConfig {
+        k: rrf_k_from_env(),
+        weights,
+        fusion: RrfFusion::from_env(),
+    };
+    let signals = RrfSignals {
+        keyword_bm25,
+        semantic_similarity,
+    };
+
+    let mut ranked = rank_rrf(keyword_memories, semantic_memories, config, &signals);
     ranked.truncate(input.limit);
 
     let final_results = trim_by_token_budget(ranked, input.token_budget);

@@ -357,13 +357,22 @@ pub struct FeedbackInput {
 }
 
 /// Search result item containing memory and diagnostic ranking scores.
+///
+/// Each `*_score` is that signal's already-weighted contribution to `score`
+/// (i.e. `weight / (k + rank)` in RRF-rank fusion, or `weight *
+/// normalized_magnitude` in RRF-score fusion) — not the raw rank or
+/// magnitude itself. `fts_score` and `idf_score` are always `Some` (the
+/// keyword tier always runs); `vec_score` is `None` only when the semantic
+/// tier never ran at all (see [`crate::retrieval::rank_rrf`]'s doc comment).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchResult {
     pub memory: Memory,
     pub score: f64,
     pub fts_score: Option<f64>,
     pub vec_score: Option<f64>,
+    pub recency_score: Option<f64>,
     pub vitality_score: Option<f64>,
+    pub idf_score: Option<f64>,
 }
 
 /// Input model for `remind_me_entity_traverse`.
