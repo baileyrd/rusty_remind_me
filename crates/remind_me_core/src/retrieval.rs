@@ -528,6 +528,11 @@ pub fn rank_rrf(
                 recency_score: Some(recency_contrib),
                 vitality_score: Some(vitality_contrib),
                 idf_score: Some(idf_contrib),
+                // Feedback is applied in a later pipeline stage
+                // (`vitality::apply_feedback_adjustment`), which needs a
+                // database connection this pure ranking function doesn't
+                // have.
+                feedback_adjustment: None,
             }
         })
         .collect();

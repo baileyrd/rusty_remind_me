@@ -2,10 +2,10 @@
 
 use remind_me_core::db::queries;
 use remind_me_core::vitality::{
-    record_feedback, tokenize_query, FeedbackSignal, BASE_WEIGHT_MAX, BASE_WEIGHT_MIN,
-    FEEDBACK_MAGNITUDE,
+    apply_feedback_adjustment, contextual_feedback_adjustment, record_feedback, tokenize_query,
+    FeedbackSignal, BASE_WEIGHT_MAX, BASE_WEIGHT_MIN, FEEDBACK_ADJUSTMENT_CAP, FEEDBACK_MAGNITUDE,
 };
-use remind_me_core::{Database, MemoryAddInput};
+use remind_me_core::{Database, MemoryAddInput, MemorySearchInput, MemorySearchResult};
 use rusqlite::Connection;
 
 fn add(conn: &Connection) -> String {
@@ -280,4 +280,348 @@ fn deleting_a_memory_removes_its_feedback() {
 fn tokenize_drops_single_characters_and_deduplicates() {
     assert_eq!(tokenize_query("a the THE cat"), vec!["cat", "the"]);
     assert!(tokenize_query("? ! .").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// contextual_feedback_adjustment (read side, issue #94)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn contextual_feedback_adjustment_is_zero_with_no_stored_feedback() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+
+    assert_eq!(
+        contextual_feedback_adjustment(&conn, &id, "some query").unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn contextual_feedback_adjustment_is_zero_for_an_unknown_memory() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+
+    assert_eq!(
+        contextual_feedback_adjustment(&conn, "mem_nope", "any query").unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn contextual_feedback_adjustment_is_positive_for_a_similar_helpful_query() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+    record_feedback(
+        &conn,
+        &id,
+        FeedbackSignal::Helpful,
+        Some("vpn configuration settings"),
+    )
+    .unwrap();
+
+    let adjustment =
+        contextual_feedback_adjustment(&conn, &id, "vpn configuration settings").unwrap();
+    assert!(adjustment > 0.0, "got {adjustment}");
+}
+
+#[test]
+fn contextual_feedback_adjustment_is_negative_for_a_similar_unhelpful_query() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+    record_feedback(
+        &conn,
+        &id,
+        FeedbackSignal::Unhelpful,
+        Some("vpn configuration settings"),
+    )
+    .unwrap();
+
+    let adjustment =
+        contextual_feedback_adjustment(&conn, &id, "vpn configuration settings").unwrap();
+    assert!(adjustment < 0.0, "got {adjustment}");
+}
+
+#[test]
+fn contextual_feedback_adjustment_ignores_a_query_below_the_similarity_threshold() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+    record_feedback(
+        &conn,
+        &id,
+        FeedbackSignal::Unhelpful,
+        Some("what's my favorite editor"),
+    )
+    .unwrap();
+
+    // The issue's headline case: a genuinely different question about the
+    // same memory must not inherit feedback from an unrelated one.
+    assert_eq!(
+        contextual_feedback_adjustment(&conn, &id, "what IDE did I mention last year").unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn contextual_feedback_adjustment_is_capped_in_either_direction() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+
+    // Three identical-query events at FEEDBACK_MAGNITUDE (0.15) and
+    // similarity 1.0 sum to 0.45, past the 0.4 cap.
+    for _ in 0..3 {
+        record_feedback(&conn, &id, FeedbackSignal::Helpful, Some("same question")).unwrap();
+    }
+
+    let adjustment = contextual_feedback_adjustment(&conn, &id, "same question").unwrap();
+    assert!(
+        (adjustment - FEEDBACK_ADJUSTMENT_CAP).abs() < 1e-9,
+        "got {adjustment}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// apply_feedback_adjustment (ranking-time integration point, issue #94)
+// ---------------------------------------------------------------------------
+
+fn result(id: &str, score: f64) -> MemorySearchResult {
+    MemorySearchResult {
+        memory: remind_me_core::Memory {
+            id: id.to_string(),
+            content: String::new(),
+            category: "general".to_string(),
+            tags: vec![],
+            source: "manual".to_string(),
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            updated_at: String::new(),
+            capture_id: None,
+            subject: None,
+            predicate: None,
+            object: None,
+            superseded_by: None,
+            decay_rate: 0.0,
+            vitality: 0.0,
+            base_weight: 0.0,
+            access_count: 0,
+            accessed_at: String::new(),
+            doc_id: None,
+            chunk_index: None,
+        },
+        score,
+        fts_score: Some(score),
+        vec_score: None,
+        recency_score: None,
+        vitality_score: None,
+        idf_score: None,
+        feedback_adjustment: None,
+    }
+}
+
+#[test]
+fn apply_feedback_adjustment_is_a_noop_for_an_empty_result_list() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+
+    assert!(apply_feedback_adjustment(&conn, "some query", vec![])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn apply_feedback_adjustment_is_a_noop_for_an_empty_query() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+
+    let results = apply_feedback_adjustment(&conn, "", vec![result(&id, 0.5)]).unwrap();
+    assert_eq!(results[0].score, 0.5);
+    assert!(results[0].feedback_adjustment.is_none());
+}
+
+#[test]
+fn apply_feedback_adjustment_leaves_a_result_untouched_without_matching_feedback() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let a = add(&conn);
+    let b = add(&conn);
+
+    let results =
+        apply_feedback_adjustment(&conn, "some query", vec![result(&a, 0.5), result(&b, 0.3)])
+            .unwrap();
+
+    assert_eq!(results[0].score, 0.5);
+    assert_eq!(results[1].score, 0.3);
+    assert!(results[0].feedback_adjustment.is_none());
+    assert!(results[1].feedback_adjustment.is_none());
+}
+
+#[test]
+fn apply_feedback_adjustment_boosts_a_helpful_match_and_records_the_adjustment() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+    record_feedback(
+        &conn,
+        &id,
+        FeedbackSignal::Helpful,
+        Some("vpn configuration settings"),
+    )
+    .unwrap();
+
+    let results =
+        apply_feedback_adjustment(&conn, "vpn configuration settings", vec![result(&id, 0.5)])
+            .unwrap();
+
+    assert!(results[0].score > 0.5, "got {}", results[0].score);
+    assert!(results[0].feedback_adjustment.unwrap() > 0.0);
+}
+
+#[test]
+fn apply_feedback_adjustment_demotes_an_unhelpful_match() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+    record_feedback(
+        &conn,
+        &id,
+        FeedbackSignal::Unhelpful,
+        Some("vpn configuration settings"),
+    )
+    .unwrap();
+
+    let results =
+        apply_feedback_adjustment(&conn, "vpn configuration settings", vec![result(&id, 0.5)])
+            .unwrap();
+
+    assert!(results[0].score < 0.5, "got {}", results[0].score);
+}
+
+#[test]
+fn apply_feedback_adjustment_can_promote_a_lower_ranked_result_above_a_higher_ranked_one() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let helped = add(&conn);
+    let plain = add(&conn);
+    for _ in 0..10 {
+        record_feedback(
+            &conn,
+            &helped,
+            FeedbackSignal::Helpful,
+            Some("vpn configuration settings"),
+        )
+        .unwrap();
+    }
+
+    // helped's score is boosted by the 40% cap: 0.5 * 1.4 = 0.7 > plain's
+    // untouched 0.6.
+    let results = apply_feedback_adjustment(
+        &conn,
+        "vpn configuration settings",
+        vec![result(&plain, 0.6), result(&helped, 0.5)],
+    )
+    .unwrap();
+
+    assert_eq!(results[0].memory.id, helped);
+    assert_eq!(results[1].memory.id, plain);
+}
+
+#[test]
+fn apply_feedback_adjustment_ignores_a_dissimilar_past_query_end_to_end() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn);
+    record_feedback(
+        &conn,
+        &id,
+        FeedbackSignal::Unhelpful,
+        Some("what's my favorite editor"),
+    )
+    .unwrap();
+
+    let results = apply_feedback_adjustment(
+        &conn,
+        "what IDE did I mention last year",
+        vec![result(&id, 0.5)],
+    )
+    .unwrap();
+
+    assert_eq!(results[0].score, 0.5);
+    assert!(results[0].feedback_adjustment.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end through queries::search_memories
+// ---------------------------------------------------------------------------
+
+fn search_input(query: &str) -> MemorySearchInput {
+    MemorySearchInput {
+        query: query.to_string(),
+        category: None,
+        tags: None,
+        limit: 20,
+        token_budget: 100_000,
+        response_format: Default::default(),
+        include_dormant: true,
+        min_vitality: 0.0,
+        verbose: false,
+        expand_entities: false,
+        include_neighbors: false,
+        expand_co_retrieval: false,
+    }
+}
+
+#[test]
+fn search_memories_demotes_a_result_with_similar_unhelpful_feedback() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = queries::add_memory(
+        &conn,
+        MemoryAddInput {
+            content: "the vpn configuration settings are in the ops wiki".to_string(),
+            category: "general".to_string(),
+            tags: vec![],
+            source: "manual".into(),
+            metadata: serde_json::json!({}),
+            subject: None,
+            predicate: None,
+            object: None,
+            entities: vec![],
+        },
+    )
+    .unwrap()
+    .id;
+
+    let before = queries::search_memories(&conn, &search_input("vpn configuration settings"))
+        .unwrap()
+        .into_iter()
+        .find(|r| r.memory.id == id)
+        .unwrap()
+        .score;
+
+    record_feedback(
+        &conn,
+        &id,
+        FeedbackSignal::Unhelpful,
+        Some("vpn configuration settings"),
+    )
+    .unwrap();
+
+    let after = queries::search_memories(&conn, &search_input("vpn configuration settings"))
+        .unwrap()
+        .into_iter()
+        .find(|r| r.memory.id == id)
+        .unwrap();
+
+    assert!(
+        after.score < before,
+        "before={before}, after={}",
+        after.score
+    );
+    assert!(after.feedback_adjustment.unwrap() < 0.0);
 }

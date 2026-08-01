@@ -373,6 +373,10 @@ pub struct MemorySearchResult {
     pub recency_score: Option<f64>,
     pub vitality_score: Option<f64>,
     pub idf_score: Option<f64>,
+    /// The fractional nudge [`crate::vitality::apply_feedback_adjustment`]
+    /// applied to `score` from query-contextual feedback, or `None` when no
+    /// stored feedback was similar enough to this query to count.
+    pub feedback_adjustment: Option<f64>,
 }
 
 /// Input model for `remind_me_entity_traverse`.
