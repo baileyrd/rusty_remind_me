@@ -8,9 +8,10 @@
 //! in `ollama_embedder_test.rs`, against a fake HTTP server.
 
 use remind_me_core::db::queries;
-use remind_me_core::embedder::{EmbedError, EmbedRole, Embedder};
+use remind_me_core::embedder::{EmbedError, EmbedRole, Embedder, EmbeddingIdentity};
 use remind_me_core::vectors::{
-    delete_chunks_for_memory, dimension_of, embed_and_store, reindex, reindex_with, semantic_search,
+    delete_chunks_for_memory, dimension_of, embed_and_store, embedding_mismatch_info,
+    mark_embedding_meta_current, reconcile_embedding_meta, reindex, reindex_with, semantic_search,
 };
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
@@ -58,6 +59,14 @@ impl Embedder for FakeEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+
+    fn identity(&self) -> EmbeddingIdentity {
+        EmbeddingIdentity {
+            backend: "fake".to_string(),
+            model: "fake-model".to_string(),
+            dim: self.dim,
+        }
     }
 }
 
@@ -493,4 +502,217 @@ fn reindex_with_over_an_empty_store_does_nothing() {
     assert_eq!(result.missing, 0);
     assert_eq!(result.embedded, 0);
     assert_eq!(result.chunks_created, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Embedding-model versioning (#96)
+// ---------------------------------------------------------------------------
+
+fn identity(backend: &str, model: &str, dim: usize) -> EmbeddingIdentity {
+    EmbeddingIdentity {
+        backend: backend.to_string(),
+        model: model.to_string(),
+        dim,
+    }
+}
+
+#[test]
+fn a_fresh_store_with_no_recorded_meta_reports_no_mismatch() {
+    // The "first-ever run" case: nothing has been recorded yet, so there is
+    // no old model to have changed away from.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+
+    let info =
+        embedding_mismatch_info(&conn, &identity("ollama", "nomic-embed-text", 384)).unwrap();
+
+    assert!(info.is_none());
+}
+
+#[test]
+fn reconciling_a_fresh_store_does_not_clear_anything() {
+    // Same case, but through the clearing entry point: a first-ever run must
+    // not spuriously wipe vectors that were only just written under the
+    // current config.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "quokkas live on Rottnest Island");
+    let embedder = FakeEmbedder::new(2).with("quokkas live on Rottnest Island", vec![1.0, 0.0]);
+    embed_and_store(&conn, &embedder, &id, "quokkas live on Rottnest Island").unwrap();
+
+    let cleared = reconcile_embedding_meta(&conn, &embedder.identity()).unwrap();
+
+    assert!(cleared.is_none());
+    assert_eq!(chunk_count(&conn, &id), 1, "the fresh vector must survive");
+}
+
+#[test]
+fn the_same_model_across_runs_is_a_no_op() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "same model content");
+    let embedder = FakeEmbedder::new(2).with("same model content", vec![1.0, 0.0]);
+    embed_and_store(&conn, &embedder, &id, "same model content").unwrap();
+
+    // embed_and_store already recorded the fake embedder's identity; asking
+    // again with the exact same identity must report no mismatch.
+    let info = embedding_mismatch_info(&conn, &embedder.identity()).unwrap();
+    assert!(info.is_none());
+
+    let cleared = reconcile_embedding_meta(&conn, &embedder.identity()).unwrap();
+    assert!(cleared.is_none());
+    assert_eq!(chunk_count(&conn, &id), 1, "nothing was cleared");
+}
+
+#[test]
+fn a_changed_model_name_is_detected() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    mark_embedding_meta_current(&conn, &identity("ollama", "old-model", 384)).unwrap();
+
+    let info = embedding_mismatch_info(&conn, &identity("ollama", "new-model", 384))
+        .unwrap()
+        .expect("a different model name must be reported as a mismatch");
+
+    assert_eq!(info.stored.model, "old-model");
+    assert_eq!(info.current.model, "new-model");
+}
+
+#[test]
+fn a_changed_dimension_is_detected() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    mark_embedding_meta_current(&conn, &identity("ollama", "nomic-embed-text", 384)).unwrap();
+
+    let info = embedding_mismatch_info(&conn, &identity("ollama", "nomic-embed-text", 768))
+        .unwrap()
+        .expect("a different dimension must be reported as a mismatch");
+
+    assert_eq!(info.stored.dim, 384);
+    assert_eq!(info.current.dim, 768);
+}
+
+#[test]
+fn a_changed_backend_is_detected() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    mark_embedding_meta_current(&conn, &identity("ollama", "nomic-embed-text", 384)).unwrap();
+
+    let info = embedding_mismatch_info(&conn, &identity("onnx", "nomic-embed-text", 384))
+        .unwrap()
+        .expect("a different backend must be reported as a mismatch");
+
+    assert_eq!(info.stored.backend, "ollama");
+    assert_eq!(info.current.backend, "onnx");
+}
+
+#[test]
+fn a_detected_mismatch_clears_every_stored_vector_and_chunk() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "stale model content");
+    let old_embedder = FakeEmbedder::new(2).with("stale model content", vec![1.0, 0.0]);
+    embed_and_store(&conn, &old_embedder, &id, "stale model content").unwrap();
+    assert_eq!(chunk_count(&conn, &id), 1);
+
+    let new_identity = identity("ollama", "a-different-model", 2);
+    let cleared = reconcile_embedding_meta(&conn, &new_identity)
+        .unwrap()
+        .expect("the fake embedder's identity no longer matches new_identity");
+
+    assert_eq!(cleared.stored.model, "fake-model");
+    assert_eq!(cleared.current.model, "a-different-model");
+    assert_eq!(chunk_count(&conn, &id), 0, "vec_chunks must be cleared");
+    let remaining_vectors: i64 = conn
+        .query_row("SELECT count(*) FROM vec_embeddings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining_vectors, 0, "vec_embeddings must be cleared too");
+}
+
+#[test]
+fn reconcile_leaves_the_meta_record_stale_until_a_real_reembed() {
+    // Deliberately not updated by reconcile itself -- only a real
+    // (re-)embed clears the flag, so the mismatch stays visible across
+    // every open/connection until that happens, matching the reference.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    mark_embedding_meta_current(&conn, &identity("ollama", "old-model", 384)).unwrap();
+
+    let current = identity("ollama", "new-model", 384);
+    reconcile_embedding_meta(&conn, &current).unwrap();
+
+    let info = embedding_mismatch_info(&conn, &current).unwrap();
+    assert!(
+        info.is_some(),
+        "the mismatch must still be flagged after reconciling"
+    );
+    assert_eq!(info.unwrap().stored.model, "old-model");
+}
+
+#[test]
+fn a_real_reembed_after_a_mismatch_clears_the_flag() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "content to re-embed");
+    mark_embedding_meta_current(&conn, &identity("ollama", "old-model", 2)).unwrap();
+
+    let embedder = FakeEmbedder::new(2).with("content to re-embed", vec![1.0, 0.0]);
+    reconcile_embedding_meta(&conn, &embedder.identity()).unwrap();
+    assert!(embedding_mismatch_info(&conn, &embedder.identity())
+        .unwrap()
+        .is_some());
+
+    embed_and_store(&conn, &embedder, &id, "content to re-embed").unwrap();
+
+    assert!(
+        embedding_mismatch_info(&conn, &embedder.identity())
+            .unwrap()
+            .is_none(),
+        "re-embedding under the fake embedder's own identity clears the mismatch"
+    );
+}
+
+#[test]
+fn embedding_a_memory_records_the_embedders_identity_in_embedding_meta() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "quokkas");
+    let embedder = FakeEmbedder::new(3).with("quokkas", vec![1.0, 0.0, 0.0]);
+
+    embed_and_store(&conn, &embedder, &id, "quokkas").unwrap();
+
+    let recorded: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM embedding_meta ORDER BY key")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert_eq!(
+        recorded,
+        vec![
+            ("backend".to_string(), "fake".to_string()),
+            ("dim".to_string(), "3".to_string()),
+            ("model".to_string(), "fake-model".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn embedding_blank_content_does_not_record_embedding_meta() {
+    // No chunks were actually stored, so there is nothing to claim
+    // responsibility for.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "placeholder");
+    let embedder = FakeEmbedder::new(2);
+
+    embed_and_store(&conn, &embedder, &id, "   ").unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM embedding_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }

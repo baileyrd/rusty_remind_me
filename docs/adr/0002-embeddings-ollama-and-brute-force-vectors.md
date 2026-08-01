@@ -168,3 +168,54 @@ serve below `ANN_MIN_CHUNKS`.
 - Should ONNX-in-process, ANN, reranking, or query expansion ever be wanted,
   each is its own decision and its own ADR, not a quiet extension of this
   one.
+
+## Addendum: embedding-model versioning and auto-clear (#96)
+
+The reference (`67570ce`) records which model produced `memories_vec`'s
+vectors in `embedding_meta` (`key`/`value`/`updated_at`, keyed on `model`,
+`dim`, `backend`), checks it against the configured model at every startup
+(`_reconcile_embedding_meta`), and on a mismatch clears
+`memories_vec`/`vec_chunks` — recreating `memories_vec` at the new
+dimension, since a `vec0` virtual table's column type bakes the dimension
+into its `CREATE VIRTUAL TABLE` statement — plus its on-disk ANN index, so
+every memory falls back to the existing "missing embeddings" path instead of
+silently serving results computed against the wrong embedding space.
+`embedding_meta` is only updated once vectors are actually rewritten, not
+merely inferred from config, so the mismatch stays flagged across every
+connection until a real reindex happens.
+
+This crate's schema already carries the same `embedding_meta` table
+(schema-parity boilerplate, generated verbatim like the rest of
+`schema_tables.sql`) but nothing read or wrote it until now. The mechanism
+above is ported with two adaptations, both consequences of decisions this
+ADR already made:
+
+- **No table recreation on a dimension change.** `vec_embeddings` (this
+  crate's stand-in for `memories_vec`, decided above) is a plain `BLOB`
+  column with the dimension inferred from `len(bytes) / 4` at read time, not
+  baked into the column type the way `vec0 USING vec0(embedding
+  float[{dim}])` is. A dimension change therefore needs no `DROP`/`CREATE`;
+  clearing rows is the whole story. `crate::vectors::reconcile_embedding_meta`
+  deletes from `vec_embeddings` before `vec_chunks` (the reverse of the
+  reference's order) because this crate's `vec_embeddings.vec_rowid` has a
+  real foreign key onto `vec_chunks.vec_rowid` — the reference has no such
+  constraint between `memories_vec` and `vec_chunks`, they are only joined by
+  convention.
+- **No ANN index to invalidate.** This ADR scoped ANN, reranking, and query
+  expansion out entirely (see "ANN" above) — brute-force cosine scan is the
+  only search path this crate has, so there is no on-disk index that could
+  go stale in the first place.
+
+Identity is the same triple the reference uses — backend, model, dimension —
+but sourced from `Embedder::identity()` (a new trait method) rather than
+three separate config globals: this crate's only real backend is Ollama, and
+tying the recorded identity to the actual embedder instance that wrote a
+batch of vectors (rather than to whatever the environment happens to say
+right now) is what keeps `mark_embedding_meta_current` accurate under a
+test's injected fake embedder, exactly as much as under the real one. The
+startup check itself (`db::schema::initialize_schema`) still reads
+`embedder::resolve_embedder()` — config only, no network probe — matching
+the reference's own check. When no backend is configured at all
+(`REMIND_ME_EMBEDDING_BACKEND` unset — the default, unlike the reference's
+always-on ONNX default), the check is skipped outright: nothing was written
+by this process either, so there is nothing meaningful to compare against.

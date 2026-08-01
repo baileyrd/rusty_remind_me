@@ -1,4 +1,5 @@
 use crate::db::migrations;
+use crate::embedder::Embedder as _;
 use crate::vitality;
 use rusqlite::{Connection, Result};
 
@@ -29,6 +30,17 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     // docs/adr/0002-embeddings-ollama-and-brute-force-vectors.md for why it
     // is a plain table rather than `sqlite-vec`'s `vec0`.
     crate::vectors::ensure_schema(conn)?;
+
+    // Embedding-model versioning (#96): detect a changed
+    // REMIND_ME_EMBEDDING_BACKEND/OLLAMA_EMBED_MODEL/EMBEDDING_DIM at every
+    // open and clear now-invalid vectors -- the same "check at startup"
+    // timing the reference uses. `resolve_embedder` is config-only (no
+    // network probe), matching what the reference's own check reads. `None`
+    // means nothing is configured to embed with, so there is nothing to
+    // compare against and nothing was written by this process either.
+    if let Some(embedder) = crate::embedder::resolve_embedder() {
+        crate::vectors::reconcile_embedding_meta(conn, &embedder.identity())?;
+    }
 
     // Every outbox trigger (memories and the graph tables alike) is gated on
     // sync_flags.sync_enabled -- align it with the current configuration on
