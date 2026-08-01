@@ -2,6 +2,38 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-01 — Query-contextual feedback is applied at search time (#94)
+
+### Fixed
+- **`remind_me_feedback`'s query-contextual mode was write-only.**
+  `record_feedback` already stored `memory_feedback` rows with the query
+  that prompted them, but nothing ever read them back — a down-voted
+  result for a specific query came back unchanged on a repeat of that same
+  query. Global `base_weight` demotion (the other feedback mode) was
+  unaffected and worked correctly the whole time.
+
+### Added
+- **`crates/remind_me_core/src/vitality.rs`**: `contextual_feedback_adjustment`
+  and `apply_feedback_adjustment`, porting the reference's
+  `vitality.py` functions of the same name. Per candidate, Jaccard
+  similarity between the current query and each stored feedback query is
+  computed; matches below `FEEDBACK_SIMILARITY_THRESHOLD` (0.3) are
+  ignored, matches at or above it contribute `±magnitude * similarity`
+  (helpful/unhelpful), summed and clamped to `±FEEDBACK_ADJUSTMENT_CAP`
+  (0.4).
+- **`crates/remind_me_core/src/db/queries.rs::search_memories`** now calls
+  `apply_feedback_adjustment` right after RRF fusion and before truncating
+  to `limit`, applying the adjustment multiplicatively to `score` and
+  re-sorting — the same pipeline position the reference uses.
+- **`MemorySearchResult` gained `feedback_adjustment: Option<f64>`**,
+  `None` unless an adjustment was actually applied, so callers can see when
+  and how much a result's ranking was nudged.
+- Tests: 21 new cases in `crates/remind_me_core/tests/feedback_test.rs`
+  covering the similarity/threshold/cap arithmetic directly, ranking
+  reorder (a lower-ranked result promoted above a higher one), and an
+  end-to-end case through `search_memories` confirming a real query's score
+  moves after feedback is recorded.
+
 ## 2026-07-30 — Live `dashboard`/`embeddings` status, dashboard PID-file liveness (#90)
 
 ### Fixed
