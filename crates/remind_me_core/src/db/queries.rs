@@ -14,8 +14,8 @@ use crate::retrieval::{
     RrfSignals,
 };
 use crate::vitality::{
-    calculate_vitality, get_decay_rate, get_source_prior, get_type_prior, EFFECTIVE_VITALITY_FN,
-    VITALITY_FLOOR,
+    apply_feedback_adjustment, calculate_vitality, get_decay_rate, get_source_prior,
+    get_type_prior, EFFECTIVE_VITALITY_FN, VITALITY_FLOOR,
 };
 use chrono::Utc;
 use rusqlite::types::Value;
@@ -700,7 +700,12 @@ pub fn search_memories(
         semantic_similarity,
     };
 
-    let mut ranked = rank_rrf(keyword_memories, semantic_memories, config, &signals);
+    let ranked = rank_rrf(keyword_memories, semantic_memories, config, &signals);
+
+    // Query-contextual feedback adjustment (issue #94): nudges `score` by
+    // any similarly-worded past feedback before truncating to `limit`, so a
+    // memory boosted from just past the cutoff can still make the page.
+    let mut ranked = apply_feedback_adjustment(conn, &input.query, ranked)?;
     ranked.truncate(input.limit);
 
     let final_results = trim_by_token_budget(ranked, input.token_budget);
