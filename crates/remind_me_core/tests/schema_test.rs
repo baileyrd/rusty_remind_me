@@ -7,6 +7,7 @@
 
 use remind_me_core::db::migrations::SCHEMA_VERSION;
 use remind_me_core::db::queries;
+use remind_me_core::embedder::{EMBEDDING_BACKEND_ENV, EMBEDDING_DIM_ENV, OLLAMA_MODEL_ENV};
 use remind_me_core::sync::{HUB_URL_ENV, NODE_ID_ENV, SYNC_SECRET_ENV};
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
@@ -404,4 +405,212 @@ fn writes_do_not_reach_the_outbox_while_sync_is_unconfigured() {
         .query_row("SELECT count(*) FROM sync_outbox", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Embedding-model versioning at startup (#96)
+// ---------------------------------------------------------------------------
+//
+// `Database::open`'s `initialize_schema` is where the reference's own
+// "check at every startup" happens in this crate. These plant a stale
+// `embedding_meta` row plus a fake stored vector directly via SQL (no real
+// Ollama daemon needed) and reopen the same on-disk database to exercise the
+// actual startup wiring, not just `vectors::reconcile_embedding_meta` in
+// isolation.
+
+fn plant_stale_vector(conn: &Connection, model: &str, dim: usize) {
+    conn.execute(
+        "INSERT INTO memories (id, content, created_at, updated_at) VALUES \
+         ('mem_versioning', 'x', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    let rowid: i64 = conn
+        .query_row(
+            "SELECT rowid FROM memories WHERE id = 'mem_versioning'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO vec_chunks (memory_rowid, chunk_ix) VALUES (?, 0)",
+        [rowid],
+    )
+    .unwrap();
+    let vec_rowid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO vec_embeddings (vec_rowid, embedding) VALUES (?, ?)",
+        rusqlite::params![vec_rowid, vec![0u8; dim * 4]],
+    )
+    .unwrap();
+    for (key, value) in [("backend", "ollama"), ("model", model)] {
+        conn.execute(
+            "INSERT INTO embedding_meta (key, value, updated_at) VALUES (?, ?, '2020-01-01T00:00:00Z')",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO embedding_meta (key, value, updated_at) VALUES ('dim', ?, '2020-01-01T00:00:00Z')",
+        rusqlite::params![dim.to_string()],
+    )
+    .unwrap();
+}
+
+fn stored_vector_counts(conn: &Connection) -> (i64, i64) {
+    let chunks: i64 = conn
+        .query_row("SELECT count(*) FROM vec_chunks", [], |r| r.get(0))
+        .unwrap();
+    let vecs: i64 = conn
+        .query_row("SELECT count(*) FROM vec_embeddings", [], |r| r.get(0))
+        .unwrap();
+    (chunks, vecs)
+}
+
+#[test]
+fn reopening_with_an_unchanged_ollama_model_leaves_stored_vectors_alone() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDb::new("embedding_versioning_match");
+    std::env::set_var(EMBEDDING_BACKEND_ENV, "ollama");
+    std::env::set_var(OLLAMA_MODEL_ENV, "nomic-embed-text");
+    std::env::set_var(EMBEDDING_DIM_ENV, "4");
+
+    {
+        let db = Database::open(&tmp.0).unwrap();
+        plant_stale_vector(&db.conn(), "nomic-embed-text", 4);
+    }
+
+    // Reopening under the exact same configuration must not touch anything.
+    let db = Database::open(&tmp.0).unwrap();
+    assert_eq!(stored_vector_counts(&db.conn()), (1, 1));
+
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    std::env::remove_var(OLLAMA_MODEL_ENV);
+    std::env::remove_var(EMBEDDING_DIM_ENV);
+}
+
+#[test]
+fn reopening_with_a_changed_ollama_model_clears_stored_vectors() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDb::new("embedding_versioning_model_change");
+    std::env::set_var(EMBEDDING_BACKEND_ENV, "ollama");
+    std::env::set_var(OLLAMA_MODEL_ENV, "old-model");
+    std::env::set_var(EMBEDDING_DIM_ENV, "4");
+
+    {
+        let db = Database::open(&tmp.0).unwrap();
+        plant_stale_vector(&db.conn(), "old-model", 4);
+    }
+
+    std::env::set_var(OLLAMA_MODEL_ENV, "new-model");
+    let db = Database::open(&tmp.0).unwrap();
+    assert_eq!(
+        stored_vector_counts(&db.conn()),
+        (0, 0),
+        "a changed REMIND_ME_OLLAMA_EMBED_MODEL must clear the stale vector on open"
+    );
+
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    std::env::remove_var(OLLAMA_MODEL_ENV);
+    std::env::remove_var(EMBEDDING_DIM_ENV);
+}
+
+#[test]
+fn reopening_with_a_changed_embedding_dimension_clears_stored_vectors() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDb::new("embedding_versioning_dim_change");
+    std::env::set_var(EMBEDDING_BACKEND_ENV, "ollama");
+    std::env::set_var(OLLAMA_MODEL_ENV, "nomic-embed-text");
+    std::env::set_var(EMBEDDING_DIM_ENV, "4");
+
+    {
+        let db = Database::open(&tmp.0).unwrap();
+        plant_stale_vector(&db.conn(), "nomic-embed-text", 4);
+    }
+
+    std::env::set_var(EMBEDDING_DIM_ENV, "8");
+    let db = Database::open(&tmp.0).unwrap();
+    assert_eq!(
+        stored_vector_counts(&db.conn()),
+        (0, 0),
+        "a changed REMIND_ME_EMBEDDING_DIM must clear the stale vector on open"
+    );
+
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    std::env::remove_var(OLLAMA_MODEL_ENV);
+    std::env::remove_var(EMBEDDING_DIM_ENV);
+}
+
+#[test]
+fn a_first_ever_open_with_no_prior_embedding_meta_does_not_touch_vec_chunks() {
+    // No embedding_meta recorded yet: nothing to compare against, so a fresh
+    // database (or one predating this feature) must not spuriously clear
+    // anything a still-earlier write may have put in vec_chunks directly
+    // (as opposed to through embed_and_store, which would have recorded its
+    // own identity already).
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDb::new("embedding_versioning_first_run");
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    std::env::remove_var(OLLAMA_MODEL_ENV);
+    std::env::remove_var(EMBEDDING_DIM_ENV);
+
+    {
+        let conn = Connection::open(&tmp.0).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            INSERT INTO memories (id, content, created_at, updated_at) VALUES ('mem_x', 'x', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');
+            ",
+        )
+        .unwrap();
+    }
+
+    std::env::set_var(EMBEDDING_BACKEND_ENV, "ollama");
+    std::env::set_var(OLLAMA_MODEL_ENV, "nomic-embed-text");
+    std::env::set_var(EMBEDDING_DIM_ENV, "4");
+    // This open both creates vec_chunks/vec_embeddings for the first time
+    // (they did not exist in the hand-built database above) and runs the
+    // startup reconcile -- there is nothing in either table to clear, and
+    // no embedding_meta row to false-positive against.
+    let db = Database::open(&tmp.0).unwrap();
+    assert_eq!(stored_vector_counts(&db.conn()), (0, 0));
+    let meta_rows: i64 = db
+        .conn()
+        .query_row("SELECT count(*) FROM embedding_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        meta_rows, 0,
+        "the startup check itself must not write embedding_meta -- only a real embed does"
+    );
+
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    std::env::remove_var(OLLAMA_MODEL_ENV);
+    std::env::remove_var(EMBEDDING_DIM_ENV);
+}
+
+#[test]
+fn reopening_with_the_embedding_backend_disabled_never_clears_stored_vectors() {
+    // This crate's own adaptation (ADR-0002): unlike the reference, whose
+    // ONNX backend is on by default, embeddings here are off unless
+    // REMIND_ME_EMBEDDING_BACKEND=ollama is set. With it unset, nothing was
+    // written by this process either, so the startup check is skipped
+    // entirely rather than comparing against a meaningless "current"
+    // identity.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDb::new("embedding_versioning_backend_disabled");
+    std::env::set_var(EMBEDDING_BACKEND_ENV, "ollama");
+    std::env::set_var(OLLAMA_MODEL_ENV, "nomic-embed-text");
+    std::env::set_var(EMBEDDING_DIM_ENV, "4");
+
+    {
+        let db = Database::open(&tmp.0).unwrap();
+        plant_stale_vector(&db.conn(), "nomic-embed-text", 4);
+    }
+
+    std::env::remove_var(EMBEDDING_BACKEND_ENV);
+    let db = Database::open(&tmp.0).unwrap();
+    assert_eq!(stored_vector_counts(&db.conn()), (1, 1));
+
+    std::env::remove_var(OLLAMA_MODEL_ENV);
+    std::env::remove_var(EMBEDDING_DIM_ENV);
 }

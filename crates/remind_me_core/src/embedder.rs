@@ -109,6 +109,24 @@ pub trait Embedder {
 
     /// The dimension this embedder's vectors are expected to have.
     fn dim(&self) -> usize;
+
+    /// The backend/model/dimension triple that identifies which model this
+    /// embedder is, for embedding-model versioning (#96) — recorded in
+    /// `embedding_meta` once vectors are actually written, so a later
+    /// mismatch against whatever is currently configured can be detected.
+    /// Matches how the reference identifies "the model" for the same
+    /// purpose: its `EMBEDDING_BACKEND`/`EMBEDDING_MODEL`/`EMBEDDING_DIM`
+    /// triple.
+    fn identity(&self) -> EmbeddingIdentity;
+}
+
+/// Which backend, model, and dimension produced (or would produce) a given
+/// batch of vectors — see [`Embedder::identity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingIdentity {
+    pub backend: String,
+    pub model: String,
+    pub dim: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +361,14 @@ impl Embedder for OllamaEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+
+    fn identity(&self) -> EmbeddingIdentity {
+        EmbeddingIdentity {
+            backend: "ollama".to_string(),
+            model: self.model.clone(),
+            dim: self.dim,
+        }
     }
 }
 

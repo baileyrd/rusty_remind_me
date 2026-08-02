@@ -22,8 +22,8 @@
 
 use crate::db::queries::{parse_memory_row, MEMORY_COLUMNS};
 use crate::embedder::{
-    chunk_text, EmbedError, EmbedRole, Embedder, EMBED_CHUNK_CHARS, EMBED_CHUNK_OVERLAP,
-    EMBED_MAX_CHUNKS,
+    chunk_text, EmbedError, EmbedRole, Embedder, EmbeddingIdentity, EMBED_CHUNK_CHARS,
+    EMBED_CHUNK_OVERLAP, EMBED_MAX_CHUNKS,
 };
 use crate::models::Memory;
 use rusqlite::{params, params_from_iter, Connection, Result as SqlResult};
@@ -181,7 +181,15 @@ pub fn embed_and_store(
         return Ok(0);
     }
     let vectors = embedder.embed(&chunks, EmbedRole::Passage)?;
-    Ok(store_vectors(conn, memory_rowid, &vectors)?)
+    let stored = store_vectors(conn, memory_rowid, &vectors)?;
+    if stored > 0 {
+        // Best-effort, matching the reference's own
+        // `_mark_embedding_meta_current`: this is bookkeeping for the next
+        // mismatch check, never a reason to fail a write that already
+        // succeeded.
+        let _ = mark_embedding_meta_current(conn, &embedder.identity());
+    }
+    Ok(stored)
 }
 
 fn get_memory_by_rowid(conn: &Connection, rowid: i64) -> SqlResult<Option<Memory>> {
@@ -401,4 +409,146 @@ pub fn reindex_with(
     }
 
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Embedding-model versioning (#96)
+// ---------------------------------------------------------------------------
+//
+// The reference (`67570ce`) records which model/dimension/backend produced
+// `memories_vec`'s vectors in an `embedding_meta` table, checks it against
+// the configured model at every startup (`_reconcile_embedding_meta`), and
+// on a mismatch clears `memories_vec`/`vec_chunks` (recreating `memories_vec`
+// at the new dimension, since `vec0`'s column type bakes the dimension in)
+// plus its on-disk ANN index, so every memory falls back to the existing
+// "missing embeddings" path instead of silently serving results computed
+// against the wrong embedding space.
+//
+// This crate's own `vec_embeddings` (ADR-0002) is a plain `BLOB` column, not
+// a `vec0` virtual table, so a dimension change needs no `DROP`/`CREATE` —
+// clearing rows is the whole story. There is also no on-disk ANN index here
+// (ADR-0002 scopes that out entirely): brute-force cosine scan is the only
+// search path, so nothing beyond `vec_embeddings`/`vec_chunks` needs
+// invalidating. See ADR-0002's addendum for the full adaptation writeup.
+
+/// Read the model/dimension/backend recorded for the vectors currently in
+/// `vec_embeddings`, if any.
+///
+/// `None` covers both "never recorded" (a fresh store, or one written before
+/// this feature existed) and a partially-written record (only some of the
+/// three keys present) — either way there is nothing complete to compare
+/// against, so callers must treat this the same as "nothing recorded" rather
+/// than guess at the missing piece.
+fn read_embedding_meta(conn: &Connection) -> SqlResult<Option<EmbeddingIdentity>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM embedding_meta")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<SqlResult<_>>()?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let stored: std::collections::HashMap<String, String> = rows.into_iter().collect();
+    let (Some(backend), Some(model), Some(dim)) = (
+        stored.get("backend"),
+        stored.get("model"),
+        stored.get("dim"),
+    ) else {
+        return Ok(None);
+    };
+    let Ok(dim) = dim.parse::<usize>() else {
+        return Ok(None);
+    };
+    Ok(Some(EmbeddingIdentity {
+        backend: backend.clone(),
+        model: model.clone(),
+        dim,
+    }))
+}
+
+/// Record that the vectors in `vec_embeddings` were (just) produced by
+/// `identity` — called from [`embed_and_store`] after a batch of vectors is
+/// successfully written, not merely inferred from the running config, so the
+/// mismatch check below stays accurate even mid-reindex (a reindex that dies
+/// partway through has already marked every memory it did finish as
+/// current).
+pub fn mark_embedding_meta_current(
+    conn: &Connection,
+    identity: &EmbeddingIdentity,
+) -> SqlResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    for (key, value) in [
+        ("backend", identity.backend.clone()),
+        ("model", identity.model.clone()),
+        ("dim", identity.dim.to_string()),
+    ] {
+        conn.execute(
+            "INSERT INTO embedding_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// What changed, when a stored/current embedding-identity mismatch is found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingMismatch {
+    pub stored: EmbeddingIdentity,
+    pub current: EmbeddingIdentity,
+}
+
+/// Read-only check: does the model/dimension/backend recorded for the
+/// currently-stored vectors differ from `current`?
+///
+/// Returns `None` when nothing is recorded yet (see [`read_embedding_meta`])
+/// or when the recorded identity matches `current` — in both cases there is
+/// nothing to clear. This is what keeps a first-ever run (nothing recorded)
+/// from being treated as a mismatch: there is no "old" model to have
+/// changed away from.
+pub fn embedding_mismatch_info(
+    conn: &Connection,
+    current: &EmbeddingIdentity,
+) -> SqlResult<Option<EmbeddingMismatch>> {
+    let Some(stored) = read_embedding_meta(conn)? else {
+        return Ok(None);
+    };
+    if &stored == current {
+        return Ok(None);
+    }
+    Ok(Some(EmbeddingMismatch {
+        stored,
+        current: current.clone(),
+    }))
+}
+
+/// Clear stale vectors when the embedding model/dimension/backend recorded
+/// for them no longer matches `current` — the reference's auto-clear
+/// (`_reconcile_embedding_meta`), adapted to this crate's own
+/// `vec_embeddings` table (see the module-level note above for why no table
+/// recreation or ANN invalidation is needed here).
+///
+/// Deliberately does **not** update `embedding_meta` itself: that only
+/// happens once vectors are actually rewritten
+/// ([`mark_embedding_meta_current`], called from [`embed_and_store`]), so the
+/// mismatch stays flagged until a real reindex happens, not just until the
+/// next call to this function.
+///
+/// Called from [`crate::db::schema::initialize_schema`] on every open, the
+/// same "check at startup" timing the reference uses. A no-op both when
+/// nothing is recorded yet (first-ever run) and when the recorded identity
+/// already matches `current`.
+pub fn reconcile_embedding_meta(
+    conn: &Connection,
+    current: &EmbeddingIdentity,
+) -> SqlResult<Option<EmbeddingMismatch>> {
+    let Some(mismatch) = embedding_mismatch_info(conn, current)? else {
+        return Ok(None);
+    };
+    // Child before parent: `vec_embeddings.vec_rowid` has a (default
+    // RESTRICT) foreign key onto `vec_chunks.vec_rowid`, so clearing
+    // `vec_chunks` first would fail with `foreign_keys=ON` while
+    // `vec_embeddings` rows still reference it.
+    conn.execute("DELETE FROM vec_embeddings", [])?;
+    conn.execute("DELETE FROM vec_chunks", [])?;
+    Ok(Some(mismatch))
 }

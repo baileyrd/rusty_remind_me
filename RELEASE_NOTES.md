@@ -2,6 +2,28 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-01 — Embedding-model versioning and auto-clear on mismatch (#96)
+
+### Added
+- **`embedding_meta` is now read and written.** The table already existed in
+  the generated schema (schema-parity boilerplate, unused until now) but
+  nothing in this crate ever touched it. `crate::vectors::embed_and_store`
+  now records the backend/model/dimension that produced a memory's vectors
+  (`Embedder::identity()`, a new trait method) after every successful write,
+  matching the reference's own "recorded after a successful (re-)embed, not
+  merely inferred from config" behavior.
+- **A changed `REMIND_ME_EMBEDDING_BACKEND`/`REMIND_ME_OLLAMA_EMBED_MODEL`/
+  `REMIND_ME_EMBEDDING_DIM` is detected at startup** (`db::schema::initialize_schema`,
+  the same "check at every open" timing the reference uses) and clears the
+  now-invalid `vec_embeddings`/`vec_chunks` rows automatically, so a
+  forgotten `remind_me_reindex` after switching models can no longer leave
+  semantic search silently scoring vectors from a different embedding space.
+  A first-ever run with no prior `embedding_meta` state is deliberately a
+  no-op — nothing recorded yet means nothing to have changed away from.
+- See `docs/adr/0002-embeddings-ollama-and-brute-force-vectors.md`'s new
+  addendum for how the reference's `memories_vec`-recreation-on-mismatch and
+  ANN-index-invalidation steps were adapted to this crate's own
+  `vec_embeddings` table and its lack of an ANN index.
 ## 2026-08-01 — Pre-migration snapshot guard (#95)
 
 ### Added
