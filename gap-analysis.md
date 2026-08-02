@@ -1,176 +1,217 @@
 # Gap Analysis — `rusty_remind_me` vs. `remind_me`
 
-**Run date:** 2026-07-29
-**Target:** `baileyrd/rusty_remind_me` @ `de891ed` ("Initial commit of Rust migration"), 1,436 LOC Rust
-**Reference (pinned):** `baileyrd/remind_me` @ `remind-me-mcp` **v1.19.0**, 21,261 LOC Python
-**Assessment path:** `spec` — the two codebases share no structurally diffable
-surface (Python package vs. Cargo workspace), so `cargo public-api` does not
-apply. Candidates were extracted by reading the reference's declared contracts
-directly: `@mcp.tool(name=...)` registrations, Starlette route table, and the
-`db.py` schema ladder.
+**Run date:** 2026-08-02
+**Target:** `baileyrd/rusty_remind_me` @ `ddb92b0` (post-#99), 46,374 LOC Rust, 5 crates
+**Reference (pinned):** `baileyrd/remind_me` @ `9ca9844` — **v1.54.0**, 79,893 LOC Python
+**Previous run:** 2026-07-29 against target `de891ed` / reference v1.19.0. That
+analysis is superseded in full — every one of its four blockers is resolved and
+its entire gap table has been worked.
 
-**Scope definition:** `rusty_remind_me` has no `ROADMAP.md`. The closest thing
-to a hand-curated scope doc is `ARCHITECTURE.md` §1, Tenet 3:
+**Assessment path:** `spec`. The two codebases share no structurally diffable
+surface (Python package vs. Cargo workspace), so `cargo public-api` does not
+apply. Candidates were extracted from the reference's declared contracts:
+`@mcp.tool(name=…)` registrations, the Starlette route table, the pydantic input
+models, and — for the schema — by *executing* both schema definitions into real
+SQLite databases and diffing `sqlite_master` object-by-object rather than
+comparing table names by eye.
+
+**Scope definition:** `rusty_remind_me` still has no `ROADMAP.md`.
+`ARCHITECTURE.md` §1 Tenet 3 remains the hand-curated scope statement and is
+treated as the definition of parity for this run:
 
 > **Data Parity with `remind-me`**: Identical SQLite Version 19 schema and JSON
 > tool signatures for drop-in interoperability.
 
-That tenet is treated as the definition of parity for this run. `remind_me`'s
-`BACKLOG.md` is the *reference's own* improvement backlog, not a roadmap for the
-port, and is deliberately **not** used as the scope source.
+Note that the tenet's own version number is now stale — the reference is at
+schema **v27**. Updating that sentence is part of gap **S1** below.
+
+`remind_me`'s `BACKLOG.md` is the reference's own improvement backlog, not a
+roadmap for the port, and is again deliberately **not** used as the scope source.
 
 ---
 
-## Blockers (read before step 2)
+## Status of the previous run's blockers
 
-These are not parity gaps. They are conditions that prevent the parity-loop's
-implement→PR→green-CI→merge cycle from running at all.
+All four are cleared; the autonomous half of the loop can run this time.
 
-| # | Blocker | Evidence | Effect on the loop |
-| --- | --- | --- | --- |
-| **B1** | **The workspace does not build.** Every crate depends on `../Rusty_Mill/*` path crates that do not exist here and are not published to crates.io. | `cargo check --workspace` → `failed to read /home/user/Rusty_Mill/rusty_db/rusty_db/Cargo.toml`. No `source =` line for any `rusty_*` entry in `Cargo.lock`. | Step 3.6's local gate (`cargo build && test && clippy && fmt`) cannot run. No change can be verified before push. |
-| **B2** | **The Rusty Mill crates are separate repos, not a monorepo.** `Cargo.toml` expects `../Rusty_Mill/rusty_db/rusty_db`; upstream is 40+ standalone repos (`baileyrd/rusty_db`, `baileyrd/rusty_json`, …). | `list_repos` — no `Rusty_Mill` monorepo exists; `Rusty-Mill/.github` is an org profile repo only. | Cloning siblings will not satisfy the declared paths without a manifest change. |
-| **B3** | **No CI.** No `.github/` directory; zero Actions workflows. | `actions_list` → `total_count: 0`. | "Merge on green CI" has nothing to gate on. `watch_and_merge.sh` would merge unconditionally. |
-| **B4** | **No `RELEASE_NOTES.md`, no issue/PR templates, no labels.** | Repo root listing; `list_issues` → 0 issues. | Steps 2 and 3.7 have no conventions to follow. |
+| # | Previous blocker | Now |
+| --- | --- | --- |
+| B1 | Workspace did not build (missing `../Rusty_Mill/*` path crates) | **Resolved.** `cargo check --workspace` is clean. The Rusty Mill path dependencies were removed from the manifest. |
+| B2 | Rusty Mill expected as a monorepo | **Resolved** by the same manifest change. |
+| B3 | No CI | **Resolved.** `.github/workflows/ci.yml` runs build / test / clippy / fmt with `RUSTFLAGS: -D warnings` on push and PR to `main`. |
+| B4 | No `RELEASE_NOTES.md`, templates, labels | **Resolved.** `RELEASE_NOTES.md` (91 KB), `CONTRIBUTING.md`, `.github/`, and 12 ADRs under `docs/adr/` are all present. |
 
-**B1–B3 together mean the autonomous half of this skill cannot run as
-specified.** The assessment below is complete and actionable regardless.
+Open `parity-gap` issues at the start of this run: **0**. The previous gap list
+was worked to completion (PRs #28 → #99).
 
 ---
 
 ## Headline numbers
 
-| Surface | `remind_me` v1.19.0 | `rusty_remind_me` | Covered |
+| Surface | `remind_me` v1.54.0 | `rusty_remind_me` | Covered |
 | --- | --- | --- | --- |
-| MCP tools | 43 | 7 | **16%** |
-| HTTP API routes | 21 | 4 | **19%** |
-| SQLite tables | 22 | 7 | **32%** |
-| Schema migration ladder | 19 versioned steps | none (stamps `user_version = 19` directly) | **0%** |
+| MCP tools | 61 | 44 (43 shared + 1 target-only) | **70%** |
+| HTTP API routes | 25 | 21 (20 shared + 1 target-only) | **80%** |
+| Peer-server routes | 7 | 6 | **86%** |
+| SQLite tables | 30 | 25 | **83%** |
+| SQLite indexes | 36 | 30 | **83%** |
+| SQLite triggers | 15 | 15 | **100%** (one body differs — see S4) |
+| Schema version | 27 | 19 | **8 steps behind** |
+| Import formats | 13 extensions | 5 | **38%** |
+
+The port went from 16% to 70% tool coverage in the last run. What remains is
+almost entirely *new* reference work landed since v1.19.0 — reminders,
+saved searches, edit history, analytics, and the hub — rather than leftovers.
 
 ---
 
 ## Gap table
 
-### Correctness — schema parity claim
+### Correctness — the schema-parity claim, again
 
-| Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `PRAGMA user_version = 19` stamp | fn (existing) | spec | both | `db.py:278` `_SCHEMA_VERSION = 19`, `db.py:316` migration ladder | **yes** | M | **Highest severity.** `schema.rs:104` stamps `user_version = 19` after creating only 7 of the reference's 22 tables. A DB created by `rusty_remind_me` therefore *claims* to be fully migrated; if `remind_me` opens it, `current_version < _SCHEMA_VERSION` is false and every migration is skipped, leaving 15 tables absent. This actively breaks the "drop-in interoperability" tenet rather than merely falling short of it. Fix is either an honest lower version stamp or a real migration ladder — both change existing behavior. |
+| ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **S1** | `SCHEMA_VERSION = 19` | const (existing) | spec | both | `db.py:462` `_SCHEMA_VERSION = 27` | **yes** | M | The stamp is *honest* now — the generated schema really is v19 — so this is no longer the "actively breaks interop" bug the last run flagged. But it is 8 steps stale. A DB created by `rusty_remind_me` opens in `remind_me` and gets migrated 19→27 correctly; the reverse direction is the problem — a v27 DB opened by this crate hits the reconciler with 5 tables and 2 `memories` columns it does not know about. Fix is to regenerate `schema_*.sql` from a v27 reference dump and bump the constant, which changes existing DB-creation behavior. Also update `ARCHITECTURE.md` Tenet 3's "Version 19" text. |
 
-### Schema — missing tables
+### Schema — missing objects (exact, from an executed diff)
 
-| Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `memory_tags` | table | spec | both | `db.py` | no | S | Normalized tag index; target stores tags only as a JSON blob column. |
-| `memory_feedback` | table | spec | both | `db.py` | no | S | Backs `remind_me_feedback`. |
-| `memory_associations` | table | spec | both | `db.py` | no | S | Co-retrieval graph; backs neighbor expansion in search. |
-| `memories_vec`, `vec_chunks`, `embedding_meta` | table | spec | both | `db.py` | no | M | Vector-search storage (`sqlite-vec`). Blocked on the semantic stack below. |
-| `wiki_links`, `wiki_fts`, `wiki_meta` | table | spec | both | `db.py` | no | M | Wikilink graph, wiki FTS index, compile watermark. Backs `wiki_search` / `wiki_compile`. |
-| `sync_outbox`, `sync_sends`, `sync_log`, `sync_flags` | table | spec | both | `db.py` | no | L | Multi-machine sync. Includes the outbox trigger set (`HY-03`). Split before filing. |
-| `dbs_imports`, `mempalace_imports` | table | spec | both | `db.py` | no | S | Import dedup ledgers (`chat_imports` already exists in target). |
+Both schemas were materialized into SQLite and diffed via `sqlite_master`.
+These are the complete differences; nothing else diverges.
 
-### MCP tools — 36 missing of 43
+| ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **S2** | `memories.remind_at`, `idx_memories_remind_at`, `reminder_deliveries`, `idx_reminder_deliveries_memory_remind_at` | column + table + index | spec | both | `db.py` `_migrate_v22_to_v23` (issue #179) | no | S | Backs the whole reminders subsystem (T1). |
+| **S3** | `memories.sensitive` | column | spec | both | `db.py` `_migrate_v25_to_v26` (issue #195) | no | S | A "don't surface by default" flag, explicitly *not* access control. Also adds `include_sensitive` / `sensitive` to three tool signatures — see T9. |
+| **S4** | `sync_log.last_pull_at`, `.last_push_at`, `.last_attempt_at` | columns | spec | both | `db.py` `_migrate_v19_to_v20` (SY-18) | no | S | Splits the sync cursor from the liveness clock. The target currently overloads `last_pull`/`last_push` for both, so a stalled peer is indistinguishable from an idle one. Prerequisite for `remind_me_sync_status` (T5). |
+| **S5** | `memories_outbox_au` trigger body | trigger (existing) | spec | both | `db.py` `_migrate_v21_to_v22` (issue #147) | no | S | The reference guards the trigger with `AND NEW.updated_at IS NOT OLD.updated_at`; the target's fires on every update. Because the target *does* record access (`accessed_at`/`access_count` writes, PR #42), every memory read currently enqueues a sync-outbox row. This is a live defect, not just a missing feature: it inflates the outbox and pushes no-op updates to peers. Smallest high-value fix in this list. |
+| **S6** | `idx_memories_normalized_from` | index | spec | both | `db.py` `_migrate_v20_to_v21` | no | S | Indexes the `normalized_from` JSON pointer. Pure performance; the target's normalize tools already write the pointer. |
+| **S7** | `memory_revisions`, `idx_memory_revisions_memory_edited` | table + index | spec | both | `db.py` `_migrate_v23_to_v24` (issue #187) | no | S | Backs `remind_me_history` / `remind_me_revert` (T4). |
+| **S8** | `analytics_snapshots`, `idx_analytics_snapshots_captured_at` | table + index | spec | both | `db.py` `_migrate_v24_to_v25` (issue #186) | no | S | Backs the analytics trend route (T7 / A1). |
+| **S9** | `saved_searches`, `saved_search_seen_memories`, `idx_saved_search_seen_memories_search_memory` | tables + index | spec | both | `db.py` `_migrate_v26_to_v27` (issue #194) | no | S | Backs the four saved-search tools (T3). |
+| **S10** | outbox payload fields `remind_at`, `sensitive` | trigger (existing) | spec | both | `db.py` `_outbox_payload_sql` | no | S | Follows S2/S3 — the `memories_outbox_ai`/`au` payloads must carry the new columns or synced peers silently drop them. Do this in the same change as S2/S3, not separately. |
 
-Grouped for issue sizing; each group is one issue unless noted.
+### MCP tools — 18 missing of 61
 
-| Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `remind_me_list`, `remind_me_update`, `remind_me_delete` | tool | spec | both | `tools/crud.py` | no | M | **Start here.** Completes basic CRUD; target has only add/get. Needs soft-delete via `deleted_at` and FTS trigger consistency. Pure addition. |
-| `remind_me_vitality_report` | tool | spec | both | `tools/lifecycle.py` | no | S | Target already has `vitality.rs`; this is the reporting surface over it. Mind `DI-04` (open-ended top bucket) — the reference already fixed that bug, so port the fixed behavior. |
-| `remind_me_reclassify`, `remind_me_reclassify_batch` | tool | spec | both | `tools/lifecycle.py` | no | M | Category reassignment; recomputes decay rate + vitality on write. |
-| `remind_me_feedback` | tool | spec | both | `tools/search.py` | no | S | Depends on `memory_feedback` table. |
-| `remind_me_entity_traverse` | tool | spec | both | `tools/entity.py` | no | M | 1-hop relation walk. `entities` / `entity_relations` / `memory_entities` tables already exist in target. |
-| `remind_me_wiki_list`, `remind_me_wiki_delete` | tool | spec | both | `tools/wiki.py` | no | S | Trivial over the existing `wiki_pages` table. |
-| `remind_me_wiki_search` | tool | spec | both | `tools/wiki.py` | no | M | Depends on `wiki_fts`. |
-| `remind_me_wiki_load`, `remind_me_wiki_compile` | tool | spec | both | `tools/wiki.py`, `wiki.py` | no | L | The `FT-08` synthesis layer: files-on-disk are source of truth, DB is a reconcile-from-files cache, two-phase compile with a watermark. Largest single feature here — split into load/reconcile and compile/watermark. |
-| `remind_me_stats` (depth) | tool (existing) | spec | both | `tools/admin.py:322` | no | S | Target returns `{total_memories}` only; reference returns per-category counts, vitality distribution, DB size, embedding coverage. Additive to the response body. |
-| `remind_me_normalize_batch`, `remind_me_normalize_apply` | tool | spec | both | `tools/normalize.py` | no | M | Two-phase propose/apply normalization. |
-| `remind_me_consolidate` | tool | spec | both | `tools/lifecycle.py` | no | L | Near-duplicate merging. Reference infers embedding dim from blob length (`DI-06`) — depends on the semantic stack. |
-| `remind_me_annotate` | tool | spec | both | `tools/capture.py` | no | S | Metadata annotation on an existing memory. |
-| `remind_me_auto_capture`, `remind_me_get_capture` | tool | spec | both | `tools/capture.py` | no | M | Capture-session grouping via `capture_id` (column already present in target schema). |
-| `remind_me_decompose`, `remind_me_decompose_batch`, `remind_me_extract_batch` | tool | spec | both | `tools/capture.py` | no | L | Subject/predicate/object extraction into structured triples. Split into three issues — these are independent handlers despite the shared module. |
-| `remind_me_import_chat`, `remind_me_import_directory` | tool | spec | both | `tools/admin.py`, `importer.py` | no | L | Chat-export and generic document ingestion (`FT-02`). Must honor `IMPORT_ROOTS` path confinement (`SE-02`) — this is a **security-relevant** port, not a mechanical one. |
-| `remind_me_import_mempalace`, `remind_me_import_dbs` | tool | spec | both | `mempalace_import.py`, `dbs_import.py` | no | L | ChromaDB and foreign-SQLite importers. Reasonable candidates for explicit **out-of-scope**. |
-| `remind_me_export_memories` | tool | spec | both | `exporter.py` | no | M | `FT-01` / `FT-06`: JSON/JSONL dump, importer-compatible, including the entity graph. |
-| `remind_me_backup` | tool | spec | both | `backup.py` | no | S | SQLite online-backup snapshot. |
-| `remind_me_reindex` | tool | spec | both | `tools/admin.py:402` | no | M | FTS rebuild; must prune orphaned `vec_chunks` (`DI-01`). |
-| `remind_me_server_status` | tool | spec | both | `tools/admin.py`, `pid.py` | no | M | Requires a PID/lifecycle layer the target has no equivalent of. |
-| `remind_me_check_update`, `remind_me_self_update` | tool | spec | both | `updater.py` | no | M | Git-fetch-based self-update. Needs the `SE-06` opt-out env var. Reasonable **out-of-scope** candidate for a Rust binary. |
-| `remind_me_watch_status` | tool | spec | both | `watcher.py` | no | L | Folder-watch auto-ingest (`FT-03`). |
-| `remind_me_webhook_status` | tool | spec | both | `webhook_server.py` | no | L | Webhook receiver. |
-| `remind_me_list_connectors` | tool | spec | both | `tools/admin.py:227` | no | S | Enumerates configured connectors. |
-| `remind_me_revoke_clients` | tool | spec | both | `oauth.py` | no | L | OAuth client revocation (`FT-07`). Depends on the whole OAuth stack. |
+Grouped for issue sizing. Each group is one issue unless the Notes say otherwise.
 
-### HTTP API — 17 missing of 21, plus a path-prefix mismatch
+| ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **T1** | `remind_me_set_reminder`, `remind_me_list_reminders`, `remind_me_reminders_ics_url` | tool | spec | both | `tools/reminders.py`, `reminders.py`, `scheduler.py`, `notifications.py`, `ics_export.py` (issues #179, #180) | no | L | Time-based reminders: `remind_at` on a memory, a delivery-tracking scheduler loop, optional outbound notification channels, and an iCalendar feed. **Split into three issues** — (a) storage + `set_reminder`/`list_reminders` over S2, (b) the scheduler/delivery loop, (c) ICS export + its route (A2). The notification channels are a likely dependency question. |
+| **T2** | `remind_me_sync_status`, `remind_me_sync_repair`, `remind_me_sync_reconcile`, `remind_me_sync_reconcile_peer` | tool | spec | both | `tools/admin.py:1194–1360` (SY-12, SY-14, issues #215, #216) | no | M | Sync observability and repair over the sync stack the target already has. `sync_status` needs S4. `reconcile`/`reconcile_peer` need the `/count` endpoint (A5). **Split into two issues**: status+repair, then the two reconcile tools. |
+| **T3** | `remind_me_save_search`, `remind_me_list_saved_searches`, `remind_me_run_saved_search`, `remind_me_delete_saved_search` | tool | spec | both | `saved_searches.py`, `tools/saved_searches.py` (issue #194) | no | M | Saved and watched searches; `saved_search_seen_memories` is what makes "watch" report only new hits. Depends on S9. |
+| **T4** | `remind_me_history`, `remind_me_revert` | tool | spec | both | `tools/history.py` (issue #187) | no | M | Per-memory edit history and rollback. Depends on S7. Note the revision row must be written by the *existing* update/reclassify/normalize paths, so this touches more than a new handler. |
+| **T5** | `remind_me_digest` | tool | spec | both | `digest.py` (issue #188) | no | M | Vault digest synthesis over a time window. 372 LOC in the reference. |
+| **T6** | `remind_me_contradiction_candidates` | tool | spec | both | `tools/contradictions.py` | no | M | Surfaces same-subject/same-predicate/different-object triples. The target's `entity.rs:836` already documents this exact contradiction rule for supersession — the detection logic is largely present, the reporting surface is not. |
+| **T7** | `remind_me_recalibrate_candidates` | tool | spec | both | `tools/recalibrate.py` | no | S | Proposes vitality/decay corrections. Smallest of the tool gaps at 126 LOC. |
+| **T8** | `remind_me_undo_import` | tool | spec | both | `tools/admin.py:1040` | no | M | Rolls back an import by `import_id`, removing its memories and tracking rows. The target already has all four import ledgers (`chat_imports`, `dbs_imports`, `mempalace_imports`), so this is additive. |
+| **T9** | `remind_me_api_key` | tool | spec | both | `api_keys.py` (issue #185) | no | M | Named, scope-limited (read vs. read-write) dashboard API keys, stored as SHA-256 hashes in a 0600 JSON file under `MEMORY_DIR`. The target's `remote.rs` already implements the same hash-at-rest discipline for connector tokens, so the conventions exist. **Security-relevant** — port the scope enforcement, not just the issuance. |
+| **T10** | `remind_me_stats` / `remind_me_server_status` (depth) | tool (existing) | spec | both | `tools/admin.py`, `version.py` (issues #207, #209) | no | S | The reference now reports the installed version in both, and records peer versions from the `/health` probe it already makes. Additive to the response bodies. |
 
-| Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `/api/v1/*` prefix | route (existing) | spec | both | `api.py` | **yes** | S | Target serves `/api/v1/memories` and `/api/v1/search`; reference serves `/api/memories` and `/api/memories/search`. Any client written against one 404s on the other. Straight contradiction of the drop-in-interop tenet — changing it breaks the target's existing published contract. |
-| `/api/memories/{id}` (GET/PATCH/DELETE) | route | spec | both | `api.py` | no | M | Per-record REST. |
-| `/api/memories/bulk/{delete,tag,reclassify}` | route | spec | both | `api.py` | no | M | Bulk mutations. |
-| `/api/entities`, `/api/entity`, `/api/entity/traverse` | route | spec | both | `api.py` | no | M | Entity graph over HTTP. |
-| `/api/wiki`, `/api/wiki/{slug}`, `/api/wiki/load`, `/api/wiki/search`, `/api/wiki/status` | route | spec | both | `api.py` | no | L | Wiki over HTTP; follows the wiki tool work. |
-| `/api/export`, `/api/import` | route | spec | both | `api.py` | no | M | Mirrors the export/import tools. Must enforce `IMPORT_ROOTS`. |
-| `/api/vitality` | route | spec | both | `api.py` | no | S | Mirrors `remind_me_vitality_report`. |
-| API auth (bearer + CSRF) | fn | spec | both | `api.py`, `SE-01` | **yes** | M | Reference requires/generates an API key by default and rejects non-JSON `Content-Type` on mutating routes. Target's HTTP server is **fully unauthenticated**. Adding auth changes existing endpoint behavior → breaking. Security-relevant. |
+### Tool signature parity — 4 fields
 
-### Subsystems with no target equivalent at all
+The last run compared tool *names*. This run diffed the pydantic input models
+against the Rust structs field-by-field; these are the only divergences.
 
-Listed for completeness; each is a multi-issue epic, not a single gap.
+| ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **T11** | `MemorySearchInput.include_sensitive`, `MemoryListInput.include_sensitive`, `MemoryAddInput.sensitive` | field | spec | both | `models.py` | no | S | Follows S3. Additive with a `false` default, so no existing caller changes behavior. |
+| **T12** | `MemorySearchInput.strategy` | field | spec | both | `models.py:34` `RetrievalStrategy` | no | S | The target *has* the `RetrievalStrategy` enum (`models.rs:15`) and made the RRF weights configurable in PR #91 — but only via environment variables. The reference exposes it as a per-call parameter with an `AUTO` heuristic router. Wiring the existing enum into the existing input struct is most of the work. |
 
-| Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Semantic / vector search | subsystem | spec | both | `embeddings.py`, `ann_index.py`, `reranker.py`, `query_expansion.py` | no | L | Embeddings, sqlite-vec, HyDE expansion, reranking. Target's `retrieval.rs` declares `w_semantic` and `vec_score` fields that are **never populated** — the scaffolding exists, the implementation does not. Would need an ONNX/embedding stack; **new third-party dependency → stop-and-ask** under the skill's rules. |
-| Multi-machine sync | subsystem | spec | both | `sync.py`, `peer_server.py`, `hub/` | no | L | Outbox/keyset-pagination/echo-suppression. Note reference item `SY-10` (tombstone deletes) is still `todo` upstream — do not port a known-incomplete design without deciding on it first. |
-| OAuth 2.1 + remote MCP | subsystem | spec | both | `oauth.py`, `remote.py` | no | L | `FT-05` / `FT-07`: Streamable HTTP transport, DCR, PKCE. |
-| Dashboard UI | subsystem | spec | both | `dashboard/` | no | L | Likely **out of scope** for a Rust port. |
-| Telemetry (OTel) | subsystem | spec | both | `telemetry.py` | no | M | Optional extra upstream. |
-| PID / process lifecycle | subsystem | spec | both | `pid.py` | no | M | Prerequisite for `remind_me_server_status`. |
+### HTTP API — 5 missing of 25, plus one target-only route
+
+| ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **A1** | `/api/analytics/trend` | route | spec | both | `api.py`, `analytics.py` (issue #186) | no | M | Depends on S8. |
+| **A2** | `/api/reminders/{token}.ics` | route | spec | both | `api.py`, `ics_export.py` | no | M | Token-authenticated iCalendar feed. Part of T1(c). |
+| **A3** | `/api/versions` | route | spec | both | `api.py` (issues #207, #211, #221) | no | S | Reports the serving build; the dashboard header reads it. Recent reference work — landed in v1.53.0/v1.54.0. |
+| **A4** | `/metrics`, `/manifest.json` | route | spec | both | `metrics.py` (issue #197), `api.py` | no | M | Prometheus-format exposition plus the PWA manifest. `/metrics` also exists on the hub. |
+| **A5** | `/count` on the peer server | route | spec | both | `peer_server.py` (issues #214, #216, #217) | no | M | With `?approx=1` for O(1) polling, `?since=` and `?by=origin_node` filters. This is the pre-check that makes `remind_me_sync_reconcile*` (T2) cheap — file it before T2. |
+| **A6** | `/api` (target-only) | route (existing) | spec | both | — | no | S | The target serves a route the reference does not. Harmless, but worth confirming it is intentional rather than a stray index handler; note it in the docs if it stays. |
+
+### Import-format depth — 8 extensions missing of 13
+
+`remind_me_import_directory` exists on both sides; the reference dispatches to
+five format handlers the target does not have. These are *not* separate MCP
+tools — they are wired into the existing importer, so each is additive depth on
+a tool that already ships.
+
+| ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **I1** | `.pdf` | fn | spec | both | `pdf_import.py` | no | M | 113 LOC. Almost certainly a **new third-party dependency** (PDF text extraction) → stop-and-ask. |
+| **I2** | `.png`, `.jpg`, `.jpeg` | fn | spec | both | `image_import.py` | no | M | OCR/vision path. **New dependency** → stop-and-ask. |
+| **I3** | `.mp3`, `.m4a`, `.wav`, `.ogg` | fn | spec | both | `audio_import.py` | no | M | Transcription path. **New dependency** → stop-and-ask. |
+| **I4** | Obsidian vault import | fn | spec | both | `obsidian_import.py` (FT-31) | no | L | 425 LOC. Wikilink-aware vault ingestion — the target's `wiki_links` table and `wiki_fs.rs` make this a better fit here than the other four. No new dependency expected. |
+| **I5** | Readwise connector | fn | spec | both | `readwise_import.py` | no | M | Highlights import over the Readwise API. Network connector. |
+
+### Subsystems with no target equivalent
+
+Each is a multi-issue epic, not a single gap. Listed so the omission is visible.
+
+| ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **E1** | Sync hub (Postgres) | subsystem | spec | both | `hub/` — 1,341 LOC + Containerfile, Quadlet units, compose/fly/railway deploy | no | L | A separate deployable FastAPI+Postgres service the nodes sync through, with `/count`, `/metrics`, `/admin/compact_tombstones`, versioned images, and deploy verification. The target's sync client already speaks the node-side protocol, so the *client* side is largely covered — the hub itself is a new artifact and a scope decision, not obviously in a Rust port's remit. |
+| **E2** | Rate limiting | subsystem | spec | both | `rate_limit.py` (issue #183) | no | M | In-memory, dependency-free limiter protecting the webhook ingest and remote MCP endpoints. The target exposes both surfaces with no limiter. **Security-relevant** given both can be tunneled publicly. |
+| **E3** | Tool profiles | subsystem | spec | both | `tool_profiles.py` | no | M | `full` / `standard` / `core` profiles that prune the advertised tool surface. With 44 tools the target has the same context-cost problem the reference wrote this for. |
+| **E4** | Maintenance nudges | subsystem | spec | both | `maintenance.py` | no | M | Pending-work counts, nudges, capture health. 475 LOC. |
+| **E5** | Automation event stream | subsystem | spec | both | `events.py` (issue #198) | no | M | Raw event stream for memory mutations. |
+| **E6** | Cloud backup | subsystem | spec | both | `cloud_backup.py` (issue #196) | no | M | Optional cloud upload of local backups. The target has `backup.rs`; this is the upload leg. Likely a new dependency. |
+| **E7** | Sidecar process management | subsystem | spec | both | `sidecars.py` | no | M | Keeps the hub SSH tunnel and dashboard alive in a Windows Job object. Windows-specific and tied to E1 — a strong **out-of-scope** candidate. |
+| **E8** | ANN index / reranker | subsystem | spec | both | `ann_index.py`, `reranker.py` | no | L | The target has embeddings and brute-force vector search (ADR 0002) but no ANN index and no reranking stage. Both are quality/scale improvements over a path that already works. New dependencies likely. |
 
 ---
 
 ## Recommended sequencing
 
-Ordered so each wave only depends on what precedes it, and so the early waves
-are implementable without touching the blocked subsystems.
+Ordered so each wave depends only on what precedes it.
 
-- **Wave 0 — unblock (not parity work).** Resolve B1/B2 (make the workspace
-  build), add CI (B3), add `RELEASE_NOTES.md` + labels + templates (B4).
-  Nothing below can be verified until this lands.
-- **Wave 1 — honesty.** The `user_version = 19` stamp. Breaking, and it is the
-  one item where the current state is worse than simply incomplete.
-- **Wave 2 — CRUD + cheap wins.** `list`/`update`/`delete`, `wiki_list`/
-  `wiki_delete`, `annotate`, `backup`, `list_connectors`, `stats` depth,
-  `vitality_report`. All pure additions over tables that already exist.
-- **Wave 3 — schema fill + tools that need it.** `memory_tags`,
-  `memory_feedback`, `memory_associations`, `wiki_fts`, `wiki_links`,
-  `wiki_meta` → then `feedback`, `wiki_search`, `entity_traverse`,
-  `reclassify`, `normalize`.
-- **Wave 4 — API surface.** Per-record and bulk routes, entity routes, wiki
-  routes, export/import. Prefix mismatch and auth are stop-and-ask.
-- **Wave 5 — epics.** Semantic stack, sync, OAuth, importers, watcher,
-  webhooks. Each needs its own scoping pass and at least one dependency
-  decision.
+- **Wave 1 — the live defect.** S5 alone. The outbox trigger is enqueueing a row
+  on every memory read. One-line guard, immediate benefit, no dependencies.
+- **Wave 2 — schema to v27.** S1 (regenerate `schema_*.sql` from a v27 dump,
+  bump the constant, fix the Tenet 3 text) carrying S2, S3, S4, S6, S7, S8, S9,
+  S10 with it. Best done as *one* regeneration plus per-feature follow-ups
+  rather than eight hand-written steps — the module docstring in
+  `db/migrations.rs` explains at length why hand-transcription was abandoned.
+  S1 is breaking → **stop-and-ask before starting this wave**.
+- **Wave 3 — cheap tool wins over the new schema.** T7, T8, T10, T11, T12, A3,
+  A6. All small, all additive, none blocked.
+- **Wave 4 — features over the new tables.** T3 (needs S9), T4 (needs S7),
+  T6, A1 (needs S8).
+- **Wave 5 — sync observability.** A5 (`/count`) → T2. In that order.
+- **Wave 6 — reminders.** T1 split three ways, plus A2. Largest coherent
+  feature; the notification-channel leg needs a dependency decision.
+- **Wave 7 — ops surface.** A4 (`/metrics`, `/manifest.json`), T9 (API keys),
+  E2 (rate limiting), E3 (tool profiles). T9 and E2 are security-relevant.
+- **Wave 8 — importers and epics.** I4 (no new dependency, best fit) first;
+  I1/I2/I3/I5 and E1/E4–E8 each need their own scoping and dependency decision.
 
 ## Stop-and-ask items (never auto-implemented)
 
 Under the skill's rules these pause the loop rather than proceeding:
 
-1. `user_version` stamp — changes existing DB-creation behavior.
-2. `/api/v1/*` → `/api/*` — changes the target's existing published contract.
-3. HTTP API authentication — changes existing endpoint behavior.
-4. Semantic/vector search — requires new third-party dependencies.
-5. Any port of reference behavior still marked `todo` in `remind_me`'s
-   `BACKLOG.md` (`SY-10` tombstone deletes, `SY-11` embed batching).
+1. **S1** — bumping `SCHEMA_VERSION` and regenerating the schema changes
+   existing DB-creation behavior.
+2. **I1, I2, I3** — PDF, image/OCR, and audio import each need a new
+   third-party crate.
+3. **E6, E8** — cloud backup and the ANN/reranker stack likewise.
+4. **E1** — the hub is a new deployable artifact in another language and
+   runtime, not an addition to the Rust workspace. Scope decision first.
+5. **T1(b)** — outbound notification channels may need a new dependency
+   depending on which channels are in scope.
+6. Any port of reference behavior still marked `todo` in `remind_me`'s
+   `BACKLOG.md`.
 
 ## Deliberately excluded from the candidate list
 
 Not filed as issues; recorded so the omission is visible rather than silent:
 
-- `remind_me`'s `BACKLOG.md` items themselves — that is the reference's own
-  improvement backlog, not port scope. Where a backlog ID is cited above
-  (`DI-01`, `SE-02`, …) it is a pointer to the *already-fixed* behavior worth
-  porting, not an instruction to port the backlog.
-- Python-specific packaging (`pyproject.toml` extras, `uv.lock`, hatchling).
-- Test-suite parity — the reference's 80% coverage gate is a CI concern for
-  Wave 0, not a per-symbol gap.
+- `remind_me`'s `BACKLOG.md` items themselves — the reference's own improvement
+  backlog, not port scope. Backlog IDs cited above (`SY-18`, `SE-01`, …) point
+  at *already-shipped* behavior worth porting, not at open backlog work.
+- `remind_me`'s `benchmarks/` harness (LongMemEval, synthetic corpora) — a
+  reference-side evaluation tool, not part of the served surface.
+- Python-specific packaging (`pyproject.toml`, `uv.lock`, hatchling).
+- `storage_interfaces.py` — interface *documentation*, no runtime behavior.
+- Test-suite parity — the reference's coverage gate is a CI concern, not a
+  per-symbol gap. The target's CI already gates build/test/clippy/fmt.
+- `formatting.py` — the target already implements `ResponseFormat` with both
+  `markdown` and `json` variants; only the sensitive-flag fields differ (T11).
