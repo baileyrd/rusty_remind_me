@@ -1,8 +1,8 @@
-use crate::models::Memory;
+use crate::models::{Memory, MemorySearchResult};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub const VITALITY_FLOOR: f64 = 0.05;
 pub const BRIDGE_THRESHOLD: i64 = 10;
@@ -111,6 +111,15 @@ pub fn register_sql_functions(conn: &Connection) -> Result<()> {
 
 /// Fractional adjustment one feedback event applies to `base_weight`.
 pub const FEEDBACK_MAGNITUDE: f64 = 0.15;
+/// Minimum Jaccard similarity a stored feedback query must have with the
+/// current query to count at all. Below this, a past query is treated as a
+/// different-enough context that its feedback says nothing about this one —
+/// the mechanism that keeps feedback query-contextual instead of global.
+pub const FEEDBACK_SIMILARITY_THRESHOLD: f64 = 0.3;
+/// Ceiling on [`contextual_feedback_adjustment`]'s total, in either
+/// direction, so a memory with a long history of similar feedback cannot
+/// swing a ranking score arbitrarily far.
+pub const FEEDBACK_ADJUSTMENT_CAP: f64 = 0.4;
 /// Ceiling and floor `base_weight` is clamped to, so repeated feedback on one
 /// memory cannot run away in either direction.
 pub const BASE_WEIGHT_MAX: f64 = 3.0;
@@ -229,6 +238,114 @@ pub fn record_feedback(
     )?;
 
     Ok(Some(new_vitality))
+}
+
+// ---------------------------------------------------------------------------
+// Query-contextual feedback: read side (gap #6 / issue #94)
+// ---------------------------------------------------------------------------
+//
+// `record_feedback` above only writes `memory_feedback` rows. These two
+// functions are the other half: reading that log back at search time and
+// nudging ranking scores by it. Ported from the reference's
+// `contextual_feedback_adjustment` / `apply_feedback_adjustment`
+// (`remind_me_mcp/vitality.py`).
+
+/// Jaccard similarity (intersection over union) of two token sets. `0.0` if
+/// either side is empty — matching the reference, which special-cases this
+/// rather than letting an empty union divide by zero.
+fn jaccard(a: &HashSet<&str>, b: &HashSet<&str>) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let union = a.union(b).count();
+    if union == 0 {
+        0.0
+    } else {
+        a.intersection(b).count() as f64 / union as f64
+    }
+}
+
+/// Sum similarity-weighted feedback for `memory_id` against `query`.
+///
+/// Each stored feedback event with a Jaccard token overlap at or above
+/// [`FEEDBACK_SIMILARITY_THRESHOLD`] against `query` contributes
+/// `+/-magnitude * similarity` (helpful/unhelpful); events below the
+/// threshold contribute nothing. Returns the total, clamped to
+/// `+/-`[`FEEDBACK_ADJUSTMENT_CAP`] — `0.0` if there's no feedback for this
+/// memory, or none of it is similar enough to `query` to count.
+pub fn contextual_feedback_adjustment(
+    conn: &Connection,
+    memory_id: &str,
+    query: &str,
+) -> Result<f64> {
+    let mut stmt = conn.prepare(
+        "SELECT query_tokens, signal, magnitude FROM memory_feedback WHERE memory_id = ?",
+    )?;
+    let rows = stmt.query_map([memory_id], |row| {
+        let query_tokens: String = row.get(0)?;
+        let signal: String = row.get(1)?;
+        let magnitude: f64 = row.get(2)?;
+        Ok((query_tokens, signal, magnitude))
+    })?;
+
+    let current_tokens = tokenize_query(query);
+    let current_set: HashSet<&str> = current_tokens.iter().map(String::as_str).collect();
+
+    let mut total = 0.0;
+    for row in rows {
+        let (query_tokens, signal, magnitude) = row?;
+        let past_set: HashSet<&str> = query_tokens.split(' ').filter(|t| !t.is_empty()).collect();
+        let similarity = jaccard(&current_set, &past_set);
+        if similarity < FEEDBACK_SIMILARITY_THRESHOLD {
+            continue;
+        }
+        let sign = if signal == "helpful" { 1.0 } else { -1.0 };
+        total += sign * magnitude * similarity;
+    }
+
+    Ok(total.clamp(-FEEDBACK_ADJUSTMENT_CAP, FEEDBACK_ADJUSTMENT_CAP))
+}
+
+/// Nudge each result's `score` by its query-contextual feedback, then
+/// re-sort.
+///
+/// Meant to run *after* RRF fusion and *before* any reranking stage — it
+/// only perturbs the fused order feeding into a reranker, which still gets
+/// final say over the head. A result with no matching feedback (the common
+/// case) is untouched.
+///
+/// The adjustment is multiplicative (`score * (1 + adjustment)`) rather than
+/// additive, so it composes safely regardless of which RRF fusion mode
+/// produced `score` (rank-based or magnitude-based — see
+/// [`crate::retrieval::RrfFusion`]).
+///
+/// No-op (results returned as-is, in their existing order) when `results` is
+/// empty or `query` is empty, matching the reference's `if not memories or
+/// not query`.
+pub fn apply_feedback_adjustment(
+    conn: &Connection,
+    query: &str,
+    mut results: Vec<MemorySearchResult>,
+) -> Result<Vec<MemorySearchResult>> {
+    if results.is_empty() || query.is_empty() {
+        return Ok(results);
+    }
+
+    for result in &mut results {
+        let adjustment = contextual_feedback_adjustment(conn, &result.memory.id, query)?;
+        if adjustment != 0.0 {
+            result.score *= 1.0 + adjustment;
+            result.feedback_adjustment = Some(adjustment);
+        }
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(results)
 }
 
 /// A memory's vitality *right now*, with real elapsed-days decay applied.

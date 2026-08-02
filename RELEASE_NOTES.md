@@ -24,6 +24,63 @@ Dated entries, newest first. One entry per merged pull request.
   addendum for how the reference's `memories_vec`-recreation-on-mismatch and
   ANN-index-invalidation steps were adapted to this crate's own
   `vec_embeddings` table and its lack of an ANN index.
+## 2026-08-01 — Pre-migration snapshot guard (#95)
+
+### Added
+- **Schema reconciliation now snapshots the database before it changes
+  anything**, closing the gap where a bad migration against the single
+  SQLite file holding someone's memory store had no way back. Matches the
+  reference's `_maybe_snapshot_before_migration`: triggered only when
+  reconciliation actually has pending work to do (the on-disk version stamp
+  is behind `SCHEMA_VERSION`, or a table already present differs from the
+  generated schema — a rename or added column included, since either changes
+  the table's stored DDL), skipped for a brand-new database with no rows in
+  `memories` yet, and non-fatal on failure: a snapshot that can't be created
+  (e.g. the `backups/` directory can't be written) is swallowed rather than
+  blocking the migration it exists to protect against. Reuses
+  `crates/remind_me_core/src/backup.rs`'s existing `create_backup` — no new
+  backup logic. New logic lives in
+  `crates/remind_me_core/src/db/migrations.rs`
+  (`migration_pending`/`has_existing_data`/`snapshot_before_migration`),
+  called from `apply()` before any table is touched.
+- Tests: `crates/remind_me_core/tests/migration_snapshot_test.rs` — a
+  brand-new database takes no snapshot, an up-to-date database with data
+  takes no snapshot on reopen, a legacy-shaped database with data is
+  snapshotted (and one with no rows is not), an old version stamp is
+  snapshotted under a label reflecting that version, and a snapshot failure
+  does not block the migration.
+
+## 2026-08-01 — Query-contextual feedback is applied at search time (#94)
+
+### Fixed
+- **`remind_me_feedback`'s query-contextual mode was write-only.**
+  `record_feedback` already stored `memory_feedback` rows with the query
+  that prompted them, but nothing ever read them back — a down-voted
+  result for a specific query came back unchanged on a repeat of that same
+  query. Global `base_weight` demotion (the other feedback mode) was
+  unaffected and worked correctly the whole time.
+
+### Added
+- **`crates/remind_me_core/src/vitality.rs`**: `contextual_feedback_adjustment`
+  and `apply_feedback_adjustment`, porting the reference's
+  `vitality.py` functions of the same name. Per candidate, Jaccard
+  similarity between the current query and each stored feedback query is
+  computed; matches below `FEEDBACK_SIMILARITY_THRESHOLD` (0.3) are
+  ignored, matches at or above it contribute `±magnitude * similarity`
+  (helpful/unhelpful), summed and clamped to `±FEEDBACK_ADJUSTMENT_CAP`
+  (0.4).
+- **`crates/remind_me_core/src/db/queries.rs::search_memories`** now calls
+  `apply_feedback_adjustment` right after RRF fusion and before truncating
+  to `limit`, applying the adjustment multiplicatively to `score` and
+  re-sorting — the same pipeline position the reference uses.
+- **`MemorySearchResult` gained `feedback_adjustment: Option<f64>`**,
+  `None` unless an adjustment was actually applied, so callers can see when
+  and how much a result's ranking was nudged.
+- Tests: 21 new cases in `crates/remind_me_core/tests/feedback_test.rs`
+  covering the similarity/threshold/cap arithmetic directly, ranking
+  reorder (a lower-ranked result promoted above a higher one), and an
+  end-to-end case through `search_memories` confirming a real query's score
+  moves after feedback is recorded.
 
 ## 2026-07-30 — Live `dashboard`/`embeddings` status, dashboard PID-file liveness (#90)
 
