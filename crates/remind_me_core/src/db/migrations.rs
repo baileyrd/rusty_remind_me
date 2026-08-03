@@ -26,7 +26,8 @@
 //!    crate — are rebuilt, preserving their rows;
 //! 3. any column still missing from any table is added, diffed against a
 //!    pristine schema built in memory from the same SQL;
-//! 4. indexes and triggers are created, after the columns they reference exist;
+//! 4. indexes are created and triggers reconciled, after the columns they
+//!    reference exist;
 //! 5. derived data is backfilled, and entity ids written by earlier builds of
 //!    this crate are rewritten to the reference's derivation;
 //! 6. `PRAGMA user_version` is stamped.
@@ -95,6 +96,49 @@ fn pristine() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(SCHEMA_TABLES)?;
     Ok(conn)
+}
+
+/// Drop triggers whose stored definition differs from the generated one, so
+/// the `CREATE TRIGGER IF NOT EXISTS` batch that follows actually recreates
+/// them.
+///
+/// Without this, a trigger is created once and then frozen for the life of the
+/// database: `IF NOT EXISTS` makes every later open a no-op, so a corrected
+/// definition only ever reaches databases created after the correction. That
+/// is how `memories_outbox_au` kept firing on access-tracking updates on
+/// existing vaults after the guard was added to the generated schema.
+///
+/// Tables get this treatment via [`rebuild_table`], which has to preserve rows;
+/// a trigger holds no state, so dropping and recreating it is the whole job.
+fn reconcile_triggers(conn: &Connection) -> Result<()> {
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(SCHEMA_TABLES)?;
+    reference.execute_batch(SCHEMA_TRIGGERS)?;
+
+    let mut stmt = reference.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger'")?;
+    let expected: Vec<(String, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, normalise_ddl(&r.get::<_, String>(1)?)))
+        })?
+        .collect::<Result<_>>()?;
+    drop(stmt);
+
+    for (name, want) in expected {
+        let mut stmt =
+            conn.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?")?;
+        let mut rows = stmt.query([&name])?;
+        let have = match rows.next()? {
+            Some(row) => normalise_ddl(&row.get::<_, String>(0)?),
+            // Absent is not stale — the batch below creates it.
+            None => continue,
+        };
+        drop(rows);
+        drop(stmt);
+        if have != want {
+            conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {};", name))?;
+        }
+    }
+    Ok(())
 }
 
 /// Rebuild a table whose shape predates the generated schema.
@@ -387,6 +431,9 @@ pub fn apply(conn: &Connection) -> Result<()> {
     // After columns: the outbox triggers name 23 columns of `memories`, and
     // several indexes cover columns added above.
     conn.execute_batch(SCHEMA_INDEXES)?;
+    // Before the batch, not after: it is `CREATE TRIGGER IF NOT EXISTS`, so a
+    // trigger left over from an earlier build survives it untouched.
+    reconcile_triggers(conn)?;
     conn.execute_batch(SCHEMA_TRIGGERS)?;
 
     backfill_derived(conn, rebuilt_any)?;

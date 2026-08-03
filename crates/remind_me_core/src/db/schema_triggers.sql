@@ -60,6 +60,7 @@ CREATE TRIGGER IF NOT EXISTS memories_outbox_ai
 CREATE TRIGGER IF NOT EXISTS memories_outbox_au
         AFTER UPDATE ON memories
         WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+        AND NEW.updated_at IS NOT OLD.updated_at
         BEGIN
             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
             VALUES (

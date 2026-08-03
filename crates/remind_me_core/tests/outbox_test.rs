@@ -13,7 +13,7 @@ use remind_me_core::db::queries;
 use remind_me_core::sync::{
     prune_outbox, DEFAULT_OUTBOX_RETENTION_DAYS, HUB_URL_ENV, NODE_ID_ENV, SYNC_SECRET_ENV,
 };
-use remind_me_core::{Database, MemoryAddInput, MemorySearchInput};
+use remind_me_core::{Database, MemoryAddInput, MemorySearchInput, MemoryUpdateInput};
 use rusqlite::Connection;
 
 /// Every test in this file wants sync on and never off, so setting these
@@ -95,7 +95,7 @@ fn writes_still_reach_the_outbox() {
 }
 
 #[test]
-fn reads_grow_the_outbox_too() {
+fn reads_do_not_reach_the_outbox() {
     ensure_sync_enabled();
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
@@ -104,12 +104,102 @@ fn reads_grow_the_outbox_too() {
 
     search(&conn, "quokka");
 
-    // Recording access is an UPDATE, and the update trigger fires on it. This
-    // is why the growth is not bounded by the number of memories.
-    assert!(
-        outbox_rows(&conn) > after_write,
-        "a search should have produced an outbox row"
+    // Recording access is an UPDATE, so the update trigger sees it -- but the
+    // trigger's `NEW.updated_at IS NOT OLD.updated_at` guard rejects it,
+    // because access tracking deliberately leaves `updated_at` alone. Without
+    // that guard every read enqueued a payload identical to the one already
+    // sitting in the outbox, and outbox depth tracked read volume rather than
+    // pending work.
+    assert_eq!(
+        outbox_rows(&conn),
+        after_write,
+        "recording access is not a change worth syncing"
     );
+}
+
+#[test]
+fn edits_still_reach_the_outbox() {
+    ensure_sync_enabled();
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "quokka sighting");
+    let after_write = outbox_rows(&conn);
+
+    queries::update_memory(
+        &conn,
+        &MemoryUpdateInput {
+            memory_id: id,
+            content: Some("quokka sighting, confirmed".into()),
+            category: None,
+            tags: None,
+            metadata: None,
+        },
+    )
+    .unwrap();
+
+    // The guard keys on `updated_at`, so it has to let a genuine edit through:
+    // suppressing reads is only correct if it costs no real change.
+    assert_eq!(
+        outbox_rows(&conn),
+        after_write + 1,
+        "an edit is exactly what the outbox exists to carry"
+    );
+}
+
+/// A database created before the guard was added keeps the old trigger unless
+/// something drops it: the generated schema is applied with
+/// `CREATE TRIGGER IF NOT EXISTS`, which silently skips a trigger that already
+/// exists no matter how stale its definition.
+#[test]
+fn an_existing_database_has_its_stale_trigger_rebuilt() {
+    ensure_sync_enabled();
+    let dir = std::env::temp_dir().join(format!("rrm_outbox_rebuild_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("memories.db");
+    let _ = std::fs::remove_file(&path);
+
+    {
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn();
+        // Put the pre-fix trigger back: same name, same body, no guard.
+        let unguarded: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_outbox_au'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let unguarded = unguarded.replace("AND NEW.updated_at IS NOT OLD.updated_at", "");
+        conn.execute_batch(&format!("DROP TRIGGER memories_outbox_au; {};", unguarded))
+            .unwrap();
+    }
+
+    let db = Database::open(&path).unwrap();
+    let conn = db.conn();
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_outbox_au'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        sql.contains("NEW.updated_at IS NOT OLD.updated_at"),
+        "reopening should have replaced the stale trigger, got: {sql}"
+    );
+
+    add(&conn, "quokka sighting");
+    let after_write = outbox_rows(&conn);
+    search(&conn, "quokka");
+    assert_eq!(
+        outbox_rows(&conn),
+        after_write,
+        "the rebuilt trigger must actually suppress reads"
+    );
+
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -242,9 +332,13 @@ fn a_realistic_mix_of_traffic_stays_bounded() {
         }
         // Everything so far is older than the window by the time we reopen.
         backdate_outbox(&conn, DEFAULT_OUTBOX_RETENTION_DAYS + 1);
-        assert!(
-            outbox_rows(&conn) > 100,
-            "30 writes and 20 searches should have produced well over 100 rows"
+        // Ten writes, ten rows. The searches contribute nothing: this count
+        // used to exceed 200, because each search touched all ten memories'
+        // access counters and every one of those updates was enqueued.
+        assert_eq!(
+            outbox_rows(&conn),
+            10,
+            "only the writes belong in the outbox"
         );
     }
 

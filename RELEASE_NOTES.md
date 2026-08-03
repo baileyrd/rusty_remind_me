@@ -2,6 +2,37 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — Reads no longer flood the sync outbox (#100)
+
+### Fixed
+- **`memories_outbox_au` fired on every memory read.** The reference guards
+  its update trigger with `AND NEW.updated_at IS NOT OLD.updated_at`
+  (`_migrate_v21_to_v22`, issue #147); this crate's generated copy did not.
+  Since access tracking landed (#42), reading a memory writes `accessed_at`
+  and `access_count` — an `UPDATE` — so **every read enqueued a `sync_outbox`
+  row** carrying a full JSON copy of the memory, and pushed a no-op update to
+  every peer. Outbox depth tracked read volume rather than pending work,
+  which also made it useless as the signal `remind_me_sync_status` is meant
+  to report. The guard is now present.
+- **A trigger whose definition changed was never replaced on existing
+  databases.** The generated schema is applied with `CREATE TRIGGER IF NOT
+  EXISTS`, so a trigger created once stayed frozen for the life of the
+  database and a correction only ever reached databases created afterwards —
+  the fix above would have missed every existing vault. Reconciliation now
+  diffs each trigger's stored definition against the generated one and drops
+  the stale ones just before the create batch, the trigger-shaped counterpart
+  to the existing `rebuild_table` step. Triggers hold no state, so dropping
+  and recreating is the whole job.
+
+### Changed
+- Two tests in `outbox_test.rs` asserted the old behavior as though it were
+  intended — `reads_grow_the_outbox_too` required a read to produce a row,
+  and `a_realistic_mix_of_traffic_stays_bounded` expected 10 writes and 20
+  searches to yield "well over 100 rows". Both now assert the corrected
+  behavior (reads produce nothing; 10 writes produce exactly 10 rows), joined
+  by coverage that a genuine edit still enqueues and that reopening an older
+  database rebuilds its stale trigger.
+
 ## 2026-08-01 — Embedding-model versioning and auto-clear on mismatch (#96)
 
 ### Added
