@@ -78,7 +78,7 @@ was worked to completion (PRs #28 → #99).
 | Surface | `remind_me` v1.54.0 | `rusty_remind_me` | Covered |
 | --- | --- | --- | --- |
 | MCP tools | 61 | 44 (43 shared + 1 target-only) | **70%** |
-| HTTP API routes | 25 | 21 (20 shared + 1 target-only) | **80%** |
+| HTTP API routes | 25 | 20 (all shared) | **80%** |
 | Peer-server routes | 7 | 6 | **86%** |
 | SQLite tables | 30 | 25 | **83%** |
 | SQLite indexes | 36 | 30 | **83%** |
@@ -153,7 +153,7 @@ against the Rust structs field-by-field; these are the only divergences.
 | **A3** | `/api/versions` | route | spec | both | `api.py` (issues #207, #211, #221) | no | S | Reports the serving build; the dashboard header reads it. Recent reference work — landed in v1.53.0/v1.54.0. |
 | **A4** | `/metrics`, `/manifest.json` | route | spec | both | `metrics.py` (issue #197), `api.py` | no | M | Prometheus-format exposition plus the PWA manifest. `/metrics` also exists on the hub. |
 | **A5** | `/count` on the peer server | route | spec | both | `peer_server.py` (issues #214, #216, #217) | no | M | With `?approx=1` for O(1) polling, `?since=` and `?by=origin_node` filters. This is the pre-check that makes `remind_me_sync_reconcile*` (T2) cheap — file it before T2. |
-| **A6** | `/api` (target-only) | route (existing) | spec | both | — | no | S | The target serves a route the reference does not. Harmless, but worth confirming it is intentional rather than a stray index handler; note it in the docs if it stays. |
+| **A6** | ~~`/api` (target-only)~~ | — | spec | both | — | no | — | **Withdrawn 2026-08-03 while working #107: this was a false positive.** There is no `/api` route. The extraction that produced this row grepped `"/api"` string literals across `crates/remind_me_api/src/`, and matched a doc comment — `routes.rs`'s note that the vendored dashboard talks to `window.location.origin + "/api"`. The registered route table (`ROUTES` in `routes.rs`) contains 20 patterns, every one of which the reference also serves. The target therefore has **no** target-only routes, and the headline table's "21 (20 shared + 1 target-only)" should read **20 shared, 5 missing**. |
 
 ### Import-format depth — 8 extensions missing of 13
 
@@ -198,8 +198,8 @@ in the "Correctness" and "Schema — missing objects" tables above is therefore
 closed, and the downstream schema-dependent issues are unblocked.
 
 Wave 3 is in progress: #102 (T7) merged as PR #127, #103 (T8) as PR #128,
-#104 (T10) as PR #129, #105 (T11) as PR #130; #106 (T12) is in flight.
-#107 remains.
+#104 (T10) as PR #129, #105 (T11) as PR #130, #106 (T12) as PR #131;
+#107 (A3, A6) is in flight and completes the wave.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |

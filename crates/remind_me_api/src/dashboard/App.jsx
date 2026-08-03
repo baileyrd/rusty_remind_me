@@ -57,10 +57,36 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
+// Issue #211: the builds on each side of sync. The node's comes from /health
+// rather than /api/stats deliberately -- /health is unauthenticated, so it
+// still shows while the API key is wrong or missing, which is one of the
+// situations where you most want to know which build you are talking to. The
+// hub's needs /api/versions (another machine's build isn't ours to publish
+// unauthenticated), and is absent whenever sync is off or the hub can't be
+// reached. Both failures are silent: a missing version renders nothing rather
+// than putting an error in the chrome.
+function useServerVersion() {
+  const [version, setVersion] = useState("");
+  const [hubVersion, setHubVersion] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    fetch(window.location.origin + "/health")
+      .then(r => r.json())
+      .then(d => { if (!cancelled && d && d.version) setVersion(d.version); })
+      .catch(() => {});
+    api("/versions")
+      .then(d => { if (!cancelled && d && d.hub) setHubVersion(d.hub); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return { version, hubVersion };
+}
+
 function useMemoryStore() {
   const [memories, setMemories] = useState([]);
   const [stats, setStats] = useState({ total: 0, categories: {}, sources: {}, tags: {} });
   const [vitality, setVitality] = useState({ vitality_buckets: {}, active_count: 0, dormant_count: 0, vault_health_score: "0%", average_vitality: 0 });
+  const [trend, setTrend] = useState({ snapshots: [] });
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async (params = {}) => {
@@ -82,6 +108,10 @@ function useMemoryStore() {
       const v = await api("/vitality");
       setVitality(v);
     } catch (e) { console.error("vitality:", e); }
+    try {
+      const t = await api("/analytics/trend");
+      setTrend(t);
+    } catch (e) { console.error("analytics trend:", e); }
     setLoading(false);
   }, []);
 
@@ -115,7 +145,7 @@ function useMemoryStore() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  return { memories, stats, vitality, loading, refresh, search, add, update, remove };
+  return { memories, stats, vitality, trend, loading, refresh, search, add, update, remove };
 }
 
 function useWikiStore() {
@@ -213,7 +243,12 @@ const Icons = {
   Loader: () => React.createElement("svg", {width:16,height:16,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",style:{animation:"spin 1s linear infinite"}}, React.createElement("path",{d:"M21 12a9 9 0 1 1-6.219-8.56"})),
 };
 
-const iconBtn = { background:"none", border:"none", color:theme.textSecondary, cursor:"pointer", padding:4, borderRadius:4, display:"flex", alignItems:"center", transition:"color 0.15s" };
+// minWidth/minHeight (rather than just padding) give icon-only buttons a
+// ~44x44 tap target per common mobile touch-target guidance (issue #199
+// mobile audit) without inflating the visible icon itself -- the icon stays
+// its normal small size, centered in an otherwise-invisible (background:
+// none) hit area.
+const iconBtn = { background:"none", border:"none", color:theme.textSecondary, cursor:"pointer", padding:4, borderRadius:4, display:"flex", alignItems:"center", justifyContent:"center", transition:"color 0.15s", minWidth:44, minHeight:44 };
 const inputSt = { width:"100%", padding:"10px 12px", borderRadius:6, border:"1px solid "+theme.border, background:theme.bg, color:theme.text, fontSize:14, fontFamily:sans, outline:"none", transition:"border-color 0.15s", boxSizing:"border-box" };
 const labelSt = { display:"block", fontSize:12, fontWeight:600, fontFamily:mono, color:theme.textSecondary, marginBottom:6, textTransform:"uppercase", letterSpacing:"0.04em" };
 
@@ -290,6 +325,44 @@ function BarChart({data, colorMap, preserveOrder}) {
           )
         )
       )
+    )
+  );
+}
+
+// Simple inline-SVG line+area chart (issue #186) -- same "no charting
+// library" posture as BarChart above, just a different mark shape. Plots
+// one numeric field (valueKey) from a list of {captured_at, ...} snapshot
+// dicts (oldest first, as GET /api/analytics/trend already returns them).
+// A viewBox of a fixed logical width/height with preserveAspectRatio="none"
+// lets the <svg> stretch to its container via plain CSS width:100% -- no
+// resize-observer or JS layout math needed, mirroring BarChart's own
+// percentage-width bars.
+function TrendChart({data, valueKey, color}) {
+  const height = 100;
+  const width = 300;
+  if (!data || data.length === 0) {
+    return React.createElement("div", {style:{fontSize:13,color:theme.textMuted,fontFamily:sans,textAlign:"center",padding:"32px 0"}}, "No trend data yet — a daily snapshot is captured automatically; check back tomorrow.");
+  }
+  const values = data.map(d => Number(d[valueKey]) || 0);
+  const max = Math.max(...values, 1);
+  const min = Math.min(0, ...values);
+  const range = (max - min) || 1;
+  const stepX = data.length > 1 ? width / (data.length - 1) : 0;
+  const coords = values.map((v, i) => [
+    data.length > 1 ? i * stepX : width / 2,
+    height - ((v - min) / range) * height,
+  ]);
+  const linePoints = coords.map(([x, y]) => x + "," + y).join(" ");
+  const areaPoints = linePoints + " " + width + "," + height + " 0," + height;
+  const stroke = color || theme.accent;
+  return React.createElement("div", null,
+    React.createElement("svg", {viewBox:"0 0 "+width+" "+height, preserveAspectRatio:"none", style:{width:"100%",height:120,display:"block",overflow:"visible"}},
+      React.createElement("polygon", {points:areaPoints, fill:stroke+"22", stroke:"none"}),
+      React.createElement("polyline", {points:linePoints, fill:"none", stroke:stroke, strokeWidth:1.5, vectorEffect:"non-scaling-stroke"})
+    ),
+    React.createElement("div", {style:{display:"flex",justifyContent:"space-between",marginTop:8,fontSize:11,fontFamily:mono,color:theme.textMuted}},
+      React.createElement("span", null, (data[0].captured_at||"").slice(0,10)),
+      React.createElement("span", null, (data[data.length-1].captured_at||"").slice(0,10))
     )
   );
 }
@@ -543,6 +616,7 @@ function ImportForm({onComplete, onCancel}) {
 
 function App() {
   const store = useMemoryStore();
+  const { version: serverVersion, hubVersion } = useServerVersion();
   const wikiStore = useWikiStore();
   const entityStore = useEntityStore();
   const [view, setView] = useState("browse");
@@ -602,6 +676,7 @@ function App() {
 
   const stats = store.stats;
   const vitality = store.vitality;
+  const trend = store.trend;
   const allCategories = Object.keys(stats.categories||{});
   const allTags = Object.keys(stats.tags||{}).sort((a,b)=>(stats.tags[b]||0)-(stats.tags[a]||0));
   const entityQueryLower = entityQuery.trim().toLowerCase();
@@ -612,29 +687,52 @@ function App() {
     : entityStore.entities;
 
   return React.createElement("div", {style:{minHeight:"100vh",background:theme.bg,color:theme.text,fontFamily:sans}},
-    React.createElement("style",null,"@keyframes spin{to{transform:rotate(360deg)}}"),
+    // Mobile responsive fixes (issue #199 audit). Kept as a small embedded
+    // stylesheet -- like the pre-existing @keyframes rule below -- rather
+    // than reworking every inline style object, since this codebase's
+    // established style is React.createElement + inline style props with
+    // no className/CSS-in-JS setup. !important is needed only on <aside>,
+    // whose width/height/position are already set inline (per-view, three
+    // call sites below) -- inline styles otherwise win over embedded
+    // stylesheet rules of equal specificity for the same property.
+    React.createElement("style",null,`
+      @keyframes spin{to{transform:rotate(360deg)}}
+      @media (max-width: 680px) {
+        header { flex-wrap: wrap; row-gap: 8px; }
+        [data-shell-body] { flex-direction: column; }
+        aside {
+          width: 100% !important;
+          max-width: none !important;
+          height: auto !important;
+          max-height: 40vh !important;
+          position: static !important;
+          border-right: none !important;
+          border-bottom: 1px solid `+theme.border+`;
+        }
+      }
+    `),
     // Header
     React.createElement("header", {style:{borderBottom:"1px solid "+theme.border,padding:"16px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,background:theme.bg+"e6",backdropFilter:"blur(12px)"}},
       React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},
         React.createElement("div",{style:{width:36,height:36,borderRadius:8,background:"linear-gradient(135deg,"+theme.accent+",#a855f7)",display:"flex",alignItems:"center",justifyContent:"center"}}, React.createElement(Icons.Brain)),
         React.createElement("div",null,
           React.createElement("h1",{style:{margin:0,fontSize:18,fontWeight:700,fontFamily:sans,letterSpacing:"-0.02em"}},"Remind Me"),
-          React.createElement("span",{style:{fontSize:11,color:theme.textMuted,fontFamily:mono}}, (stats.total||0)+" memories \u00b7 "+((stats.db_path||"").replace(/.*\//,"~/"))),
+          React.createElement("span",{style:{fontSize:11,color:theme.textMuted,fontFamily:mono}}, (stats.total||0)+" memories \u00b7 "+((stats.db_path||"").replace(/.*\//,"~/"))+(serverVersion?" \u00b7 v"+serverVersion:"")+(hubVersion?" \u00b7 hub v"+hubVersion:"")),
         )
       ),
-      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},
+      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}},
         store.loading && React.createElement("span",{style:{color:theme.textMuted}}, React.createElement(Icons.Loader)),
         React.createElement("div",{style:{display:"flex",background:theme.surface,borderRadius:6,border:"1px solid "+theme.border,overflow:"hidden"}},
-          [["browse","Browse"],["stats","Stats"],["wiki","Wiki"],["entities","Entities"]].map(([v,l])=>React.createElement("button",{key:v,onClick:()=>setView(v),style:{padding:"6px 14px",border:"none",fontSize:12,fontFamily:mono,fontWeight:500,cursor:"pointer",background:view===v?theme.accent:"transparent",color:view===v?"#fff":theme.textSecondary,transition:"all 0.15s"}},
+          [["browse","Browse"],["stats","Stats"],["wiki","Wiki"],["entities","Entities"]].map(([v,l])=>React.createElement("button",{key:v,onClick:()=>setView(v),style:{padding:"10px 14px",minHeight:40,border:"none",fontSize:12,fontFamily:mono,fontWeight:500,cursor:"pointer",background:view===v?theme.accent:"transparent",color:view===v?"#fff":theme.textSecondary,transition:"all 0.15s"}},
             l, v==="wiki" && wikiStore.status.pending_compile>0 && React.createElement("span",{style:{marginLeft:6,padding:"1px 6px",borderRadius:8,background:view===v?"rgba(255,255,255,0.25)":theme.warningSubtle,color:view===v?"#fff":theme.warning,fontSize:10,fontWeight:700}}, wikiStore.status.pending_compile)
           ))
         ),
-        React.createElement("button",{onClick:()=>setShowImportModal(true),style:{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontWeight:500,fontFamily:mono,cursor:"pointer",transition:"all 0.15s"},onMouseEnter:e=>{e.currentTarget.style.borderColor=theme.accent;e.currentTarget.style.color=theme.text},onMouseLeave:e=>{e.currentTarget.style.borderColor=theme.border;e.currentTarget.style.color=theme.textSecondary}}, React.createElement(Icons.Upload), " Import"),
-        React.createElement("button",{onClick:()=>setShowAddModal(true),style:{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",borderRadius:6,border:"none",background:theme.accent,color:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:"pointer"}}, React.createElement(Icons.Plus), " Add")
+        React.createElement("button",{onClick:()=>setShowImportModal(true),style:{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",minHeight:40,borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontWeight:500,fontFamily:mono,cursor:"pointer",transition:"all 0.15s"},onMouseEnter:e=>{e.currentTarget.style.borderColor=theme.accent;e.currentTarget.style.color=theme.text},onMouseLeave:e=>{e.currentTarget.style.borderColor=theme.border;e.currentTarget.style.color=theme.textSecondary}}, React.createElement(Icons.Upload), " Import"),
+        React.createElement("button",{onClick:()=>setShowAddModal(true),style:{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",minHeight:40,borderRadius:6,border:"none",background:theme.accent,color:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:"pointer"}}, React.createElement(Icons.Plus), " Add")
       )
     ),
     // Body
-    React.createElement("div",{style:{display:"flex",maxWidth:1200,margin:"0 auto"}},
+    React.createElement("div",{"data-shell-body":"", style:{display:"flex",maxWidth:1200,margin:"0 auto"}},
       // Sidebar
       view==="browse" && React.createElement("aside",{style:{width:220,borderRight:"1px solid "+theme.border,padding:"20px 16px",flexShrink:0,position:"sticky",top:69,height:"calc(100vh - 69px)",overflowY:"auto"}},
         React.createElement("div",{style:{marginBottom:20}},
@@ -782,7 +880,12 @@ function App() {
             React.createElement(StatCard,{label:"Unique Tags",value:Object.keys(stats.tags||{}).length,color:"#f59e0b",icon:React.createElement(Icons.Tag)}),
             React.createElement(StatCard,{label:"Sources",value:Object.keys(stats.sources||{}).length,color:"#06b6d4",icon:React.createElement(Icons.Upload)})
           ),
-          React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}},
+          // auto-fit/minmax rather than a fixed "1fr 1fr": collapses to one
+          // column once a column would drop under 260px (e.g. narrow/phone
+          // viewports), which BarChart needs -- its 90px fixed label plus
+          // the bar track otherwise gets crushed to near-illegible widths
+          // in a forced two-up grid (issue #199 mobile audit).
+          React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))",gap:16}},
             React.createElement("div",{style:{background:theme.surface,border:"1px solid "+theme.border,borderRadius:8,padding:20}},
               React.createElement("h3",{style:{fontFamily:mono,fontSize:13,fontWeight:600,color:theme.textSecondary,marginBottom:16,textTransform:"uppercase",letterSpacing:"0.04em"}},"By Category"),
               React.createElement(BarChart,{data:stats.categories||{},colorMap:theme.categoryColors})
@@ -800,13 +903,24 @@ function App() {
             React.createElement(BarChart,{data:vitality.vitality_buckets||{},preserveOrder:true,colorMap:{"0.00-0.05":theme.danger,"0.05-0.25":"#f59e0b","0.25-0.50":"#eab308","0.50-0.75":"#84cc16","0.75+":"#22c55e"}})
           ),
           React.createElement("div",{style:{background:theme.surface,border:"1px solid "+theme.border,borderRadius:8,padding:20,marginTop:16}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:16}},
+              React.createElement("h3",{style:{fontFamily:mono,fontSize:13,fontWeight:600,color:theme.textSecondary,textTransform:"uppercase",letterSpacing:"0.04em"}},"Vault Trend"),
+              React.createElement("span",{style:{fontFamily:mono,fontSize:12,color:theme.textMuted}}, (trend.snapshots||[]).length+" daily snapshot"+((trend.snapshots||[]).length===1?"":"s"))
+            ),
+            React.createElement(TrendChart,{data:trend.snapshots||[],valueKey:"total_memories",color:theme.accent})
+          ),
+          React.createElement("div",{style:{background:theme.surface,border:"1px solid "+theme.border,borderRadius:8,padding:20,marginTop:16}},
             React.createElement("h3",{style:{fontFamily:mono,fontSize:13,fontWeight:600,color:theme.textSecondary,marginBottom:16,textTransform:"uppercase",letterSpacing:"0.04em"}},"Top Tags"),
             React.createElement(BarChart,{data:Object.fromEntries(Object.entries(stats.tags||{}).sort((a,b)=>b[1]-a[1]).slice(0,10))})
           ),
           React.createElement("div",{style:{background:theme.surface,border:"1px solid "+theme.border,borderRadius:8,padding:20,marginTop:16}},
             React.createElement("h3",{style:{fontFamily:mono,fontSize:13,fontWeight:600,color:theme.textSecondary,marginBottom:12,textTransform:"uppercase",letterSpacing:"0.04em"}},"Server Info"),
             React.createElement("div",{style:{fontFamily:mono,fontSize:13,color:theme.textSecondary,lineHeight:2}},
-              React.createElement("div",null, React.createElement("span",{style:{color:theme.textMuted}},"Database: "), React.createElement("code",{style:{color:theme.text}}, stats.db_path||"~/.remind-me/memory.db")),
+              // wordBreak so an unusually long db path (deep home dirs,
+              // Windows-style paths) wraps instead of overflowing the
+              // panel on narrow viewports -- the other <code> values here
+              // are all short and fixed-length so don't need it.
+              React.createElement("div",null, React.createElement("span",{style:{color:theme.textMuted}},"Database: "), React.createElement("code",{style:{color:theme.text,wordBreak:"break-all"}}, stats.db_path||"~/.remind-me/memory.db")),
               React.createElement("div",null, React.createElement("span",{style:{color:theme.textMuted}},"Size: "), React.createElement("code",{style:{color:theme.text}}, (stats.db_size_mb||0)+" MB")),
               React.createElement("div",null, React.createElement("span",{style:{color:theme.textMuted}},"Search engine: "), React.createElement("code",{style:{color:theme.text}}, "SQLite FTS5")),
               React.createElement("div",null, React.createElement("span",{style:{color:theme.textMuted}},"API: "), React.createElement("code",{style:{color:theme.text}}, window.location.origin))

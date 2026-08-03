@@ -71,7 +71,44 @@ fn int_query(request: &Request, name: &str, default: usize) -> Result<usize, (u1
 /// `REMIND_ME_API_KEY` is set, matching the reference's own rationale: a
 /// health check has to work whether or not auth is configured.
 pub fn health(_conn: &Connection, _wiki: &Wiki, _req: &Request, _params: &Params) -> (u16, Body) {
-    ok(json!({ "status": "ok" }))
+    // The version rides on `/health` rather than only on `/api/versions`
+    // because this route is unauthenticated, and the reference is explicit
+    // about why that matters: a wrong or missing API key is exactly the
+    // situation where you most want to know which build you are talking to.
+    // The dashboard header reads its own node's version from here for that
+    // reason, and asks `/api/versions` only for the hub's.
+    ok(json!({
+        "status": "ok",
+        "version": remind_me_core::updater::INSTALLED_VERSION,
+    }))
+}
+
+/// Which builds are on each side of sync.
+///
+/// The node's own version is the point on a standalone install; `hub` exists
+/// for the case the dashboard has no other way to see. Auth-gated by the
+/// `/api/` prefix, unlike `/health`, and for a reason the reference states
+/// plainly: this node's build is its own to publish, the hub's is another
+/// machine's.
+///
+/// Best-effort throughout — an unreachable hub yields `null` rather than an
+/// error, so the dashboard omits a line instead of rendering a failure into
+/// its own chrome.
+pub fn api_versions(
+    _conn: &Connection,
+    _wiki: &Wiki,
+    _req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    let node_id = remind_me_core::sync::configured_node_id();
+    ok(json!({
+        "version": remind_me_core::updater::INSTALLED_VERSION,
+        // `""` means unconfigured, and an empty string in a UI reads as a
+        // rendering bug rather than as an absence.
+        "node_id": if node_id.is_empty() { Value::Null } else { Value::String(node_id) },
+        "sync_enabled": remind_me_core::sync::sync_enabled(),
+        "hub": remind_me_core::sync::probe_hub_version(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -799,6 +836,11 @@ pub const ROUTES: &[Route] = &[
         methods: &["GET"],
         pattern: "/",
         handler: dashboard,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/api/versions",
+        handler: api_versions,
     },
     Route {
         methods: &["GET"],
