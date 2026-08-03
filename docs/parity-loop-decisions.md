@@ -211,6 +211,27 @@ with the existing `remind_me_update`, `remind_me_delete`, or an
 
 ---
 
+## #111 — vault digest
+
+**Two of the reference's five digest sections are omitted, not stubbed.**
+Upcoming/overdue reminders and sync status read from subsystems this crate
+does not have yet (#116 and #114). They are modelled as `Option` and left out
+of both the Markdown and the JSON.
+
+A "Reminders: none" line on a build with no reminders subsystem says something
+false — it reads as "you have nothing due" when the truth is "nothing here can
+tell". Omitting is the honest shape, and filling them in is a one-line change
+for whichever issue lands first. `status.rs`'s module docs make the same
+argument about hollow stubs.
+
+**The digest has no `include_sensitive`, matching the reference.** It is the
+ambient, often-scheduled surface the flag exists to protect, with no per-call
+caller intent to opt back in against. The exclusion covers the count as well
+as the list — a total that included a sensitive memory would leak that
+something is there.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

@@ -1374,3 +1374,51 @@ fn default_contradiction_limit() -> usize {
 
 pub const CONTRADICTION_LIMIT_MIN: usize = 1;
 pub const CONTRADICTION_LIMIT_MAX: usize = 100;
+
+// ---------------------------------------------------------------------------
+// Vault digest (gap T5, issue #111)
+// ---------------------------------------------------------------------------
+
+/// One memory as the digest lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DigestRecentMemory {
+    pub id: String,
+    pub content: String,
+    pub category: String,
+    pub created_at: String,
+}
+
+/// The digest's underlying data.
+///
+/// `reminders_*` and `sync` are `Option` because their subsystems do not exist
+/// yet (#116, #114). `None` means "nothing here can tell", which is different
+/// from "nothing to report" — the renderer omits those sections rather than
+/// printing a "none" that would read as an answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestData {
+    pub generated_at: String,
+    pub since_days: i64,
+    pub recent_memories: Vec<DigestRecentMemory>,
+    /// The true count, uncapped, so the `MAX_RECENT_MEMORIES` cap is visible.
+    pub recent_total: i64,
+    pub vitality: crate::vitality::VitalityReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reminders_upcoming: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reminders_overdue: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<String>,
+}
+
+/// Request for a vault digest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestInput {
+    #[serde(default = "default_digest_since_days")]
+    pub since_days: i64,
+    #[serde(default)]
+    pub response_format: ResponseFormat,
+}
+
+fn default_digest_since_days() -> i64 {
+    crate::digest::DEFAULT_SINCE_DAYS
+}

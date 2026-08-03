@@ -13,8 +13,8 @@ use remind_me_core::{
     consolidation::consolidate,
     contradictions,
     db::queries,
-    dbs_import, entity, export, history, importer, mempalace_import, normalize, recalibrate,
-    saved_searches, stats, status,
+    dbs_import, digest, entity, export, history, importer, mempalace_import, normalize,
+    recalibrate, saved_searches, stats, status,
     sync::{SyncPeer, SyncWorker},
     undo_import, updater, vectors, vitality, watcher,
     webhook::Webhook,
@@ -22,10 +22,10 @@ use remind_me_core::{
     wiki_fs::Wiki,
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
     ConsolidateInput, ContradictionCandidatesInput, Database, DbsImportInput, DecomposeBatchInput,
-    DecomposeInput, EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput,
+    DecomposeInput, DigestInput, EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput,
     FeedbackInput, HistoryInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
     MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput, NormalizeBatchInput,
-    RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput, RevertInput,
+    RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput, ResponseFormat, RevertInput,
     SaveSearchInput, SavedSearchNameInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome,
     ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN,
     CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX,
@@ -596,6 +596,17 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_digest",
+                                "description": "A vault digest: memories added recently, and current vitality. Sensitive memories are always excluded, with no override — a digest is the ambient surface that flag exists to protect. Sections whose subsystem is not built yet are omitted rather than shown empty.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "since_days": { "type": "integer", "default": 7, "minimum": digest::DIGEST_SINCE_DAYS_MIN, "maximum": digest::DIGEST_SINCE_DAYS_MAX, "description": "How many days back counts as recent" },
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown" }
                                     }
                                 }
                             },
@@ -1406,6 +1417,30 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_digest" => {
+                        let mut input: DigestInput =
+                            serde_json::from_value(args).unwrap_or(DigestInput {
+                                since_days: digest::DEFAULT_SINCE_DAYS,
+                                response_format: Default::default(),
+                            });
+                        input.since_days = input
+                            .since_days
+                            .clamp(digest::DIGEST_SINCE_DAYS_MIN, digest::DIGEST_SINCE_DAYS_MAX);
+                        match digest::build_digest(&conn, input.since_days) {
+                            Ok(data) => {
+                                let text = match input.response_format {
+                                    ResponseFormat::Json => {
+                                        serde_json::to_string_pretty(&data).unwrap()
+                                    }
+                                    ResponseFormat::Markdown => digest::render_markdown(&data),
+                                };
+                                json!({ "content": [{ "type": "text", "text": text }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Digest error: {}", e) }] })
                             }
                         }
                     }

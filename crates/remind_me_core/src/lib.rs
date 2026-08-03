@@ -4,6 +4,7 @@ pub mod consolidation;
 pub mod contradictions;
 pub mod db;
 pub mod dbs_import;
+pub mod digest;
 pub mod embedder;
 pub mod entity;
 pub mod expansion;
