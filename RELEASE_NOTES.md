@@ -2,6 +2,30 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — remind_me_recalibrate_candidates (#102)
+
+### Added
+- **`remind_me_recalibrate_candidates`** — surfaces memories whose importance
+  classification may have gone stale: they look important (`base_weight >=
+  1.15`, or a durable `memory_type` of `decision`/`fact`), have gone 90+ days
+  without access, and have never received feedback. `vitality.rs` seeds
+  `base_weight` at write time and adjusts it from explicit feedback, but
+  nothing re-examined whether the original classification still held — a
+  "decision" later reversed, or a "fact" superseded in spirit but never through
+  the formal triple path, kept the importance it was born with.
+- Read-only, and deliberately with **no apply half**: `remind_me_reclassify`/
+  `_batch` already change `memory_type` (and the `decay_rate` that follows),
+  and `remind_me_feedback` already nudges `base_weight` alone. A third writer
+  would duplicate both. Matches the reference's own reasoning.
+
+### Notes
+- The issue's third acceptance criterion asked for `markdown` and `json`
+  `response_format` variants. The reference's `RecalibrateCandidatesInput`
+  carries only `limit` and always returns JSON, so adding the field would have
+  created exactly the signature divergence this port exists to remove. Built to
+  match the reference; noted on the issue rather than silently either way.
+- Tool coverage: 44 → 45 of 61.
+
 ## 2026-08-03 — Schema regenerated at remind_me v27 (#101)
 
 ### Changed

@@ -12,7 +12,7 @@ use remind_me_core::{
     backup, capture,
     consolidation::consolidate,
     db::queries,
-    dbs_import, entity, export, importer, mempalace_import, normalize, stats, status,
+    dbs_import, entity, export, importer, mempalace_import, normalize, recalibrate, stats, status,
     sync::{SyncPeer, SyncWorker},
     updater, vectors, vitality, watcher,
     webhook::Webhook,
@@ -22,14 +22,15 @@ use remind_me_core::{
     ConsolidateInput, Database, DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput,
     EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
     MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
-    NormalizeApplyInput, NormalizeBatchInput, ReclassifyBatchInput, ReclassifyInput, UpdateOutcome,
-    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
-    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
-    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
-    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
-    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX,
-    MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
-    NORMALIZE_BATCH_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
+    ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
+    CONSOLIDATE_SIMILARITY_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
+    DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
+    EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
+    MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX,
+    NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX,
+    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -585,6 +586,16 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_recalibrate_candidates",
+                                "description": "Fetch memories whose importance classification may be stale: they look important (high base_weight, or a durable memory_type like decision/fact) yet have gone untouched for 90+ days and have never received feedback. Read-only — review each and apply changes with remind_me_reclassify (a type change) or remind_me_feedback (a pure importance nudge). Most candidates will look fine; this only narrows an unbounded set to a reviewable batch.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "limit": { "type": "integer", "default": 20, "minimum": RECALIBRATE_LIMIT_MIN, "maximum": RECALIBRATE_LIMIT_MAX, "description": "Number of importance-review candidates to return" }
                                     }
                                 }
                             },
@@ -1293,6 +1304,26 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_recalibrate_candidates" => {
+                        // Same clamp-don't-reject posture as the other batch
+                        // readers here: an out-of-range limit is a caller
+                        // mistake with an obvious right answer, and refusing
+                        // costs a round trip to learn a bound the schema
+                        // already advertises.
+                        let mut input: RecalibrateCandidatesInput = serde_json::from_value(args)
+                            .unwrap_or(RecalibrateCandidatesInput { limit: 20 });
+                        input.limit = input
+                            .limit
+                            .clamp(RECALIBRATE_LIMIT_MIN, RECALIBRATE_LIMIT_MAX);
+                        match recalibrate::candidates(&conn, &input) {
+                            Ok(batch) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&batch).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Recalibrate candidates error: {}", e) }] })
                             }
                         }
                     }
