@@ -1072,3 +1072,65 @@ pub struct RecalibrateCandidatesResult {
     /// another round is worth requesting.
     pub total_candidates: i64,
 }
+
+// ---------------------------------------------------------------------------
+// Import rollback (gap T8, issue #103)
+// ---------------------------------------------------------------------------
+
+/// Which import ledger an undo targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UndoImportKind {
+    Chat,
+    Dbs,
+    Mempalace,
+}
+
+/// Request to roll back a previous import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoImportInput {
+    pub import_kind: UndoImportKind,
+    /// Scope to one import run. For `chat` this is the `chat_imports`
+    /// `import_id`; for `dbs` the `dbs_source`; for `mempalace` a `drawer_id`
+    /// prefix. `None` targets every record of that kind.
+    #[serde(default)]
+    pub import_id: Option<String>,
+    /// Defaults to **true**. Bulk deletion that propagates over sync is opt-in,
+    /// not opt-out — the asymmetry between an accidental dry run and an
+    /// accidental deletion is the whole argument.
+    #[serde(default = "default_undo_dry_run")]
+    pub dry_run: bool,
+    #[serde(default = "default_undo_limit")]
+    pub limit: usize,
+}
+
+fn default_undo_dry_run() -> bool {
+    true
+}
+
+fn default_undo_limit() -> usize {
+    500
+}
+
+/// Inclusive bounds the reference enforces on an undo batch.
+pub const UNDO_IMPORT_LIMIT_MIN: usize = 1;
+pub const UNDO_IMPORT_LIMIT_MAX: usize = 5000;
+
+/// Outcome of an undo call, dry run or otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoImportResult {
+    pub import_kind: UndoImportKind,
+    /// Human-readable description of what was targeted, echoed back so a
+    /// caller can see whether their scope meant what they thought.
+    pub scope: String,
+    pub matched: usize,
+    pub dry_run: bool,
+    /// Whether this was a tombstone or an outright delete, and why.
+    pub mode: String,
+    pub removed: usize,
+    /// What is left after this call — the resumability signal.
+    pub remaining: usize,
+    pub tracking_rows_removed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
