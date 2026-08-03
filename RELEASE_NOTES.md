@@ -2,6 +2,28 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — remind_me_digest (#111)
+
+### Added
+- **`remind_me_digest`** — memories added in a window plus current vitality,
+  in Markdown or JSON. The listing is capped at 20 but the true count is
+  carried separately, so a busy week reads as "20 of 340" rather than silently
+  looking like a quiet one.
+
+### Notes
+- **No `include_sensitive`, deliberately.** Unlike search and list, a digest is
+  the ambient, often-scheduled surface the flag exists to protect, and it has
+  no per-call caller intent to opt back in against. The exclusion covers the
+  count as well as the list.
+- **Two of the reference's five sections are omitted rather than stubbed.**
+  Reminders and sync status read from subsystems that do not exist yet (#116,
+  #114). A "Reminders: none" line would read as "you have nothing due" when the
+  truth is "nothing here can tell", so the sections are absent from both the
+  Markdown and the JSON until their subsystems land.
+- An empty window says so explicitly — "nothing new this week" is information;
+  a blank section reads as a bug.
+- Tool coverage: 53 → **54 of 61**.
+
 ## 2026-08-03 — remind_me_contradiction_candidates (#110)
 
 ### Added
