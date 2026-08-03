@@ -5,9 +5,10 @@
 //! The three `schema_*.sql` files beside this module are **generated verbatim**
 //! from a `remind_me` database — dumped straight out of its `sqlite_master`.
 //! They are not hand-written and should not be hand-edited; regenerate them
-//! instead.
+//! with `scripts/regenerate_schema.py --reference <path-to-remind_me>`, which
+//! is the ADR-0007 method made repeatable.
 //!
-//! An earlier version of this module transcribed the reference's 19 historical
+//! An earlier version of this module transcribed the reference's historical
 //! migrations by hand, reconstructing each step. Three of those steps were
 //! written from *this* crate's pre-existing tables rather than from the
 //! reference, and the divergence went unnoticed because the parity check only
@@ -45,7 +46,7 @@ use rusqlite::{Connection, Result};
 /// to choose: `remind_me` reads it on open and skips migrating anything already
 /// at its own target, so claiming a version the schema does not match is what
 /// makes a database silently unreadable to it.
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 27;
 
 const SCHEMA_TABLES: &str = include_str!("schema_tables.sql");
 const SCHEMA_INDEXES: &str = include_str!("schema_indexes.sql");

@@ -1,5 +1,13 @@
 -- GENERATED from remind_me's schema. Do not hand-edit.
--- Regenerate by dumping sqlite_master from a reference database.
+-- Regenerate with: python3 scripts/regenerate_schema.py --reference <path>
+
+CREATE TABLE IF NOT EXISTS analytics_snapshots (
+            id               INTEGER PRIMARY KEY,
+            captured_at      TEXT NOT NULL,
+            total_memories   INTEGER NOT NULL,
+            vitality_buckets TEXT NOT NULL,
+            category_counts  TEXT NOT NULL
+        );
 
 CREATE TABLE IF NOT EXISTS chat_imports (
             import_id   TEXT PRIMARY KEY,
@@ -53,7 +61,7 @@ CREATE TABLE IF NOT EXISTS memories (
             metadata    TEXT NOT NULL DEFAULT '{}',  -- JSON object
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
-        , capture_id TEXT DEFAULT NULL, node_id TEXT DEFAULT NULL, client TEXT NOT NULL DEFAULT 'unknown', accessed_at TEXT DEFAULT NULL, access_count INTEGER NOT NULL DEFAULT 0, decay_rate REAL NOT NULL DEFAULT 0.1, vitality REAL NOT NULL DEFAULT 1.0, base_weight REAL NOT NULL DEFAULT 1.0, status TEXT NOT NULL DEFAULT 'active', memory_type TEXT NOT NULL DEFAULT 'unclassified', source_capture_id TEXT DEFAULT NULL, subject TEXT DEFAULT NULL, predicate TEXT DEFAULT NULL, object TEXT DEFAULT NULL, superseded_by TEXT DEFAULT NULL, doc_id TEXT DEFAULT NULL, chunk_index INTEGER DEFAULT NULL, deleted_at TEXT DEFAULT NULL);
+        , capture_id TEXT DEFAULT NULL, node_id TEXT DEFAULT NULL, client TEXT NOT NULL DEFAULT 'unknown', accessed_at TEXT DEFAULT NULL, access_count INTEGER NOT NULL DEFAULT 0, decay_rate REAL NOT NULL DEFAULT 0.1, vitality REAL NOT NULL DEFAULT 1.0, base_weight REAL NOT NULL DEFAULT 1.0, status TEXT NOT NULL DEFAULT 'active', memory_type TEXT NOT NULL DEFAULT 'unclassified', source_capture_id TEXT DEFAULT NULL, subject TEXT DEFAULT NULL, predicate TEXT DEFAULT NULL, object TEXT DEFAULT NULL, superseded_by TEXT DEFAULT NULL, doc_id TEXT DEFAULT NULL, chunk_index INTEGER DEFAULT NULL, deleted_at TEXT DEFAULT NULL, remind_at TEXT DEFAULT NULL, sensitive INTEGER NOT NULL DEFAULT 0);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
             content, category, tags,
@@ -86,6 +94,17 @@ CREATE TABLE IF NOT EXISTS memory_feedback (
             created_at   TEXT NOT NULL
         );
 
+CREATE TABLE IF NOT EXISTS memory_revisions (
+            id              INTEGER PRIMARY KEY,
+            memory_id       TEXT NOT NULL,
+            content         TEXT,
+            category        TEXT,
+            tags            TEXT,
+            metadata        TEXT,
+            edited_at       TEXT NOT NULL,
+            revision_reason TEXT DEFAULT NULL
+        , sensitive INTEGER DEFAULT NULL);
+
 CREATE TABLE IF NOT EXISTS memory_tags (
             memory_id  TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
             tag        TEXT NOT NULL,
@@ -98,6 +117,29 @@ CREATE TABLE IF NOT EXISTS mempalace_imports (
             imported_at TEXT NOT NULL
         );
 
+CREATE TABLE IF NOT EXISTS reminder_deliveries (
+            id           INTEGER PRIMARY KEY,
+            memory_id    TEXT NOT NULL,
+            remind_at    TEXT NOT NULL,
+            delivered_at TEXT NOT NULL
+        );
+
+CREATE TABLE IF NOT EXISTS saved_search_seen_memories (
+            saved_search_id TEXT NOT NULL,
+            memory_id       TEXT NOT NULL,
+            first_seen_at   TEXT NOT NULL
+        );
+
+CREATE TABLE IF NOT EXISTS saved_searches (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL UNIQUE,
+            query      TEXT NOT NULL,
+            filters    TEXT NOT NULL,
+            watch      INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
 CREATE TABLE IF NOT EXISTS sync_flags (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -106,7 +148,7 @@ CREATE TABLE IF NOT EXISTS sync_flags (
 CREATE TABLE IF NOT EXISTS sync_log (
             remote_id   TEXT NOT NULL,
             last_pull   TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00',
-            last_push   TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00', last_pull_id TEXT NOT NULL DEFAULT '',
+            last_push   TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00', last_pull_id TEXT NOT NULL DEFAULT '', last_attempt_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00', last_push_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00', last_pull_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00',
             PRIMARY KEY (remote_id)
         );
 

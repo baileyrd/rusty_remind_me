@@ -1,5 +1,8 @@
 -- GENERATED from remind_me's schema. Do not hand-edit.
--- Regenerate by dumping sqlite_master from a reference database.
+-- Regenerate with: python3 scripts/regenerate_schema.py --reference <path>
+
+CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_captured_at
+            ON analytics_snapshots(captured_at);
 
 CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
 
@@ -30,6 +33,10 @@ CREATE INDEX IF NOT EXISTS idx_memories_doc_chunk ON memories(doc_id, chunk_inde
 
 CREATE INDEX IF NOT EXISTS idx_memories_memory_type ON memories(memory_type);
 
+CREATE INDEX IF NOT EXISTS idx_memories_normalized_from ON memories(json_extract(metadata, '$.normalized_from'));
+
+CREATE INDEX IF NOT EXISTS idx_memories_remind_at ON memories(remind_at) WHERE remind_at IS NOT NULL AND deleted_at IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 
 CREATE INDEX IF NOT EXISTS idx_memories_source_capture_id ON memories(source_capture_id);
@@ -58,6 +65,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_entities_entity
 CREATE INDEX IF NOT EXISTS idx_memory_feedback_memory_id
             ON memory_feedback(memory_id);
 
+CREATE INDEX IF NOT EXISTS idx_memory_revisions_memory_edited
+            ON memory_revisions(memory_id, edited_at);
+
 CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag);
 
 CREATE INDEX IF NOT EXISTS idx_outbox_created_at
@@ -68,6 +78,12 @@ CREATE INDEX IF NOT EXISTS idx_outbox_memory_id
 
 CREATE INDEX IF NOT EXISTS idx_outbox_unsent
             ON sync_outbox(sent_at) WHERE sent_at = '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminder_deliveries_memory_remind_at
+            ON reminder_deliveries(memory_id, remind_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_search_seen_memories_search_memory
+            ON saved_search_seen_memories(saved_search_id, memory_id);
 
 CREATE INDEX IF NOT EXISTS idx_vec_chunks_memory ON vec_chunks(memory_rowid);
 

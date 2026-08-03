@@ -2,6 +2,55 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — Schema regenerated at remind_me v27 (#101)
+
+### Changed
+- **`SCHEMA_VERSION` 19 → 27**, with `schema_tables.sql`, `schema_indexes.sql`
+  and `schema_triggers.sql` regenerated from `remind_me` v1.54.0. **This is a
+  breaking change**: it alters what schema a fresh database is created with.
+  Existing databases reconcile on open with rows preserved, and #95's
+  pre-migration snapshot fires for the transition (now asserted by a test).
+- Previously a v27 database opened by this crate hit the reconciler with 5
+  tables and 2 `memories` columns it did not know about. Interop now works in
+  both directions rather than only one.
+
+### Added
+- **5 tables** — `analytics_snapshots`, `memory_revisions`,
+  `reminder_deliveries`, `saved_searches`, `saved_search_seen_memories`.
+- **6 indexes** — including `idx_memories_remind_at` and
+  `idx_memories_normalized_from`.
+- **5 columns** — `memories.remind_at` (v23), `memories.sensitive` (v26),
+  `sync_log.last_pull_at`/`.last_push_at`/`.last_attempt_at` (v20). The last
+  three split the sync cursor from the liveness clock, so a stalled peer is
+  finally distinguishable from an idle one.
+- **`remind_at` and `sensitive` in the `memories_outbox_ai`/`_au` payloads.**
+  A synced peer rebuilds a memory from the payload alone, so a column missing
+  from it is dropped in transit — a failure that is invisible locally and only
+  shows up as data loss on the other node.
+- **`scripts/regenerate_schema.py`** — ADR-0007's generation method, which was
+  previously prose performed by hand, as a repeatable script. It refuses to
+  write anything if the generated `user_version` disagrees with the
+  reference's `_SCHEMA_VERSION`, so a partial migration ladder cannot produce
+  a mislabelled dump.
+
+### Fixed
+- **`ARCHITECTURE.md` §5 no longer reproduces the schema DDL.** The inline copy
+  had gone stale — it still showed `last_accessed_at`, an `entities` table with
+  no `node_id`, cascading foreign keys on `memory_entities`, and a
+  `wiki_pages.topic` column, four shapes the schema tests assert are wrong. It
+  now points at the generated files and the tests that police them. Tenet 3 and
+  the §5 heading both read Version 27.
+
+### Notes
+- Nothing was removed by the regeneration. The four graph outbox triggers show
+  as changed but differ only in line wrapping.
+- Issue #100's hand-added `memories_outbox_au` guard came back identical in the
+  v27 dump, so that annotated exception erased itself as predicted. A test now
+  pins it rather than trusting the reasoning.
+- This unblocks the downstream schema-dependent work: saved searches (#108),
+  history/revert (#109), analytics (#112), reminders (#116–#118), and the
+  `sensitive` tool fields (#105).
+
 ## 2026-08-03 — The sync outbox no longer records every read (#100)
 
 ### Fixed
