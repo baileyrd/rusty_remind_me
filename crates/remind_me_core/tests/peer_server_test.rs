@@ -386,3 +386,103 @@ fn sync_enabled_requires_all_three_of_node_id_hub_url_and_secret() {
     std::env::remove_var(HUB_URL_ENV);
     std::env::remove_var(SYNC_SECRET_ENV);
 }
+
+// ---------------------------------------------------------------------------
+// /count (gap A5, issue #113)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn count_reports_the_hubs_field_shape() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(&conn, "one");
+    add(&conn, "two");
+
+    let (status, body) = serve(&conn, &authed("GET", "/count", ""));
+
+    assert_eq!(status, 200);
+    // Field-for-field the hub's shape, so one client-side comparator serves
+    // both remotes. A peer-shaped variant would mean a second copy of the diff
+    // logic — which is how the two eventually disagree about what drift means.
+    assert_eq!(body["role"], "peer");
+    assert_eq!(body["node_id"], "hub-node");
+    assert_eq!(body["memories"]["total"], 2);
+    assert_eq!(body["memories"]["live"], 2);
+    assert_eq!(body["memories"]["tombstones"], 0);
+    assert_eq!(body["entities"], 0);
+    assert_eq!(body["memory_entities"], 0);
+    assert_eq!(body["entity_relations"], 0);
+    assert!(body["version"].is_string());
+    assert!(body["time"].is_string());
+}
+
+#[test]
+fn count_always_reports_approximate_false_and_never_omits_it() {
+    let db = Database::open_in_memory().unwrap();
+
+    let (_, body) = serve(&db.conn(), &authed("GET", "/count", ""));
+
+    // A peer has no planner estimates to offer — the hub's `?approx=1` is a
+    // Postgres reltuples read with no SQLite equivalent. The field is still
+    // present, because a caller should not have to know which kind of remote
+    // it is talking to in order to read the answer.
+    assert_eq!(body["approximate"], false);
+    assert!(
+        body.get("approximate").is_some(),
+        "present-and-false, not omitted"
+    );
+}
+
+#[test]
+fn count_includes_tombstones_in_the_total() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let id = add(&conn, "will be tombstoned");
+    add(&conn, "still live");
+    conn.execute(
+        "UPDATE memories SET deleted_at = '2026-01-01T00:00:00+00:00' WHERE id = ?",
+        [&id],
+    )
+    .unwrap();
+
+    let (_, body) = serve(&conn, &authed("GET", "/count", ""));
+
+    // Deliberately NOT filtered on deleted_at. Both ends of a reconcile have
+    // to count identically: the hub counts every row and reports tombstones
+    // separately, so filtering here would make a healthy peer look permanently
+    // behind by its own tombstone count.
+    assert_eq!(body["memories"]["total"], 2);
+    assert_eq!(body["memories"]["live"], 1);
+    assert_eq!(body["memories"]["tombstones"], 1);
+}
+
+#[test]
+fn count_requires_authorization() {
+    let db = Database::open_in_memory().unwrap();
+
+    let (status, _) = serve(&db.conn(), &request("GET", "/count", None, ""));
+
+    assert_eq!(status, 401);
+}
+
+#[test]
+fn a_post_on_the_count_path_is_not_allowed() {
+    let db = Database::open_in_memory().unwrap();
+
+    // 405 rather than 404: the path exists, the method does not. Registering
+    // it in the known-paths list is what makes that distinction possible.
+    let (status, _) = serve(&db.conn(), &authed("POST", "/count", ""));
+
+    assert_eq!(status, 405);
+}
+
+#[test]
+fn health_also_reports_the_serving_build() {
+    let db = Database::open_in_memory().unwrap();
+
+    let (_, body) = serve(&db.conn(), &authed("GET", "/health", ""));
+
+    // A reconcile reports which build each side is running, and this is where
+    // the other side reads it from.
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+}

@@ -254,6 +254,30 @@ read.** One bad row should not blank a whole chart.
 
 ---
 
+## #113 — `GET /count` on the peer server
+
+**The issue's `approx=1`, `since=` and `by=origin_node` parameters belong to
+the *hub's* `/count`, not the peer server's.** The reference's
+`peer_server.py` takes no query parameters at all and always reports
+`"approximate": false`, with a comment explaining why: a peer has no planner
+estimates to offer. `?approx=1` is a Postgres `reltuples` read, and the hub is
+a Postgres service — E1, deliberately out of scope.
+
+Implemented the peer's endpoint faithfully: no parameters, `approximate`
+present-and-false. The three parameters would arrive with the hub if the hub
+were ever in scope.
+
+**Counts deliberately do not filter `deleted_at`.** Both ends of a reconcile
+have to count identically. The hub counts every row and reports tombstones
+separately, so filtering here would make a healthy peer look permanently
+behind by its own tombstone count.
+
+**`version` was added to the peer server's `/health` too.** A reconcile
+reports which build each side is running, and that is where the other side
+reads it from.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

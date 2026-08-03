@@ -2,6 +2,30 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — GET /count on the peer server (#113)
+
+### Added
+- **`GET /count`** on the sync peer server — record counts, field-for-field
+  the shape the hub returns, so one client-side comparator serves both
+  remotes. This is the pre-check that makes `remind_me_sync_reconcile` cheap:
+  diff counts before pulling anything.
+- **`version` on the peer server's `/health`**, which is where a reconcile
+  reads the other side's build from.
+
+### Notes
+- **The issue's `approx=1`, `since=` and `by=origin_node` parameters belong to
+  the hub's `/count`, not the peer server's.** The reference's peer endpoint
+  takes no query parameters and always reports `"approximate": false` — a peer
+  has no planner estimates to offer, since `?approx=1` is a Postgres
+  `reltuples` read and the hub is a Postgres service (E1, out of scope). The
+  field is still present rather than omitted, so a caller need not know which
+  kind of remote it is talking to.
+- **Counts do not filter `deleted_at`.** Both ends of a reconcile must count
+  identically; the hub counts every row and reports tombstones separately, so
+  filtering here would make a healthy peer look permanently behind by its own
+  tombstone count.
+- Peer-server route coverage: 6 → **7 of 7**.
+
 ## 2026-08-03 — Analytics snapshots and GET /api/analytics/trend (#112)
 
 ### Added
