@@ -2,6 +2,41 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — GET /api/versions, and the build on /health (#107)
+
+### Added
+- **`GET /api/versions`** — reports this node's build, its `node_id`,
+  whether sync is configured, and the hub's build when reachable. Auth-gated
+  by the `/api/` prefix: this node's build is its own to publish, the hub's is
+  another machine's.
+- **`version` on `GET /health`**, which is unauthenticated. Not in the issue's
+  criteria, but the dashboard header cannot work without it — the reference
+  reads the *node's* version from `/health` and only the *hub's* from
+  `/api/versions`, because `/health` still answers when the API key is wrong or
+  missing, and that is exactly when you want to know which build you are
+  talking to.
+- **`sync::probe_hub_version`** — a cached, best-effort probe of the hub's
+  `/health`. An unreachable hub yields `null` rather than an error, so the
+  dashboard omits a line instead of rendering a failure into its own chrome.
+
+### Changed
+- **`dashboard/App.jsx` re-copied verbatim from the reference** (it was 114
+  lines behind), which is what renders the version in the header. The file is
+  vendored under the same convention as the generated `schema_*.sql` —
+  regenerate, never patch. The newer copy also calls `/api/analytics/trend`,
+  which does not exist here until #112; that fetch is individually caught, so
+  the trend panel renders empty rather than breaking the page.
+
+### Fixed
+- **Gap A6 was a false positive and is withdrawn.** There is no target-only
+  `/api` route: the row came from an extraction that grepped `"/api"` string
+  literals and matched a doc comment. `ROUTES` has 20 patterns, all of which
+  the reference serves too. The gap analysis's headline row now reads 20
+  shared rather than "21 (20 shared + 1 target-only)".
+
+### Notes
+- HTTP route coverage: 20 → **21 of 25**.
+
 ## 2026-08-03 — Per-call retrieval strategy (#106)
 
 ### Added

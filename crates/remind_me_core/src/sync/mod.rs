@@ -101,6 +101,59 @@ pub fn sync_enabled() -> bool {
         && !configured_sync_secret().is_empty()
 }
 
+/// How long a probed hub version stays fresh.
+///
+/// Several dashboard tabs refreshing must not turn a page load into hub
+/// traffic; a build number does not change between requests anyway.
+const HUB_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+static HUB_VERSION_CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
+    std::sync::Mutex::new(None);
+
+/// The hub's build, probed from its `/health`.
+///
+/// `None` when sync is not configured, when the hub is unreachable, or when it
+/// reports no version — all three are the same thing to a caller: no line to
+/// render. Deliberately best-effort: a version display must never be able to
+/// fail the page it decorates.
+///
+/// **Probed live rather than read from sync state.** The reference makes this
+/// argument and it applies here too: a dashboard started standalone never runs
+/// a sync cycle, so anything populated by that cycle would report `null`
+/// forever while looking like a working feature. Asking the hub is correct
+/// regardless of which process is serving the page.
+///
+/// Wrapped here rather than exposing `sync::http`: the API crate has no
+/// business making raw HTTP requests, and this keeps the auth header and the
+/// cache in one place.
+pub fn probe_hub_version() -> Option<String> {
+    if !sync_enabled() {
+        return None;
+    }
+
+    let mut cache = HUB_VERSION_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, value)) = cache.as_ref() {
+        if at.elapsed() < HUB_VERSION_TTL {
+            return value.clone();
+        }
+    }
+
+    let url = format!("{}/health", configured_hub_url().trim_end_matches('/'));
+    let version = match http::get(&url, &configured_sync_secret()) {
+        Ok((200, body)) => serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| {
+                v.get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            }),
+        _ => None,
+    };
+
+    *cache = Some((std::time::Instant::now(), version.clone()));
+    version
+}
+
 const NOW_ISO_EXPR: &str = "strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00'";
 
 /// Align `sync_flags.sync_enabled` with [`sync_enabled`], every time the

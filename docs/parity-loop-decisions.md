@@ -100,6 +100,43 @@ multiplier rather than a reset to built-in defaults.
 
 ---
 
+## #107 — `/api/versions`
+
+**Gap A6 was withdrawn: there is no target-only `/api` route.** The row came
+from an extraction that grepped `"/api"` string literals and matched a doc
+comment — `routes.rs`'s note that the vendored dashboard talks to
+`window.location.origin + "/api"`. `ROUTES` contains 20 patterns, all of which
+the reference also serves. The headline table's "21 (20 shared + 1
+target-only)" is corrected to 20 shared, and the gap row is struck through
+rather than deleted so the next run does not re-derive it.
+
+**Added `version` to `/health` as well as `/api/versions`.** Not in the issue's
+criteria, but the dashboard header cannot be satisfied without it: the
+reference reads the *node's* version from `/health` and only the *hub's* from
+`/api/versions`. Its stated reason is worth keeping — `/health` is
+unauthenticated, so it still answers when the API key is wrong or missing,
+which is exactly when you most want to know which build you are talking to.
+
+**Re-copied `dashboard/App.jsx` verbatim from the reference rather than
+patching in a version header.** The file is vendored under the same convention
+as the generated `schema_*.sql` — regenerate, never patch. The copy was 114
+lines behind.
+
+The cost: the newer dashboard also calls `/api/analytics/trend`, which does not
+exist here until #112. Accepted because every fetch in that component is
+individually caught and a failure leaves the trend state at its empty default,
+so the chart renders empty rather than the page breaking. Revisit if #112 slips
+far enough that an empty panel becomes confusing.
+
+**`probe_hub_version` was added to `sync` rather than making `sync::http`
+public.** The API crate has no business making raw HTTP requests, and this
+keeps the auth header, the timeout and the cache in one place. Probed live
+rather than read from sync state, following the reference's reasoning: a
+dashboard started standalone never runs a sync cycle, so anything populated by
+that cycle would report `null` forever while looking like a working feature.
+
+---
+
 ## Process corrections made mid-loop
 
 **The local gate now runs `cargo test --workspace --no-fail-fast`.** `cargo
