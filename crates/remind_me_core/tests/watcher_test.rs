@@ -44,6 +44,7 @@ fn live_memories(conn: &Connection) -> Vec<String> {
     queries::list_memories(
         conn,
         &MemoryListInput {
+            include_sensitive: false,
             limit: 100,
             ..Default::default()
         },

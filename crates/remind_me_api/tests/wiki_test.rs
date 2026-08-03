@@ -185,6 +185,7 @@ fn wiki_status_reports_pages_and_pending_compile() {
         remind_me_core::db::queries::add_memory(
             conn,
             remind_me_core::MemoryAddInput {
+                sensitive: false,
                 content: "a fact awaiting synthesis".into(),
                 category: "general".into(),
                 tags: vec![],

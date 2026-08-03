@@ -190,6 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let query = args[2..].join(" ");
                 let search_input = MemorySearchInput {
+                    include_sensitive: false,
                     query,
                     category: None,
                     tags: None,
@@ -214,6 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let content = args[2..].join(" ");
                 let add_input = MemoryAddInput {
+                    sensitive: false,
                     content,
                     category: "general".to_string(),
                     tags: vec![],

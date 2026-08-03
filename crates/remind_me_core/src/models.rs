@@ -76,6 +76,12 @@ pub struct MemoryAddInput {
     pub object: Option<String>,
     #[serde(default)]
     pub entities: Vec<EntityInput>,
+    /// Mark this memory sensitive: a "don't surface by default" convenience
+    /// flag, **not access control**. This is a single-user store and anyone
+    /// with the database reads everything regardless — the flag only keeps a
+    /// memory out of ordinary search and list results unless asked for.
+    #[serde(default)]
+    pub sensitive: bool,
 }
 
 fn default_category() -> String {
@@ -113,6 +119,11 @@ pub struct MemorySearchInput {
     pub include_neighbors: bool,
     /// Surface memories frequently retrieved alongside these.
     ///
+    /// Include memories marked sensitive. Off by default, so a sensitive
+    /// memory never surfaces in an ordinary search — see
+    /// [`MemoryAddInput::sensitive`] for why this is not access control.
+    #[serde(default)]
+    pub include_sensitive: bool,
     /// Only controls *surfacing*. Associations are reinforced on every search
     /// regardless — see [`crate::expansion::record_co_retrieval`].
     #[serde(default)]
@@ -140,6 +151,11 @@ pub struct MemoryListInput {
     pub offset: usize,
     #[serde(default)]
     pub response_format: ResponseFormat,
+    /// Include memories marked sensitive. Off by default, so a sensitive
+    /// memory never surfaces in an ordinary list — see
+    /// [`MemoryAddInput::sensitive`] for why this is not access control.
+    #[serde(default)]
+    pub include_sensitive: bool,
 }
 
 fn default_list_limit() -> usize {
@@ -171,6 +187,15 @@ pub struct MemoryUpdateInput {
     pub category: Option<String>,
     pub tags: Option<Vec<String>>,
     pub metadata: Option<serde_json::Value>,
+    /// Set or clear the sensitive flag. `None` leaves it alone, which is why
+    /// this is an `Option<bool>` rather than a `bool` — without the third
+    /// state, every update that did not mention the flag would clear it.
+    ///
+    /// Not named by issue #105, which lists only add/search/list. Included
+    /// because the reference has it (`models.py:382`) and because without it
+    /// a memory marked sensitive at creation can never be unmarked.
+    #[serde(default)]
+    pub sensitive: Option<bool>,
 }
 
 /// Outcome of an update attempt.

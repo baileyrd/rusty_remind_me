@@ -194,6 +194,12 @@ pub fn api_list(conn: &Connection, _wiki: &Wiki, req: &Request, _params: &Params
         category: req.query_str("category").map(str::to_string),
         source: req.query_str("source").map(str::to_string),
         tags: req.query_list("tags"),
+        // The dashboard is the same single user, but "don't surface by
+        // default" means the same thing here as it does over MCP: opt in
+        // explicitly with ?include_sensitive=1 or it stays hidden.
+        include_sensitive: req
+            .query_str("include_sensitive")
+            .is_some_and(|v| matches!(v, "1" | "true" | "yes")),
         limit,
         offset,
         response_format: Default::default(),
@@ -228,6 +234,10 @@ pub fn api_add(conn: &Connection, _wiki: &Wiki, req: &Request, _params: &Params)
     }
 
     let input = MemoryAddInput {
+        sensitive: body
+            .get("sensitive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         content: content.to_string(),
         category: body
             .get("category")
@@ -316,6 +326,9 @@ pub fn api_update(conn: &Connection, _wiki: &Wiki, req: &Request, params: &Param
     };
     let input = MemoryUpdateInput {
         memory_id: id,
+        // Absent means "leave it alone", so a PATCH that does not mention the
+        // flag cannot clear it.
+        sensitive: body.get("sensitive").and_then(Value::as_bool),
         content: body
             .get("content")
             .and_then(Value::as_str)

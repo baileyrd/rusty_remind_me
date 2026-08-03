@@ -49,6 +49,7 @@ fn add(conn: &Connection, content: &str) {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: "general".to_string(),
             tags: vec![],

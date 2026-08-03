@@ -11,6 +11,7 @@ fn add(conn: &Connection, content: &str, category: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: category.to_string(),
             tags: vec![],
@@ -28,6 +29,7 @@ fn add(conn: &Connection, content: &str, category: &str) -> String {
 
 fn input(query: &str) -> MemorySearchInput {
     MemorySearchInput {
+        include_sensitive: false,
         query: query.to_string(),
         category: None,
         tags: None,
@@ -121,6 +123,7 @@ fn a_memory_in_regular_use_outlives_an_abandoned_one() {
     queries::search_with_expansions(
         &conn,
         &MemorySearchInput {
+            include_sensitive: false,
             query: "use".into(),
             ..input("use")
         },

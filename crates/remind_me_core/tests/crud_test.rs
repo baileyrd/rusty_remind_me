@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 fn add(conn: &Connection, content: &str, category: &str, source: &str, tags: &[&str]) -> String {
     let input = MemoryAddInput {
+        sensitive: false,
         content: content.to_string(),
         category: category.to_string(),
         tags: tags.iter().map(|t| t.to_string()).collect(),
@@ -23,6 +24,7 @@ fn add(conn: &Connection, content: &str, category: &str, source: &str, tags: &[&
 
 fn search(conn: &Connection, query: &str) -> Vec<String> {
     let input = MemorySearchInput {
+        include_sensitive: false,
         query: query.to_string(),
         category: None,
         tags: None,
@@ -70,6 +72,7 @@ fn list_filters_by_category_and_source() {
     let (ids, total) = list(
         &conn,
         MemoryListInput {
+            include_sensitive: false,
             category: Some("fact".into()),
             source: Some("manual".into()),
             limit: 20,
@@ -91,6 +94,7 @@ fn list_tag_filter_requires_all_tags() {
     let (ids, total) = list(
         &conn,
         MemoryListInput {
+            include_sensitive: false,
             tags: Some(vec!["rust".into(), "mcp".into()]),
             limit: 20,
             ..Default::default()
@@ -109,6 +113,7 @@ fn tag_filtering_tracks_edits_to_a_memory_s_tags() {
     queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id.clone(),
             content: None,
             category: None,
@@ -124,6 +129,7 @@ fn tag_filtering_tracks_edits_to_a_memory_s_tags() {
     let (stale, _) = list(
         &conn,
         MemoryListInput {
+            include_sensitive: false,
             tags: Some(vec!["before".into()]),
             ..Default::default()
         },
@@ -133,6 +139,7 @@ fn tag_filtering_tracks_edits_to_a_memory_s_tags() {
     let (fresh, total) = list(
         &conn,
         MemoryListInput {
+            include_sensitive: false,
             tags: Some(vec!["after".into()]),
             ..Default::default()
         },
@@ -152,6 +159,7 @@ fn list_total_counts_all_matches_not_just_the_page() {
     let (ids, total) = list(
         &conn,
         MemoryListInput {
+            include_sensitive: false,
             limit: 2,
             ..Default::default()
         },
@@ -173,6 +181,7 @@ fn list_pagination_walks_every_row_without_repeats() {
         let (ids, _) = list(
             &conn,
             MemoryListInput {
+                include_sensitive: false,
                 limit: 2,
                 offset,
                 ..Default::default()
@@ -194,6 +203,7 @@ fn list_offset_past_the_end_is_empty_but_reports_total() {
     let (ids, total) = list(
         &conn,
         MemoryListInput {
+            include_sensitive: false,
             limit: 20,
             offset: 99,
             ..Default::default()
@@ -212,6 +222,7 @@ fn list_clamps_limit_to_the_reference_bounds() {
     let low = queries::list_memories(
         &conn,
         &MemoryListInput {
+            include_sensitive: false,
             limit: 0,
             ..Default::default()
         },
@@ -222,6 +233,7 @@ fn list_clamps_limit_to_the_reference_bounds() {
     let high = queries::list_memories(
         &conn,
         &MemoryListInput {
+            include_sensitive: false,
             limit: 5_000,
             ..Default::default()
         },
@@ -240,6 +252,7 @@ fn update_changes_only_the_supplied_fields() {
     let outcome = queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id.clone(),
             content: Some("revised".into()),
             category: None,
@@ -270,6 +283,7 @@ fn update_leaves_decay_and_retrieval_history_alone() {
     let outcome = queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id,
             content: None,
             category: Some("decision".into()),
@@ -307,6 +321,7 @@ fn update_reports_not_found_and_no_fields_distinctly() {
     let missing = queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: "mem_does_not_exist".into(),
             content: Some("x".into()),
             category: None,
@@ -320,6 +335,7 @@ fn update_reports_not_found_and_no_fields_distinctly() {
     let empty = queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id,
             content: None,
             category: None,
@@ -347,6 +363,7 @@ fn update_keeps_the_fts_index_consistent() {
     queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id.clone(),
             content: Some("wombat sightings in tasmania".into()),
             category: None,
@@ -405,6 +422,7 @@ fn delete_cleans_up_dependent_rows_explicitly() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     let input = MemoryAddInput {
+        sensitive: false,
         content: "linked to an entity".to_string(),
         category: "general".to_string(),
         tags: vec![],

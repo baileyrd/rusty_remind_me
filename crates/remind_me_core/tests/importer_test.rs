@@ -386,6 +386,7 @@ fn neighbour_expansion_finally_finds_something() {
     let response = remind_me_core::db::queries::search_with_expansions(
         &conn,
         &remind_me_core::MemorySearchInput {
+            include_sensitive: false,
             query: "quokka".into(),
             category: None,
             tags: None,

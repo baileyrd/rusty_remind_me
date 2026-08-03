@@ -12,6 +12,7 @@ fn add(conn: &Connection, content: &str, entities: &[&str]) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: "fact".into(),
             tags: vec![],
@@ -52,6 +53,7 @@ fn search(
     configure: impl FnOnce(&mut MemorySearchInput),
 ) -> remind_me_core::expansion::MemorySearchResponse {
     let mut input = MemorySearchInput {
+        include_sensitive: false,
         query: query.to_string(),
         category: None,
         tags: None,

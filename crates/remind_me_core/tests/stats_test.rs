@@ -6,6 +6,7 @@ use rusqlite::Connection;
 
 fn add(conn: &Connection, content: &str, category: &str, source: &str) -> String {
     let input = MemoryAddInput {
+        sensitive: false,
         content: content.to_string(),
         category: category.to_string(),
         tags: vec![],

@@ -10,6 +10,7 @@ fn add(conn: &Connection, content: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: "general".into(),
             tags: vec![],
@@ -81,6 +82,7 @@ fn facts_are_memories_whose_spo_matches_the_canonical_name() {
     queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "Rottnest Island has quokkas".into(),
             category: "general".into(),
             tags: vec![],
@@ -97,6 +99,7 @@ fn facts_are_memories_whose_spo_matches_the_canonical_name() {
     queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "you can visit rottnest island by ferry".into(),
             category: "general".into(),
             tags: vec![],

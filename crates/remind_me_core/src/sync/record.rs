@@ -51,7 +51,8 @@ fn default_metadata() -> Value {
 /// conflict-resolved over sync, only produced locally. `deleted_at` **is**
 /// included: unlike `doc_id`/`chunk_index`, the reference's `_upsert_one`
 /// does apply it, via the same LWW path as every other column, which is what
-/// lets a tombstone propagate at all (`#76`).
+/// lets a tombstone propagate at all (`#76`). `sensitive` is included on the
+/// same grounds (issue #105).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
     pub id: String,
@@ -98,6 +99,16 @@ pub struct SyncRecord {
     pub superseded_by: Option<String>,
     #[serde(default)]
     pub deleted_at: Option<String>,
+    /// Applied for the same reason as `deleted_at`: the payload carries it, so
+    /// a peer that drops it silently unhides a memory the author marked. Not a
+    /// confidentiality breach — this was never access control — but it defeats
+    /// the flag's entire purpose the moment two nodes sync.
+    ///
+    /// `#[serde(default)]` matters here: a record from a node that predates the
+    /// v27 schema has no `sensitive` key at all, and must parse as not-sensitive
+    /// rather than failing the whole pull.
+    #[serde(default)]
+    pub sensitive: bool,
 }
 
 #[derive(Debug)]
@@ -253,8 +264,8 @@ pub fn upsert_record(
                 id, content, category, tags, source, metadata, created_at, updated_at,
                 capture_id, node_id, client, accessed_at, access_count, decay_rate,
                 vitality, base_weight, status, memory_type, source_capture_id,
-                subject, predicate, object, superseded_by, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                subject, predicate, object, superseded_by, deleted_at, sensitive
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 category = excluded.category,
@@ -277,7 +288,8 @@ pub fn upsert_record(
                 predicate = excluded.predicate,
                 object = excluded.object,
                 superseded_by = excluded.superseded_by,
-                deleted_at = excluded.deleted_at",
+                deleted_at = excluded.deleted_at,
+                sensitive = excluded.sensitive",
             params![
                 record.id,
                 record.content,
@@ -303,6 +315,7 @@ pub fn upsert_record(
                 record.object,
                 record.superseded_by,
                 record.deleted_at,
+                record.sensitive,
             ],
         )?;
         let rowid: i64 = conn.query_row(

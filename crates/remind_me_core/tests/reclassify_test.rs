@@ -12,6 +12,7 @@ fn add(conn: &Connection, content: &str, category: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: category.to_string(),
             tags: vec!["tagged".into()],
@@ -274,6 +275,7 @@ fn editing_a_category_no_longer_contradicts_a_classification() {
     queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id.clone(),
             content: None,
             // A fast-decaying category. An earlier version of update_memory

@@ -12,6 +12,7 @@ fn add(conn: &Connection) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: "a memory".into(),
             // "general" gives a type prior of 1.0 and manual a source prior of
             // 1.0, so base_weight starts at exactly 1.0.
@@ -561,6 +562,7 @@ fn apply_feedback_adjustment_ignores_a_dissimilar_past_query_end_to_end() {
 
 fn search_input(query: &str) -> MemorySearchInput {
     MemorySearchInput {
+        include_sensitive: false,
         query: query.to_string(),
         category: None,
         tags: None,
@@ -583,6 +585,7 @@ fn search_memories_demotes_a_result_with_similar_unhelpful_feedback() {
     let id = queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "the vpn configuration settings are in the ops wiki".to_string(),
             category: "general".to_string(),
             tags: vec![],

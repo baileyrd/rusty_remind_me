@@ -324,6 +324,7 @@ fn a_superseded_fact_drops_out_of_search() {
     let found: Vec<String> = queries::search_memories(
         &conn,
         &remind_me_core::MemorySearchInput {
+            include_sensitive: false,
             query: "quokka".into(),
             category: None,
             tags: None,
@@ -499,6 +500,7 @@ fn ordinary_memories_never_enter_the_batch() {
     queries::add_memory(
         &conn,
         remind_me_core::MemoryAddInput {
+            sensitive: false,
             content: "written by hand".into(),
             category: "general".into(),
             tags: vec![],

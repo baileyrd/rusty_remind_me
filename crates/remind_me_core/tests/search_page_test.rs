@@ -10,6 +10,7 @@ fn add(conn: &Connection, content: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: "general".into(),
             tags: vec![],
@@ -82,6 +83,7 @@ fn category_and_tags_filter_before_the_limit() {
     queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "quokka in general".into(),
             category: "general".into(),
             tags: vec!["island".into()],
@@ -97,6 +99,7 @@ fn category_and_tags_filter_before_the_limit() {
     queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "quokka in wildlife".into(),
             category: "wildlife".into(),
             tags: vec![],
