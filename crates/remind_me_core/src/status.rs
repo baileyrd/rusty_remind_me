@@ -58,6 +58,13 @@ impl SubsystemStatus {
 /// A snapshot of where the data lives and what is running.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerStatus {
+    /// The build actually serving this request.
+    ///
+    /// Deliberately first: a stale install after a failed self-update explains
+    /// more odd behaviour than anything else in this report, and it is the one
+    /// fact a session otherwise has no way to observe — the reference makes the
+    /// same argument for putting it on the first line of its own status output.
+    pub version: String,
     /// `None` for an in-memory database.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_path: Option<String>,
@@ -125,6 +132,7 @@ pub fn server_status(conn: &Connection) -> Result<ServerStatus> {
         .unwrap_or_default();
 
     Ok(ServerStatus {
+        version: crate::updater::INSTALLED_VERSION.to_string(),
         database_path: database_path.map(|p| p.display().to_string()),
         database_exists,
         database_bytes,
