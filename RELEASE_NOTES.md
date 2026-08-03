@@ -2,6 +2,31 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — remind_me_sync_reconcile and _peer (#115)
+
+### Added
+- **`remind_me_sync_reconcile`** and **`remind_me_sync_reconcile_peer`** — diff
+  this node's record counts against the hub's or a discovered peer's, and
+  classify the drift. Both read the `/count` endpoint #113 added.
+- Four verdicts: `in-sync`; `pull-lag` (remote ahead, pull recent — the
+  ordinary state between cycles); **`node-ahead`** (this node holds records the
+  remote does not, so pushes are not landing — the only direction that means
+  data is at risk); and `fault` (remote ahead but the pull is stale or never
+  ran). Each carries hints explaining what to check.
+
+### Notes
+- **One classifier serves both remote kinds.** "Local greater than remote means
+  pushes are not landing" does not depend on which machine is on the other end.
+- `node-ahead` is checked first and unconditionally. Mixed drift is where
+  reading numbers by eye goes wrong: a remote ahead by 38 somewhere is loud,
+  and the 3 records at risk are quiet.
+- Lag is judged from `last_pull_at` — the wall clock of the last successful
+  pull, not the content cursor — for the same reason #114 reports liveness that
+  way: a quiet-but-healthy remote advances it every cycle.
+- An unreachable remote returns `unavailable` with the reason, not a verdict. A
+  verdict computed against counts that could not be fetched would be a guess.
+- Tool coverage: 56 → **58 of 61**. **Wave 5 complete.**
+
 ## 2026-08-03 — remind_me_sync_status and remind_me_sync_repair (#114)
 
 ### Added

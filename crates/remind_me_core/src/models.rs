@@ -1527,3 +1527,84 @@ pub struct SyncRepairInput {
 fn default_repair_remote() -> String {
     "hub".to_string()
 }
+
+// ---------------------------------------------------------------------------
+// Reconcile (gap T2b, issue #115)
+// ---------------------------------------------------------------------------
+
+/// A remote's `/count` response.
+///
+/// Deserialised from both the peer server's endpoint and the hub's, which
+/// return the same shape by design — see `sync::server`'s `handle_count`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteCounts {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub memories: RemoteMemoryCounts,
+    /// Absent from the peer server, which reports no per-category breakdown.
+    #[serde(default)]
+    pub by_category: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteMemoryCounts {
+    pub total: i64,
+    #[serde(default)]
+    pub tombstones: i64,
+}
+
+/// One category where the two sides disagree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CategoryDrift {
+    pub category: String,
+    pub local: i64,
+    pub remote: i64,
+    /// `remote - local`. Negative means this node is ahead.
+    pub delta: i64,
+}
+
+/// How a reconcile classified the drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReconcileVerdict {
+    InSync,
+    PullLag,
+    /// This node holds records the remote does not — pushes are not landing.
+    /// The only direction that means data is at risk.
+    NodeAhead,
+    Fault,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReconcileReport {
+    /// The remote could not be reached, or sync is not configured. A verdict
+    /// here would be a guess, so the reachability problem is the answer.
+    Unavailable { reason: String },
+    Compared {
+        remote_id: String,
+        remote_role: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote_version: Option<String>,
+        verdict: ReconcileVerdict,
+        hints: Vec<String>,
+        local_total: i64,
+        remote_total: i64,
+        local_tombstones: i64,
+        remote_tombstones: i64,
+        /// Only categories that disagree. A hundred agreeing rows would bury
+        /// the two that matter.
+        drift: Vec<CategoryDrift>,
+        categories_agreeing: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_pull_age_seconds: Option<i64>,
+    },
+}
+
+/// Request to reconcile against one peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcilePeerInput {
+    pub node_id: String,
+}
