@@ -79,7 +79,7 @@ was worked to completion (PRs #28 → #99).
 | --- | --- | --- | --- |
 | MCP tools | 61 | 44 (43 shared + 1 target-only) | **70%** |
 | HTTP API routes | 25 | 20 (all shared) | **80%** |
-| Peer-server routes | 7 | 6 | **86%** |
+| Peer-server routes | 7 | 7 | **100%** (as of #113) |
 | SQLite tables | 30 | 25 | **83%** |
 | SQLite indexes | 36 | 30 | **83%** |
 | SQLite triggers | 15 | 15 | **100%** (one body differs — see S4) |
@@ -204,8 +204,8 @@ PR #132.
 **Wave 4 is complete**: #108 (T3) as PR #133, #109 (T4) as PR #134, #110 (T6)
 as PR #135, #111 (T5) as PR #136, #112 (A1) as PR #137.
 
-Waves 5-7 remain: #113-#115 (sync observability), #116-#118 (reminders),
-#119-#122 (ops surface).
+Wave 5 is in progress: #113 (A5) is in flight. #114-#115 remain.
+Waves 6-7 remain: #116-#118 (reminders), #119-#122 (ops surface).
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |

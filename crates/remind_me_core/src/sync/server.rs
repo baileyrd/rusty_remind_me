@@ -23,6 +23,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub const HEALTH_PATH: &str = "/health";
+pub const COUNT_PATH: &str = "/count";
 pub const PUSH_PATH: &str = "/sync/push";
 pub const PULL_PATH: &str = "/sync/pull";
 pub const PULL_ENTITIES_PATH: &str = "/sync/pull_entities";
@@ -279,7 +280,61 @@ fn write_response<W: Write>(stream: &mut W, status: u16, body: &Value) -> io::Re
 // ---------------------------------------------------------------------------
 
 fn handle_health(config: &PeerServerConfig) -> Value {
-    json!({ "status": "ok", "node_id": config.node_id, "time": chrono::Utc::now().to_rfc3339() })
+    json!({
+        "status": "ok",
+        "node_id": config.node_id,
+        // Published here as well as on the dashboard's own `/health` (#107):
+        // a reconcile reports which build each side is running, and this is
+        // where the other side reads it from.
+        "version": crate::updater::INSTALLED_VERSION,
+        "time": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Record counts, for a client comparing its own totals against this peer's.
+///
+/// Field-for-field the shape the hub's `GET /count` returns, so one
+/// client-side comparator serves both. A peer-shaped variant would mean a
+/// second copy of the diff logic, which is how the two would eventually
+/// disagree about what "drift" means.
+///
+/// **`approximate` is always false, and always present.** A peer has no
+/// planner estimates to offer — the hub's `?approx=1` is a Postgres
+/// `reltuples` read with no SQLite equivalent — but a caller should not have
+/// to know which kind of remote it is talking to in order to read the answer.
+///
+/// Counts deliberately do **not** filter `deleted_at`. Both ends of the
+/// comparison have to count identically: the hub counts every row and reports
+/// tombstones separately, so filtering here would make a healthy peer look
+/// permanently behind by its own tombstone count.
+fn handle_count(conn: &Connection, config: &PeerServerConfig) -> Result<Value, rusqlite::Error> {
+    let (total, tombstones): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+           FROM memories",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    let count_of = |table: &str| -> Result<i64, rusqlite::Error> {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
+    };
+
+    Ok(json!({
+        "role": "peer",
+        "version": crate::updater::INSTALLED_VERSION,
+        "node_id": config.node_id,
+        "approximate": false,
+        "memories": {
+            "total": total,
+            "live": total - tombstones,
+            "tombstones": tombstones,
+        },
+        "entities": count_of("entities")?,
+        "memory_entities": count_of("memory_entities")?,
+        "entity_relations": count_of("entity_relations")?,
+        "time": chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 /// A push batch is naturally heterogeneous — every graph-table trigger
@@ -566,6 +621,17 @@ pub fn serve_once<S: Read + Write>(
             drain_body(stream, &head.content_length, body_prefix.len());
             write_response(stream, 200, &handle_health(config))
         }
+        ("GET", COUNT_PATH) => {
+            drain_body(stream, &head.content_length, body_prefix.len());
+            match handle_count(conn, config) {
+                Ok(response) => write_response(stream, 200, &response),
+                Err(e) => write_response(
+                    stream,
+                    500,
+                    &json!({ "error": format!("count failed: {}", e) }),
+                ),
+            }
+        }
         ("GET", PULL_PATH) => {
             drain_body(stream, &head.content_length, body_prefix.len());
             let (status, response) = handle_pull(conn, &head.query);
@@ -628,6 +694,7 @@ pub fn serve_once<S: Read + Write>(
         (method, path)
             if [
                 HEALTH_PATH,
+                COUNT_PATH,
                 PULL_PATH,
                 PUSH_PATH,
                 PULL_ENTITIES_PATH,
