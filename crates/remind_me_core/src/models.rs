@@ -1022,3 +1022,53 @@ pub struct SearchPageResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Importance recalibration (gap T7, issue #102)
+// ---------------------------------------------------------------------------
+
+/// Request for a batch of memories whose importance classification may be
+/// stale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecalibrateCandidatesInput {
+    #[serde(default = "default_recalibrate_limit")]
+    pub limit: usize,
+}
+
+fn default_recalibrate_limit() -> usize {
+    20
+}
+
+/// Inclusive bounds the reference enforces on a recalibration request.
+pub const RECALIBRATE_LIMIT_MIN: usize = 1;
+pub const RECALIBRATE_LIMIT_MAX: usize = 100;
+
+/// One memory put forward for importance review.
+///
+/// Every field is something a reviewer needs to judge from without a second
+/// round trip: what it says, how it was classified, how important it was
+/// assumed to be, and how long it has gone untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecalibrateCandidate {
+    pub id: String,
+    /// First 500 characters of the content, matching the reference.
+    pub content_snippet: String,
+    pub category: String,
+    pub memory_type: Option<String>,
+    pub base_weight: f64,
+    pub access_count: i64,
+    /// `None` for a memory never retrieved since it was written — which is
+    /// itself part of why it is a candidate, so it is reported rather than
+    /// collapsed into `created_at`.
+    pub accessed_at: Option<String>,
+    pub created_at: String,
+}
+
+/// A page of recalibration candidates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecalibrateCandidatesResult {
+    pub candidates: Vec<RecalibrateCandidate>,
+    /// The whole backlog behind the `limit`, so a caller can tell whether
+    /// another round is worth requesting.
+    pub total_candidates: i64,
+}
