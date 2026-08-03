@@ -25,17 +25,18 @@ use remind_me_core::{
     DecomposeInput, DigestInput, EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput,
     FeedbackInput, HistoryInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
     MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput, NormalizeBatchInput,
-    RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput, ResponseFormat, RevertInput,
-    SaveSearchInput, SavedSearchNameInput, SyncRepairInput, UndoImportInput, UpdateOutcome,
-    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
-    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
-    CONTRADICTION_LIMIT_MAX, CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN,
-    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
-    EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN,
-    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX,
-    MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
-    NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX,
-    RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
+    RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput, ReconcilePeerInput,
+    ResponseFormat, RevertInput, SaveSearchInput, SavedSearchNameInput, SyncRepairInput,
+    UndoImportInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
+    CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX, CONTRADICTION_LIMIT_MIN,
+    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
+    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
+    HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
+    MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX,
+    NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX,
+    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX,
+    UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -597,6 +598,22 @@ impl McpServer {
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
                                     }
+                                }
+                            },
+                            {
+                                "name": "remind_me_sync_reconcile",
+                                "description": "Diff this node's record counts against the hub's and classify the drift: in-sync, pull-lag (hub ahead, pull recent — the ordinary state), node-ahead (this node holds records the hub does not, so pushes are not landing — the direction that means data is at risk), or fault (hub ahead but the pull is stale or never ran). Read-only on both sides.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_sync_reconcile_peer",
+                                "description": "The peer-to-peer counterpart of remind_me_sync_reconcile: diff this node's counts against one discovered peer's. Same four verdicts from the same classifier — 'local greater than remote means pushes are not landing' does not depend on which machine is on the other end.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "node_id": { "type": "string", "description": "Which discovered peer to reconcile against" }
+                                    },
+                                    "required": ["node_id"]
                                 }
                             },
                             {
@@ -1432,6 +1449,33 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_sync_reconcile" => {
+                        match remind_me_core::sync::reconcile_hub(&conn) {
+                            Ok(report) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Reconcile error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_sync_reconcile_peer" => {
+                        match serde_json::from_value::<ReconcilePeerInput>(args) {
+                            Ok(input) => {
+                                match remind_me_core::sync::reconcile_peer(&conn, &input.node_id) {
+                                    Ok(report) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Reconcile peer error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid reconcile_peer input: {}. node_id is required.", e) }] })
                             }
                         }
                     }

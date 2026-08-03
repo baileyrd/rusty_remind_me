@@ -297,6 +297,30 @@ moving"; only the per-minute figure needs a clock.
 
 ---
 
+## #115 — reconcile against hub and peer
+
+**One classifier serves both remote kinds.** "Local greater than remote means
+pushes are not landing" does not depend on which machine is on the other end,
+and a second copy is how the two would eventually disagree about what drift
+means. `reconcile_peer` and `reconcile_hub` are the same function with a
+different base URL and `sync_log` row.
+
+**`NodeAhead` is checked first and unconditionally**, ahead of any lag
+reasoning. It is the only direction where records sit on one machine with
+nothing coming to fix them, and mixed drift is exactly where reading the
+numbers by eye goes wrong — a remote ahead by 38 somewhere is loud, and the 3
+records at risk are quiet.
+
+**An unreachable remote returns `Unavailable` rather than a verdict.** A
+verdict computed against counts that could not be fetched would be a guess;
+the reachability problem is the answer.
+
+**The classifier is tested directly rather than through a live remote.** The
+network half is one HTTP GET; driving a fake server through every verdict
+would test the harness more than the judgment.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

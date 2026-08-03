@@ -21,6 +21,7 @@ mod http;
 mod peers;
 mod pull;
 mod push;
+mod reconcile;
 mod record;
 mod server;
 mod status;
@@ -35,6 +36,7 @@ pub use pull::{
     pull_entities, pull_entity_relations, pull_links, pull_remote, PullError, PullReport,
 };
 pub use push::{push_outbox, PushError, PushReport};
+pub use reconcile::{classify, reconcile, reconcile_hub, reconcile_peer, PULL_LAG_GRACE_SECONDS};
 pub use record::{upsert_record, ApplyOutcome, SyncApplyError, SyncRecord};
 pub use server::{serve_once, PeerServer, PeerServerConfig, PeerServerStatus, SyncPeer};
 pub use status::{sync_repair, sync_status};
