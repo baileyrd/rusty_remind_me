@@ -1327,3 +1327,50 @@ pub enum RevertOutcome {
     MemoryNotFound,
     RevisionNotFound,
 }
+
+// ---------------------------------------------------------------------------
+// Contradiction candidates (gap T6, issue #110)
+// ---------------------------------------------------------------------------
+
+/// One side of a candidate pair, carrying enough to judge it without a second
+/// round trip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContradictionSide {
+    pub id: String,
+    /// First 500 characters, matching the reference.
+    pub content_snippet: String,
+    pub category: String,
+    pub memory_type: Option<String>,
+    pub subject: Option<String>,
+    pub predicate: Option<String>,
+    pub object: Option<String>,
+    pub created_at: String,
+}
+
+/// Two memories that might assert incompatible things.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContradictionCandidate {
+    pub memory_a: ContradictionSide,
+    pub memory_b: ContradictionSide,
+}
+
+/// A page of candidate pairs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContradictionCandidatesResult {
+    pub candidates: Vec<ContradictionCandidate>,
+    pub total_candidates: i64,
+}
+
+/// Request for a batch of contradiction candidates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContradictionCandidatesInput {
+    #[serde(default = "default_contradiction_limit")]
+    pub limit: usize,
+}
+
+fn default_contradiction_limit() -> usize {
+    20
+}
+
+pub const CONTRADICTION_LIMIT_MIN: usize = 1;
+pub const CONTRADICTION_LIMIT_MAX: usize = 100;

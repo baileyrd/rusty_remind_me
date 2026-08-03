@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod capture;
 pub mod consolidation;
+pub mod contradictions;
 pub mod db;
 pub mod dbs_import;
 pub mod embedder;
