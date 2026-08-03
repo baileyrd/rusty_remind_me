@@ -21,6 +21,7 @@ pub mod stats;
 pub mod status;
 pub mod sync;
 pub mod telemetry;
+pub mod undo_import;
 pub mod updater;
 pub mod vectors;
 pub mod vitality;

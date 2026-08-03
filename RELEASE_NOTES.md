@@ -2,6 +2,37 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — remind_me_undo_import (#103)
+
+### Added
+- **`remind_me_undo_import`** — rolls back a previous import, removing its
+  memories and its tracking rows. Imports are the one bulk write this crate
+  makes, and `remind_me_delete` takes a single id, which is unusable at import
+  scale. Handles all three ledgers: `chat` (scoped by `chat_imports.import_id`,
+  resolved through `memories.doc_id`), `dbs` (by `dbs_source` prefix), and
+  `mempalace` (by `drawer_id` prefix).
+- **Dry run by default.** Bulk deletion that propagates over sync is opt-in,
+  not opt-out. Resumable via `limit` — call until `remaining` reaches 0.
+- On a sync-enabled node this soft-deletes, so the removal propagates instead
+  of resurrecting on the next pull; the reported `mode` says which happened and
+  that disk is not reclaimed until compaction.
+
+### Notes
+- Deletion routes through the existing `db::queries::delete_memory` rather than
+  a bulk `DELETE`, so chunk vectors, entity links, feedback and associations are
+  cleaned up rather than orphaned. Orphaned `vec_chunks` rows are the dangerous
+  case: SQLite reuses freed rowids, so a later memory could silently inherit
+  another's vectors.
+- Tracking rows must go too — every import path treats a tracked id as already
+  done, so leaving them would make the same content permanently un-importable.
+  `chat_imports` rows are per-file, so one is dropped only once none of its
+  chunks survive; a partially-drained import keeps its row and cannot be
+  duplicated by a re-import.
+- The mempalace resolver unions the tracking table with the `source`/
+  `metadata.mempalace_drawer_id` signals, so an undo covers content that
+  predates the ledger instead of silently leaving half the batch behind.
+- Tool coverage: 45 → 46 of 61.
+
 ## 2026-08-03 — remind_me_recalibrate_candidates (#102)
 
 ### Added

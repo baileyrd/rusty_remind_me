@@ -14,7 +14,7 @@ use remind_me_core::{
     db::queries,
     dbs_import, entity, export, importer, mempalace_import, normalize, recalibrate, stats, status,
     sync::{SyncPeer, SyncWorker},
-    updater, vectors, vitality, watcher,
+    undo_import, updater, vectors, vitality, watcher,
     webhook::Webhook,
     wiki,
     wiki_fs::Wiki,
@@ -23,14 +23,15 @@ use remind_me_core::{
     EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
     MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
     NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
-    ReclassifyInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
-    CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
+    ReclassifyInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX,
+    ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
     CONSOLIDATE_SIMILARITY_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
     DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
     EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
     MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX,
     NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX,
-    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX,
+    UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -587,6 +588,20 @@ impl McpServer {
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
                                     }
+                                }
+                            },
+                            {
+                                "name": "remind_me_undo_import",
+                                "description": "Roll back a previous import, removing its memories and its tracking rows. Defaults to a dry run — pass dry_run=false to actually delete. On a sync-enabled node this soft-deletes (tombstones), so the removal propagates to every other node and disk is not reclaimed until compaction. Resumable: call again until 'remaining' is 0.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "import_kind": { "type": "string", "enum": ["chat", "dbs", "mempalace"], "description": "Which import to undo" },
+                                        "import_id": { "type": "string", "description": "Scope to one import run. For 'chat' the chat_imports import_id; for 'dbs' the dbs_source; for 'mempalace' a drawer_id prefix. Omit to target every record of that kind." },
+                                        "dry_run": { "type": "boolean", "default": true, "description": "When true (the default), report what would be removed and change nothing." },
+                                        "limit": { "type": "integer", "default": 500, "minimum": UNDO_IMPORT_LIMIT_MIN, "maximum": UNDO_IMPORT_LIMIT_MAX, "description": "Maximum memories to remove per call. Work is resumable." }
+                                    },
+                                    "required": ["import_kind"]
                                 }
                             },
                             {
@@ -1304,6 +1319,30 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_undo_import" => {
+                        // Unlike the batch readers, a malformed input is
+                        // rejected rather than defaulted: there is no safe
+                        // default for *which* import to destroy, and guessing
+                        // one is how you delete the wrong thing.
+                        match serde_json::from_value::<UndoImportInput>(args) {
+                            Ok(mut input) => {
+                                input.limit = input
+                                    .limit
+                                    .clamp(UNDO_IMPORT_LIMIT_MIN, UNDO_IMPORT_LIMIT_MAX);
+                                match undo_import::undo_import(&conn, &input) {
+                                    Ok(result) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Undo import error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid undo_import input: {}. import_kind must be one of chat, dbs, mempalace.", e) }] })
                             }
                         }
                     }
