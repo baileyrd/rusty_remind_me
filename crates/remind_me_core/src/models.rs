@@ -93,6 +93,13 @@ fn default_source() -> String {
 }
 
 /// Input model for searching memories.
+///
+/// [`Default`] exists for callers that build one programmatically from stored
+/// state — a saved search, say — rather than from a tool call, so they can set
+/// the handful of fields they care about without restating every expansion
+/// flag. It is hand-written rather than derived **on purpose**: a derived
+/// `Default` gives `limit: 0` and `token_budget: 0`, which is not a neutral
+/// starting point but a search that structurally cannot return anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchInput {
     pub query: String,
@@ -144,6 +151,30 @@ pub struct MemorySearchInput {
     /// regardless — see [`crate::expansion::record_co_retrieval`].
     #[serde(default)]
     pub expand_co_retrieval: bool,
+}
+
+impl Default for MemorySearchInput {
+    /// Every field at the same value `serde` would supply for an absent key,
+    /// so a programmatically-built input and a minimal JSON one behave
+    /// identically.
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            category: None,
+            tags: None,
+            limit: default_limit(),
+            token_budget: default_token_budget(),
+            response_format: ResponseFormat::default(),
+            include_dormant: false,
+            min_vitality: 0.0,
+            verbose: false,
+            expand_entities: false,
+            include_neighbors: false,
+            include_sensitive: false,
+            strategy: RetrievalStrategy::default(),
+            expand_co_retrieval: false,
+        }
+    }
 }
 
 fn default_limit() -> usize {
@@ -1174,4 +1205,61 @@ pub struct UndoImportResult {
     pub tracking_rows_removed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Saved and watched searches (gap T3, issue #108)
+// ---------------------------------------------------------------------------
+
+/// Result cap a poll uses.
+///
+/// Higher than a tool call's default: a poll diffs result sets, and a match
+/// dropped by a tighter limit would look like it had stopped matching.
+pub const POLL_RESULT_LIMIT: usize = 100;
+
+/// The filters stored alongside a saved search's query, as the `filters` JSON
+/// column holds them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedSearchFilters {
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_sensitive: bool,
+}
+
+/// A stored query plus its filters, under a unique name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    pub id: String,
+    pub name: String,
+    pub query: String,
+    pub filters: SavedSearchFilters,
+    /// Whether polling reports this search's new matches. Does **not** narrow
+    /// what running it returns — see `saved_searches`' module docs.
+    pub watch: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Request to create or update a saved search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveSearchInput {
+    pub name: String,
+    pub query: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_sensitive: bool,
+    #[serde(default)]
+    pub watch: bool,
+}
+
+/// Request naming one saved search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSearchNameInput {
+    pub name: String,
 }

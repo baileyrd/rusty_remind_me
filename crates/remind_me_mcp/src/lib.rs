@@ -12,7 +12,8 @@ use remind_me_core::{
     backup, capture,
     consolidation::consolidate,
     db::queries,
-    dbs_import, entity, export, importer, mempalace_import, normalize, recalibrate, stats, status,
+    dbs_import, entity, export, importer, mempalace_import, normalize, recalibrate, saved_searches,
+    stats, status,
     sync::{SyncPeer, SyncWorker},
     undo_import, updater, vectors, vitality, watcher,
     webhook::Webhook,
@@ -23,15 +24,15 @@ use remind_me_core::{
     EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
     MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
     NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
-    ReclassifyInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX,
-    ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
-    CONSOLIDATE_SIMILARITY_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
-    DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
-    EXTRACT_BATCH_MIN, EXTRACT_MODES, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
-    MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX,
-    NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX,
-    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX,
-    UNDO_IMPORT_LIMIT_MIN,
+    ReclassifyInput, SaveSearchInput, SavedSearchNameInput, UndoImportInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
+    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
+    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
+    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
+    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX,
+    MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
+    NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX,
+    RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -593,6 +594,49 @@ impl McpServer {
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
                                     }
+                                }
+                            },
+                            {
+                                "name": "remind_me_save_search",
+                                "description": "Save a query and its filters under a unique name, so a recurring question does not have to be retyped. Re-saving the same name updates it in place. Set watch=true to have polling report matches that have not been seen before.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string", "description": "Unique name for this saved search" },
+                                        "query": { "type": "string", "description": "The search query to store and later re-run" },
+                                        "category": { "type": "string", "description": "Optional category filter" },
+                                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tag filter; a memory must have ALL of these" },
+                                        "include_sensitive": { "type": "boolean", "default": false, "description": "Whether re-running this search includes memories marked sensitive" },
+                                        "watch": { "type": "boolean", "default": false, "description": "Poll this search and report matches not seen before. Does not narrow what running it returns." }
+                                    },
+                                    "required": ["name", "query"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_list_saved_searches",
+                                "description": "List every saved search, alphabetical by name, with its stored query, filters and watch flag.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_run_saved_search",
+                                "description": "Re-run a saved search's stored query and filters. Returns all current matches — watching does not narrow this; the unseen-only diff belongs to polling.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string", "description": "Name of the saved search to run" }
+                                    },
+                                    "required": ["name"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_delete_saved_search",
+                                "description": "Delete a saved search by name, along with the seen-memory rows its watch tracking accumulated.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string", "description": "Name of the saved search to delete" }
+                                    },
+                                    "required": ["name"]
                                 }
                             },
                             {
@@ -1324,6 +1368,80 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_save_search" => {
+                        match serde_json::from_value::<SaveSearchInput>(args) {
+                            Ok(input) => match saved_searches::save_search(&conn, &input) {
+                                Ok(saved) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&saved).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Save search error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid save_search input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_list_saved_searches" => {
+                        match saved_searches::list_saved_searches(&conn) {
+                            Ok(searches) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&searches).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("List saved searches error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_run_saved_search" => {
+                        match serde_json::from_value::<SavedSearchNameInput>(args) {
+                            Ok(input) => match saved_searches::get_saved_search(&conn, &input.name)
+                            {
+                                Ok(Some(saved)) => {
+                                    match saved_searches::run_saved_search(&conn, &saved) {
+                                        Ok(results) => {
+                                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&results).unwrap() }] })
+                                        }
+                                        Err(e) => {
+                                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Run saved search error: {}", e) }] })
+                                        }
+                                    }
+                                }
+                                // A missing name is a caller mistake with an
+                                // obvious remedy, not a server error — same
+                                // posture the reference takes.
+                                Ok(None) => {
+                                    json!({ "content": [{ "type": "text", "text": format!("Saved search '{}' not found.", input.name) }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Run saved search error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid run_saved_search input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_delete_saved_search" => {
+                        match serde_json::from_value::<SavedSearchNameInput>(args) {
+                            Ok(input) => {
+                                match saved_searches::delete_saved_search(&conn, &input.name) {
+                                    Ok(true) => {
+                                        json!({ "content": [{ "type": "text", "text": format!("Saved search '{}' deleted.", input.name) }] })
+                                    }
+                                    Ok(false) => {
+                                        json!({ "content": [{ "type": "text", "text": format!("Saved search '{}' not found.", input.name) }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Delete saved search error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid delete_saved_search input: {}", e) }] })
                             }
                         }
                     }

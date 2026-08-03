@@ -17,6 +17,7 @@ pub mod pid;
 pub mod recalibrate;
 pub mod remote;
 pub mod retrieval;
+pub mod saved_searches;
 pub mod stats;
 pub mod status;
 pub mod sync;

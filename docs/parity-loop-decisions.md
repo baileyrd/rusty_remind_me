@@ -137,6 +137,40 @@ that cycle would report `null` forever while looking like a working feature.
 
 ---
 
+## #108 — saved and watched searches
+
+**The issue's criterion "a watched search returns only new hits on the second
+run" describes behaviour the reference does not have.** Its
+`remind_me_run_saved_search` calls the search core and returns whatever comes
+back, watched or not (`tools/saved_searches.py`); the unseen-only diff lives in
+the background poller, which notifies rather than filtering a tool's output.
+
+Implemented to match: running returns everything, polling diffs. Asking for a
+saved search's results and silently getting a partial list because something
+polled it earlier would be surprising and unfixable from the caller's side.
+
+**The criterion "both `markdown` and `json` `response_format` variants" is the
+same overstatement as #102's.** None of the four reference tools take a
+`response_format`. Not added.
+
+**`poll_saved_search` returns the new matches instead of dispatching
+notifications.** The transport is the scheduler's half and lands with #117.
+Returning them keeps the diff logic — which is the part the issue rightly
+flags as most likely to be dropped — complete and testable before any transport
+exists, rather than shipping `watch` as an inert stored flag.
+
+**`MemorySearchInput::Default` is hand-written, not derived.** Deriving it gave
+`limit: 0` and `token_budget: 0` — not a neutral starting point but a search
+that structurally cannot return anything, which is exactly how it failed first
+time. The hand-written impl matches what serde supplies for absent keys, so a
+programmatically-built input and a minimal JSON one behave identically.
+
+**Polling searches with `include_dormant: true`.** A watch that stopped
+reporting a memory because it decayed below the vitality floor would look like
+the memory had been deleted.
+
+---
+
 ## Process corrections made mid-loop
 
 **The local gate now runs `cargo test --workspace --no-fail-fast`.** `cargo
