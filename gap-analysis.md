@@ -132,7 +132,7 @@ Grouped for issue sizing. Each group is one issue unless the Notes say otherwise
 | **T7** | `remind_me_recalibrate_candidates` | tool | spec | both | `tools/recalibrate.py` | no | S | Proposes vitality/decay corrections. Smallest of the tool gaps at 126 LOC. |
 | **T8** | `remind_me_undo_import` | tool | spec | both | `tools/admin.py:1040` | no | M | Rolls back an import by `import_id`, removing its memories and tracking rows. The target already has all four import ledgers (`chat_imports`, `dbs_imports`, `mempalace_imports`), so this is additive. |
 | **T9** | `remind_me_api_key` | tool | spec | both | `api_keys.py` (issue #185) | no | M | Named, scope-limited (read vs. read-write) dashboard API keys, stored as SHA-256 hashes in a 0600 JSON file under `MEMORY_DIR`. The target's `remote.rs` already implements the same hash-at-rest discipline for connector tokens, so the conventions exist. **Security-relevant** — port the scope enforcement, not just the issuance. |
-| **T10** | `remind_me_stats` / `remind_me_server_status` (depth) | tool (existing) | spec | both | `tools/admin.py`, `version.py` (issues #207, #209) | no | S | The reference now reports the installed version in both, and records peer versions from the `/health` probe it already makes. Additive to the response bodies. |
+| **T10** | `remind_me_server_status` (depth) | tool (existing) | spec | both | `pid.py` `get_server_status`, `version.py` (issue #207) | no | S | **Corrected 2026-08-03 while working #104.** This row previously said the reference reports the installed version in *both* `remind_me_stats` and `remind_me_server_status`. It does not: `pid.py:176` puts `version` in `get_server_status`'s payload and `admin.py:622` prints it, while `remind_me_stats` (`admin.py:408`) has no version field anywhere. Only the status half is a real gap. The peer-version half of the original row is real but surfaces through `remind_me_sync_status`, so it belongs to T2a / #114, not here. |
 
 ### Tool signature parity — 4 fields
 
@@ -197,8 +197,8 @@ carried S1, S2, S3, S4, S6, S7, S8, S9 and S10 together — as PR #126. Every ro
 in the "Correctness" and "Schema — missing objects" tables above is therefore
 closed, and the downstream schema-dependent issues are unblocked.
 
-Wave 3 is in progress: #102 (T7) merged as PR #127; #103 (T8) is in flight.
-#104–#107 remain.
+Wave 3 is in progress: #102 (T7) merged as PR #127, #103 (T8) as PR #128;
+#104 (T10) is in flight. #105–#107 remain.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |

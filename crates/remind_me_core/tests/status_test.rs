@@ -222,3 +222,25 @@ fn the_report_serialises_with_the_subsystem_state_tagged() {
     assert!(json["watcher"]["hint"].is_string());
     assert_eq!(json["schema_current"], true);
 }
+
+#[test]
+fn the_report_names_the_build_that_produced_it() {
+    // Gap T10, issue #104. A stale install after a failed self-update explains
+    // more odd behaviour than anything else this report covers, and it is the
+    // one fact a calling session has no other way to observe — so the value has
+    // to be the real compiled-in version, not a placeholder that would make a
+    // stale build look current.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let db = Database::open_in_memory().unwrap();
+
+    let report = server_status(&db.conn()).unwrap();
+
+    assert_eq!(report.version, env!("CARGO_PKG_VERSION"));
+    assert!(
+        !report.version.is_empty(),
+        "an empty version reads as 'no information' rather than 'up to date'"
+    );
+
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+}

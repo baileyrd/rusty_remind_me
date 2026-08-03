@@ -2,6 +2,31 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — The serving build is reported in server status (#104)
+
+### Added
+- **`remind_me_server_status` now reports `version`**, the build actually
+  serving the request (`updater::INSTALLED_VERSION`, i.e. `CARGO_PKG_VERSION`).
+  A stale install after a failed self-update explains more odd behaviour than
+  anything else that report covers, and it is the one fact a calling session
+  has no other way to observe. Purely additive — no existing field changes.
+
+### Notes
+- **Two of the issue's three acceptance criteria did not match the reference**
+  and were not implemented here. Recorded on the issue rather than resolved
+  silently:
+  - *"Installed version present in **both** tools' output"* — the reference
+    reports it in `remind_me_server_status` only (via `pid.py`'s
+    `get_server_status`). `remind_me_stats` (`admin.py:408`) contains no
+    version field at all, so adding one would be a divergence, not parity.
+    The gap analysis's own T10 row said "both"; that was inaccurate and is
+    corrected there too.
+  - *"Peer version captured during the existing `/health` probe"* — in the
+    reference this surfaces through `remind_me_sync_status`, which this crate
+    does not have yet. It belongs to #114, which builds that tool.
+- Tool coverage unchanged at 46 of 61 — this deepens an existing tool rather
+  than adding one.
+
 ## 2026-08-03 — remind_me_undo_import (#103)
 
 ### Added
