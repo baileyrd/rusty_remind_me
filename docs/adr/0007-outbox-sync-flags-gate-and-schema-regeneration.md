@@ -121,3 +121,56 @@ lands, not invented ahead of it.
   (`sync._compact_tombstones` in the reference) is not implemented here —
   noted as a real, separate gap for a follow-up issue, not silently rolled
   into this one.
+
+## Addendum, 2026-08-03: the gate needed a second condition, and triggers needed reconciling (issue #100)
+
+The `sync_flags` gate above stops an *unconfigured* node queueing anything.
+It does nothing for a configured one, and on a configured node
+`memories_outbox_au` fired on every `UPDATE` — including the `accessed_at`/
+`access_count` write this crate makes on every read (PR #42, `vitality.rs`).
+So a 20-result search queued 20 full-payload rows. The reference scoped this
+out in `_migrate_v21_to_v22` with a second `WHEN` condition,
+`AND NEW.updated_at IS NOT OLD.updated_at`; this crate's schema, dumped from a
+*v19* reference database, predates it.
+
+Two decisions follow.
+
+**Forward-ported the guard by hand rather than waiting for the v27
+regeneration.** This is the thing "Alternatives considered" above rejected, so
+it needs justifying rather than glossing. Three things make it different from
+the case that was rejected there:
+
+1. The rejected alternative was hand-*reconstructing* DDL that nobody had
+   observed — the same guesswork that produced the bad migration ladder. This
+   line is copied from the reference's own source, verified against
+   `db.py:1944`, and is one condition on an existing `WHEN`.
+2. It is self-healing. Issue #101 regenerates all three files from a v27 dump,
+   which contains this exact line — so the exception disappears by being
+   overwritten with an identical value, not by anyone remembering to reapply
+   it. `schema_triggers.sql`'s header says so at the point of the edit.
+3. The alternative was not "wait a bit". #101 is a breaking change gated on a
+   human decision, with no committed date; leaving every configured vault
+   flooding its own outbox until then is a worse outcome than one annotated,
+   self-erasing line.
+
+Stamping v19 while carrying a v22 trigger is safe in the direction that
+matters: `remind_me` opening such a database reads `user_version = 19` and
+runs `_migrate_v21_to_v22`, which begins `DROP TRIGGER IF EXISTS
+memories_outbox_au` and recreates it — so the reference overwrites our
+forward-port with its own identical definition rather than tripping over it.
+
+**Added trigger reconciliation to `migrations.rs`.** Fixing the DDL alone
+would have shipped nothing to anyone who already had a database. Every
+statement in `schema_triggers.sql` is `CREATE TRIGGER IF NOT EXISTS`, and
+`apply`'s reconciliation loop compared `type='table'` rows only — so an
+existing database kept its old trigger forever and the fix would only ever
+have appeared on databases created after it. `reconcile_triggers` now diffs
+each trigger's stored DDL against the generated one (reusing `normalise_ddl`,
+so whitespace and `IF NOT EXISTS` spelling do not count as differences) and
+drops the ones that differ, immediately before the create pass rebuilds them.
+
+That generalises past this bug: it is the mechanism by which #101's outbox
+payload changes (gaps S2/S3/S10 — `remind_at` and `sensitive` on the wire)
+will reach existing databases at all. Dropping is safe for a trigger in a way
+it would not be for a table — a trigger holds no rows — and SQLite offers no
+`CREATE OR REPLACE TRIGGER`.

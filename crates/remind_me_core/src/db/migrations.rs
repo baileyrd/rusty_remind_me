@@ -26,7 +26,9 @@
 //!    crate — are rebuilt, preserving their rows;
 //! 3. any column still missing from any table is added, diffed against a
 //!    pristine schema built in memory from the same SQL;
-//! 4. indexes and triggers are created, after the columns they reference exist;
+//! 4. indexes are created and triggers reconciled, after the columns they
+//!    reference exist — a trigger whose stored body no longer matches the
+//!    generated one is dropped so the create pass can replace it;
 //! 5. derived data is backfilled, and entity ids written by earlier builds of
 //!    this crate are rewritten to the reference's derivation;
 //! 6. `PRAGMA user_version` is stamped.
@@ -74,6 +76,16 @@ fn table_ddl(conn: &Connection, table: &str) -> Result<Option<String>> {
     })
 }
 
+fn trigger_ddl(conn: &Connection, name: &str) -> Result<Option<String>> {
+    let mut stmt =
+        conn.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?")?;
+    let mut rows = stmt.query([name])?;
+    Ok(match rows.next()? {
+        Some(row) => Some(normalise_ddl(&row.get::<_, String>(0)?)),
+        None => None,
+    })
+}
+
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?",
@@ -94,6 +106,18 @@ fn columns_of(conn: &Connection, table: &str) -> Result<Vec<String>> {
 fn pristine() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(SCHEMA_TABLES)?;
+    Ok(conn)
+}
+
+/// [`pristine`] plus the generated triggers, for diffing trigger DDL.
+///
+/// Separate from [`pristine`] because the trigger bodies reference columns that
+/// only exist once [`reconcile_columns`] has run against a live database —
+/// building them unconditionally into every `pristine()` call would make the
+/// column diff depend on the triggers it is a prerequisite for.
+fn pristine_with_triggers() -> Result<Connection> {
+    let conn = pristine()?;
+    conn.execute_batch(SCHEMA_TRIGGERS)?;
     Ok(conn)
 }
 
@@ -182,6 +206,41 @@ fn differs_from_schema(conn: &Connection, table: &str) -> Result<bool> {
         (Some(live), Some(want)) => Ok(live != want),
         _ => Ok(false),
     }
+}
+
+/// Drop any trigger whose stored definition differs from the generated schema,
+/// so the `CREATE TRIGGER` pass that follows can put the current one in place.
+///
+/// Without this, a changed trigger body never reaches an existing database.
+/// Every statement in `schema_triggers.sql` is `CREATE TRIGGER IF NOT EXISTS`,
+/// and the reconciliation loop in [`apply`] compares `type='table'` rows only —
+/// so a database that already carries the old trigger keeps it forever, and the
+/// fix only ever appears on databases created after it. That is how the
+/// `memories_outbox_au` read-amplification bug (issue #100) could have been
+/// "fixed" while every existing vault went on flooding its own outbox.
+///
+/// Dropping rather than `CREATE OR REPLACE` because SQLite has no such form for
+/// triggers. Dropping is safe here in a way it would not be for a table: a
+/// trigger holds no rows, so the drop-and-recreate loses nothing, and it is
+/// immediately recreated in the same [`apply`] call.
+fn reconcile_triggers(conn: &Connection) -> Result<()> {
+    let reference = pristine_with_triggers()?;
+    let mut stmt = reference.prepare("SELECT name FROM sqlite_master WHERE type='trigger'")?;
+    let names: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_>>()?;
+    drop(stmt);
+
+    for name in &names {
+        // A trigger absent on either side is not a difference to act on: absent
+        // live means the create pass below adds it, and absent in the reference
+        // cannot happen since `names` came from there.
+        if let (Some(live), Some(want)) = (trigger_ddl(conn, name)?, trigger_ddl(&reference, name)?)
+        {
+            if live != want {
+                conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {};", name))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Add any column the generated schema has and the live database does not.
@@ -387,6 +446,10 @@ pub fn apply(conn: &Connection) -> Result<()> {
     // After columns: the outbox triggers name 23 columns of `memories`, and
     // several indexes cover columns added above.
     conn.execute_batch(SCHEMA_INDEXES)?;
+    // Before the create pass, not after — every statement in SCHEMA_TRIGGERS is
+    // `IF NOT EXISTS`, so a stale trigger has to be dropped first or the create
+    // silently does nothing.
+    reconcile_triggers(conn)?;
     conn.execute_batch(SCHEMA_TRIGGERS)?;
 
     backfill_derived(conn, rebuilt_any)?;

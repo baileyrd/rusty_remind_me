@@ -288,9 +288,13 @@ fn applying_an_incoming_record_marks_only_its_own_echo_as_sent() {
     let conn = db.conn();
     let id = add(&conn, "local content");
     // A genuinely concurrent local edit, unrelated to the incoming pull.
+    // `updated_at` moves because that is what a real edit does — every writer
+    // in this crate bumps it — and since issue #100 the outbox trigger requires
+    // it. Leaving it unchanged here would model an access-tracking write, not
+    // an edit, and would queue nothing.
     conn.execute(
-        "UPDATE memories SET content = 'a local edit' WHERE id = ?",
-        [&id],
+        "UPDATE memories SET content = 'a local edit', updated_at = ? WHERE id = ?",
+        rusqlite::params!["2029-01-01T00:00:00+00:00", &id],
     )
     .unwrap();
     assert_eq!(

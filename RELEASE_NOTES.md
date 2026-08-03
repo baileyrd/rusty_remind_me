@@ -2,6 +2,39 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — The sync outbox no longer records every read (#100)
+
+### Fixed
+- **`memories_outbox_au` fired on every `UPDATE`**, and this crate records
+  access on read (`accessed_at`/`access_count`, PR #42) — so on a node with
+  sync configured, a 20-result search enqueued 20 full-payload `sync_outbox`
+  rows and pushed 20 no-op updates to every peer. The trigger now carries the
+  reference's own second condition, `AND NEW.updated_at IS NOT OLD.updated_at`
+  (`db.py`'s `_migrate_v21_to_v22`), so only genuine content changes enter the
+  outbox. Nothing that previously synced stops syncing: LWW on the receiving
+  side compares `updated_at`, so a row whose `updated_at` did not advance was
+  already being discarded on arrival — this removes the round trip, not the
+  effect.
+- **A changed trigger body never reached an existing database.** Every
+  statement in `schema_triggers.sql` is `CREATE TRIGGER IF NOT EXISTS`, and
+  reconciliation compared tables only, so a vault created before this change
+  would have kept the old trigger forever and gone on flooding its own outbox.
+  `db::migrations::reconcile_triggers` now diffs each trigger's stored DDL
+  against the generated one and drops the ones that differ, immediately before
+  the create pass rebuilds them. This is also the mechanism the schema-v27
+  work (#101) will need to get its outbox payload changes onto existing
+  databases.
+
+### Notes
+- `schema_triggers.sql` is generated verbatim from a `remind_me` dump and
+  normally not hand-edited. This guard is one deliberate, annotated exception:
+  it is forward-ported from the reference's v22 rather than waiting for the v27
+  regeneration (#101), which is a breaking change gated on a separate decision.
+  Regenerating at v27 reinstates the identical line, so the exception erases
+  itself rather than needing to be reapplied. See ADR-0007's 2026-08-03
+  addendum for why this does not reopen the hand-transcription problem that
+  ADR rejected.
+
 ## 2026-08-01 — Embedding-model versioning and auto-clear on mismatch (#96)
 
 ### Added
