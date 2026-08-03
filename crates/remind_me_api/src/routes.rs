@@ -83,6 +83,30 @@ pub fn health(_conn: &Connection, _wiki: &Wiki, _req: &Request, _params: &Params
     }))
 }
 
+/// The recorded history of the vault's shape, oldest first.
+///
+/// A snapshot is captured at most once per calendar day, so this is the series
+/// a chart plots directly. Empty until the first capture — a new install has
+/// no history, which is different from a flat one.
+pub fn api_analytics_trend(
+    conn: &Connection,
+    _wiki: &Wiki,
+    _req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    // Captured on read rather than only from a scheduler: this crate has no
+    // always-on poll loop yet, and a trend that only fills in while a
+    // background task happens to be running would be empty on exactly the
+    // installs most likely to look at it. Idempotent per day, so a page
+    // refresh costs one indexed lookup.
+    let _ = remind_me_core::analytics::capture_snapshot(conn);
+
+    match remind_me_core::analytics::trend(conn) {
+        Ok(snapshots) => ok(json!({ "snapshots": snapshots })),
+        Err(e) => err(500, format!("analytics trend failed: {}", e)),
+    }
+}
+
 /// Which builds are on each side of sync.
 ///
 /// The node's own version is the point on a standalone install; `hub` exists
@@ -836,6 +860,11 @@ pub const ROUTES: &[Route] = &[
         methods: &["GET"],
         pattern: "/",
         handler: dashboard,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/api/analytics/trend",
+        handler: api_analytics_trend,
     },
     Route {
         methods: &["GET"],

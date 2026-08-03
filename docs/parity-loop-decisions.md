@@ -232,6 +232,28 @@ something is there.
 
 ---
 
+## #112 — analytics snapshots and the trend route
+
+**The trend route captures a snapshot on read.** The reference captures from
+its scheduler's poll loop; this crate has no always-on loop yet, so a
+scheduler-only capture would leave the chart permanently empty on exactly the
+installs most likely to open it.
+
+Safe only because capture is idempotent per calendar day — asserted by a route
+test that hits the endpoint three times and checks the series still has one
+point. Without that, the chart would measure page loads rather than the vault.
+When a scheduler lands (#117), it can call the same function; the day check
+makes both callers safe together.
+
+**Comparison is by date, not timestamp.** A server restarted three times in a
+day would otherwise produce three data points and the trend would read as a
+spike that never happened.
+
+**A malformed stored value degrades to an empty map rather than failing the
+read.** One bad row should not blank a whole chart.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**
