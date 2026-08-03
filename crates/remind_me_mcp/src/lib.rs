@@ -11,6 +11,7 @@
 use remind_me_core::{
     backup, capture,
     consolidation::consolidate,
+    contradictions,
     db::queries,
     dbs_import, entity, export, history, importer, mempalace_import, normalize, recalibrate,
     saved_searches, stats, status,
@@ -20,14 +21,15 @@ use remind_me_core::{
     wiki,
     wiki_fs::Wiki,
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
-    ConsolidateInput, Database, DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput,
-    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, HistoryInput,
-    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
-    NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
-    ReclassifyInput, RevertInput, SaveSearchInput, SavedSearchNameInput, UndoImportInput,
-    UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
-    CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
-    CONSOLIDATE_SIMILARITY_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
+    ConsolidateInput, ContradictionCandidatesInput, Database, DbsImportInput, DecomposeBatchInput,
+    DecomposeInput, EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput,
+    FeedbackInput, HistoryInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
+    MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput, NormalizeBatchInput,
+    RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput, RevertInput,
+    SaveSearchInput, SavedSearchNameInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN,
+    CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX,
+    CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
     DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
     EXTRACT_BATCH_MIN, EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
     IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
@@ -594,6 +596,16 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_contradiction_candidates",
+                                "description": "Surface pairs of memories that might assert incompatible things but were never caught by exact-triple supersession — two pieces of prose that conflict without either carrying a formal subject/predicate/object. Read-only: these are pairs that MIGHT conflict, and most turn out merely topically similar. Read both before acting; fix a real one with remind_me_update, remind_me_delete, or remind_me_add carrying an explicit triple.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "limit": { "type": "integer", "default": 20, "minimum": CONTRADICTION_LIMIT_MIN, "maximum": CONTRADICTION_LIMIT_MAX }
                                     }
                                 }
                             },
@@ -1394,6 +1406,21 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_contradiction_candidates" => {
+                        let mut input: ContradictionCandidatesInput = serde_json::from_value(args)
+                            .unwrap_or(ContradictionCandidatesInput { limit: 20 });
+                        input.limit = input
+                            .limit
+                            .clamp(CONTRADICTION_LIMIT_MIN, CONTRADICTION_LIMIT_MAX);
+                        match contradictions::candidates(&conn, input.limit) {
+                            Ok(result) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Contradiction candidates error: {}", e) }] })
                             }
                         }
                     }

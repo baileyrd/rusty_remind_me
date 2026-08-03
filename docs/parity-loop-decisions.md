@@ -197,7 +197,29 @@ re-serialisation with reordered keys is not mistaken for an edit.
 
 ---
 
+## #110 — contradiction candidates
+
+**The fan-out cap is implemented as part of the tool, not deferred.** It landed
+in the reference on 2026-08-02 (`935eb98`), after the gap analysis was first
+written, and the T6 row was amended to carry it. Porting the pre-`935eb98` SQL
+would have shipped a queue where a single broadly-mentioned entity contributes
+74% of the rows — invisible on a small test vault, decisive on a real one.
+
+**No apply tool**, matching the reference: a confirmed contradiction is fixed
+with the existing `remind_me_update`, `remind_me_delete`, or an
+`remind_me_add` carrying an explicit triple.
+
+---
+
 ## Process corrections made mid-loop
+
+**A tool can be advertised without being routable, and only clippy notices.**
+While working #110 the schema entry landed but the dispatch arm did not — the
+string the insertion anchored on had been reformatted. Nothing failed except a
+`unused imports` warning, which `-D warnings` turned into a build failure by
+luck rather than design. The check is now explicit: cross-reference the
+`"name":` entries against the `=> {` dispatch arms and assert the two sets
+match. At the time of writing, 53 each, no difference.
 
 **The local gate now runs `cargo test --workspace --no-fail-fast`.** `cargo
 test` stops at the first failing binary, and the four pre-existing

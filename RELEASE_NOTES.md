@@ -2,6 +2,31 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — remind_me_contradiction_candidates (#110)
+
+### Added
+- **`remind_me_contradiction_candidates`** — surfaces pairs of memories that
+  might assert incompatible things but were never caught by exact-triple
+  supersession: two pieces of prose that conflict without either carrying a
+  formal subject/predicate/object. Read-only, with no apply half — a confirmed
+  contradiction is fixed with the existing `remind_me_update`,
+  `remind_me_delete`, or an `remind_me_add` carrying an explicit triple.
+
+### Notes
+- **The entity fan-out cap is included, not deferred.** Entities mentioned by
+  more than 20 memories are excluded from the pairing join on both sides. The
+  join is quadratic in an entity's mention count, and on the reference author's
+  vault a single 745-mention project entity produced 277,140 of 372,750
+  candidates — 74% of the queue — before the cap existed. This is invisible on
+  a small vault and decisive on a real one, which is why it ships with the tool
+  rather than after it.
+- The exclusion of pairs the triple mechanism already covers is subtler than it
+  looks: a pair sharing a subject and predicate but differing in object cannot
+  be observed here at all, because the write path would have superseded the
+  first the moment the second landed. So the exclusion filters out same-object
+  verbatim restatements, not genuine conflicts.
+- Tool coverage: 52 → **53 of 61**.
+
 ## 2026-08-03 — Edit history and revert (#109)
 
 ### Added
