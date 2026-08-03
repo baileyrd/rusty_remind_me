@@ -2,6 +2,34 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — Saved and watched searches (#108)
+
+### Added
+- **Four tools** — `remind_me_save_search`, `remind_me_list_saved_searches`,
+  `remind_me_run_saved_search`, `remind_me_delete_saved_search`. A saved search
+  stores a query plus its filters under a unique name; re-saving the same name
+  updates it in place, matching the `UNIQUE` constraint and
+  `remind_me_wiki_write`'s "one name is one logical thing" convention.
+- **Watch polling** — `saved_searches::poll_saved_search` records current
+  matches and reports the ones not seen before. The first poll **seeds**:
+  turning on `watch` for a search that already matches a hundred memories must
+  not read as a hundred new matches.
+- Deleting a saved search removes its `saved_search_seen_memories` rows, which
+  are unreachable dead weight the moment the parent row goes.
+
+### Notes
+- **Running a saved search returns all its matches, watched or not.** Only
+  polling diffs. This matches the reference and contradicts the issue's own
+  wording — a caller asking for a saved search's results must not get a partial
+  list because something polled it earlier.
+- `poll_saved_search` returns the new matches rather than dispatching
+  notifications; the transport is the scheduler's half (#117). This keeps the
+  diff logic complete and testable rather than shipping `watch` inert.
+- **`MemorySearchInput` now has a hand-written `Default`.** A derived one gives
+  `limit: 0`/`token_budget: 0` — a search that structurally cannot return
+  anything. The hand-written impl matches what serde supplies for absent keys.
+- Tool coverage: 46 → **50 of 61**.
+
 ## 2026-08-03 — GET /api/versions, and the build on /health (#107)
 
 ### Added

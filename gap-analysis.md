@@ -197,9 +197,11 @@ carried S1, S2, S3, S4, S6, S7, S8, S9 and S10 together — as PR #126. Every ro
 in the "Correctness" and "Schema — missing objects" tables above is therefore
 closed, and the downstream schema-dependent issues are unblocked.
 
-Wave 3 is in progress: #102 (T7) merged as PR #127, #103 (T8) as PR #128,
-#104 (T10) as PR #129, #105 (T11) as PR #130, #106 (T12) as PR #131;
-#107 (A3, A6) is in flight and completes the wave.
+**Wave 3 is complete**: #102 (T7) as PR #127, #103 (T8) as PR #128, #104 (T10)
+as PR #129, #105 (T11) as PR #130, #106 (T12) as PR #131, #107 (A3, A6) as
+PR #132.
+
+Wave 4 is in progress: #108 (T3) is in flight. #109–#112 remain.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |
