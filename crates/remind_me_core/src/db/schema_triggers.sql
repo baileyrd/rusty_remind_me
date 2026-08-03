@@ -1,5 +1,14 @@
 -- GENERATED from remind_me's schema. Do not hand-edit.
 -- Regenerate by dumping sqlite_master from a reference database.
+--
+-- ONE DELIBERATE EXCEPTION (issue #100): `memories_outbox_au` carries
+-- `AND NEW.updated_at IS NOT OLD.updated_at`, which a dump of a *v19*
+-- reference database does not have — the reference added it in
+-- `_migrate_v21_to_v22`. It is forward-ported here rather than waiting for the
+-- v27 regeneration (issue #101) because without it every memory *read*
+-- enqueues an outbox row, this crate recording access on read. Regenerating
+-- from a v27 dump reinstates the same line, so this exception disappears on
+-- its own rather than needing to be reapplied.
 
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
             INSERT INTO memories_fts(memories_fts, rowid, content, category, tags)
@@ -60,6 +69,7 @@ CREATE TRIGGER IF NOT EXISTS memories_outbox_ai
 CREATE TRIGGER IF NOT EXISTS memories_outbox_au
         AFTER UPDATE ON memories
         WHEN COALESCE((SELECT value FROM sync_flags WHERE key = 'sync_enabled'), '0') = '1'
+             AND NEW.updated_at IS NOT OLD.updated_at
         BEGIN
             INSERT INTO sync_outbox (memory_id, operation, payload, created_at)
             VALUES (

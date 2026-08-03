@@ -1,11 +1,38 @@
 # Gap Analysis — `rusty_remind_me` vs. `remind_me`
 
-**Run date:** 2026-08-02
-**Target:** `baileyrd/rusty_remind_me` @ `ddb92b0` (post-#99), 46,374 LOC Rust, 5 crates
-**Reference (pinned):** `baileyrd/remind_me` @ `9ca9844` — **v1.54.0**, 79,893 LOC Python
+**Run date:** 2026-08-03 (re-verification of the 2026-08-02 run)
+**Target:** `baileyrd/rusty_remind_me` @ `a2cce8b`, 46,374 LOC Rust, 5 crates
+**Reference (pinned):** `baileyrd/remind_me` @ `935eb98` — **v1.54.0**, 79,893 LOC Python
 **Previous run:** 2026-07-29 against target `de891ed` / reference v1.19.0. That
 analysis is superseded in full — every one of its four blockers is resolved and
 its entire gap table has been worked.
+
+### Re-verification, 2026-08-03
+
+This run re-derived the headline numbers independently rather than trusting the
+2026-08-02 table, and re-confirmed the highest-value claim (S5) against both
+codebases. Every figure below reproduced exactly:
+
+| Check | Method | Result |
+| --- | --- | --- |
+| Reference tools = 61 | AST-ish scan of `@mcp.tool(name=…)` across `remind_me_mcp/` | confirmed |
+| Target tools = 44 | `"name": "remind_me_*"` in `crates/remind_me_mcp/src/lib.rs` | confirmed — 43 shared, `remind_me_wiki_import` target-only, 18 missing |
+| Reference routes = 25 / peer 7 | `api.py` `routes = [...]`, `peer_server.py` path dispatch | confirmed |
+| Target routes = 21 / peer 6 | `crates/remind_me_api/src/` | confirmed — 5 missing, `/api` target-only, peer missing `/count` |
+| Schema 27 vs. 19 | `db.py:462` vs. `db/migrations.rs:46` | confirmed |
+| **S5 is a live defect** | `schema_triggers.sql:60` has only the `sync_enabled` guard, no `NEW.updated_at IS NOT OLD.updated_at`; `vitality.rs:534` does `UPDATE memories SET accessed_at = …` on read | **confirmed — every read enqueues an outbox row** |
+
+**Target movement since the last run: none.** `main` advanced only by the two
+documentation commits that recorded that analysis. All 23 filed issues
+(#100–#122) are still open and unworked, so the gap table stands unchanged
+apart from the delta below.
+
+**Reference movement since the last run: one commit.** `9ca9844` → `935eb98`,
+*"maintenance: cap contradiction-candidate pairing at 20 mentions/entity."*
+It touches only `maintenance.py`, and only the SQL that backs gap **T6**
+(issue [#110](https://github.com/baileyrd/rusty_remind_me/issues/110)) — see
+that row's notes. No new tool, route, table, or schema step; the version stays
+v1.54.0 and the schema stays v27.
 
 **Assessment path:** `spec`. The two codebases share no structurally diffable
 surface (Python package vs. Cargo workspace), so `cargo public-api` does not
@@ -101,7 +128,7 @@ Grouped for issue sizing. Each group is one issue unless the Notes say otherwise
 | **T3** | `remind_me_save_search`, `remind_me_list_saved_searches`, `remind_me_run_saved_search`, `remind_me_delete_saved_search` | tool | spec | both | `saved_searches.py`, `tools/saved_searches.py` (issue #194) | no | M | Saved and watched searches; `saved_search_seen_memories` is what makes "watch" report only new hits. Depends on S9. |
 | **T4** | `remind_me_history`, `remind_me_revert` | tool | spec | both | `tools/history.py` (issue #187) | no | M | Per-memory edit history and rollback. Depends on S7. Note the revision row must be written by the *existing* update/reclassify/normalize paths, so this touches more than a new handler. |
 | **T5** | `remind_me_digest` | tool | spec | both | `digest.py` (issue #188) | no | M | Vault digest synthesis over a time window. 372 LOC in the reference. |
-| **T6** | `remind_me_contradiction_candidates` | tool | spec | both | `tools/contradictions.py` | no | M | Surfaces same-subject/same-predicate/different-object triples. The target's `entity.rs:836` already documents this exact contradiction rule for supersession — the detection logic is largely present, the reporting surface is not. |
+| **T6** | `remind_me_contradiction_candidates` | tool | spec | both | `tools/contradictions.py`, `maintenance.py:207` | no | M | Surfaces same-subject/same-predicate/different-object triples. The target's `entity.rs:836` already documents this exact contradiction rule for supersession — the detection logic is largely present, the reporting surface is not. **Updated 2026-08-03:** the reference's pairing SQL now excludes entities mentioned by more than `CONTRADICTION_CANDIDATE_MAX_ENTITY_FANOUT` (20) memories, on both sides of the self-join. Without the cap the join is quadratic in an entity's mention count — on the reference author's vault a single 745-mention project entity produced 277,140 of 372,750 pairs (74%), nearly all of them "these two both mention the same project" rather than genuine contradictions. Port the cap *with* the tool, not as a follow-up; a naive port ships the pathological queue this commit exists to remove. |
 | **T7** | `remind_me_recalibrate_candidates` | tool | spec | both | `tools/recalibrate.py` | no | S | Proposes vitality/decay corrections. Smallest of the tool gaps at 126 LOC. |
 | **T8** | `remind_me_undo_import` | tool | spec | both | `tools/admin.py:1040` | no | M | Rolls back an import by `import_id`, removing its memories and tracking rows. The target already has all four import ledgers (`chat_imports`, `dbs_imports`, `mempalace_imports`), so this is additive. |
 | **T9** | `remind_me_api_key` | tool | spec | both | `api_keys.py` (issue #185) | no | M | Named, scope-limited (read vs. read-write) dashboard API keys, stored as SHA-256 hashes in a 0600 JSON file under `MEMORY_DIR`. The target's `remote.rs` already implements the same hash-at-rest discipline for connector tokens, so the conventions exist. **Security-relevant** — port the scope enforcement, not just the issuance. |
@@ -164,6 +191,9 @@ Each is a multi-issue epic, not a single gap. Listed so the omission is visible.
 
 Scope approved 2026-08-03: **waves 1–7**. Waves 8 (import formats) and the
 remaining epics are deliberately deferred — see "Deferred by decision" below.
+
+All 23 are **still open and unworked** as of the 2026-08-03 re-verification;
+none has a branch or PR against it yet.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |
