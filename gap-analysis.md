@@ -160,6 +160,58 @@ Each is a multi-issue epic, not a single gap. Listed so the omission is visible.
 
 ---
 
+## Filed issues
+
+Scope approved 2026-08-03: **waves 1–7**. Waves 8 (import formats) and the
+remaining epics are deliberately deferred — see "Deferred by decision" below.
+
+| Wave | Gap IDs | Issue |
+| --- | --- | --- |
+| 1 | S5 | [#100](https://github.com/baileyrd/rusty_remind_me/issues/100) outbox trigger fires on every read |
+| 2 | S1 + S2, S3, S4, S6, S7, S8, S9, S10 | [#101](https://github.com/baileyrd/rusty_remind_me/issues/101) regenerate schema at v27 **(breaking)** |
+| 3 | T7 | [#102](https://github.com/baileyrd/rusty_remind_me/issues/102) `recalibrate_candidates` |
+| 3 | T8 | [#103](https://github.com/baileyrd/rusty_remind_me/issues/103) `undo_import` |
+| 3 | T10 | [#104](https://github.com/baileyrd/rusty_remind_me/issues/104) version in stats/status |
+| 3 | T11 | [#105](https://github.com/baileyrd/rusty_remind_me/issues/105) sensitive-memory fields |
+| 3 | T12 | [#106](https://github.com/baileyrd/rusty_remind_me/issues/106) `strategy` search parameter |
+| 3 | A3, A6 | [#107](https://github.com/baileyrd/rusty_remind_me/issues/107) `/api/versions` |
+| 4 | T3 | [#108](https://github.com/baileyrd/rusty_remind_me/issues/108) saved/watched searches |
+| 4 | T4 | [#109](https://github.com/baileyrd/rusty_remind_me/issues/109) `history` / `revert` |
+| 4 | T6 | [#110](https://github.com/baileyrd/rusty_remind_me/issues/110) `contradiction_candidates` |
+| 4 | T5 | [#111](https://github.com/baileyrd/rusty_remind_me/issues/111) `digest` |
+| 4 | A1 | [#112](https://github.com/baileyrd/rusty_remind_me/issues/112) analytics snapshots + trend route |
+| 5 | A5 | [#113](https://github.com/baileyrd/rusty_remind_me/issues/113) `/count` on the peer server |
+| 5 | T2a | [#114](https://github.com/baileyrd/rusty_remind_me/issues/114) `sync_status` / `sync_repair` |
+| 5 | T2b | [#115](https://github.com/baileyrd/rusty_remind_me/issues/115) `sync_reconcile` / `_peer` |
+| 6 | T1a | [#116](https://github.com/baileyrd/rusty_remind_me/issues/116) reminders 1/3 — storage + tools |
+| 6 | T1b | [#117](https://github.com/baileyrd/rusty_remind_me/issues/117) reminders 2/3 — scheduler |
+| 6 | T1c, A2 | [#118](https://github.com/baileyrd/rusty_remind_me/issues/118) reminders 3/3 — ICS feed |
+| 7 | A4 | [#119](https://github.com/baileyrd/rusty_remind_me/issues/119) `/metrics` + `/manifest.json` |
+| 7 | T9 | [#120](https://github.com/baileyrd/rusty_remind_me/issues/120) scoped API keys |
+| 7 | E2 | [#121](https://github.com/baileyrd/rusty_remind_me/issues/121) rate limiting |
+| 7 | E3 | [#122](https://github.com/baileyrd/rusty_remind_me/issues/122) tool profiles |
+
+Closing all 23 takes MCP tool coverage from 44/61 to **61/61** and HTTP routes
+from 20/25 to **25/25**.
+
+## Deferred by decision
+
+Not filed. Recorded here so the omission stays visible rather than becoming an
+accident.
+
+- **E1, the Postgres sync hub** — out of scope. It is a separate deployable in
+  another language and runtime, not an addition to the Rust workspace, and the
+  existing Python hub serves Rust nodes unchanged. The client-side half *is*
+  in scope and is covered by #113 and #115.
+- **I1, I2, I3, I5** — PDF, image/OCR, audio, and Readwise import. Each needs a
+  new third-party crate and its own dependency decision.
+- **I4, Obsidian vault import** — the best fit of the five (no new dependency
+  expected, and `wiki_links`/`wiki_fs.rs` already exist), but deferred with the
+  rest of the importer work.
+- **E4–E8** — maintenance nudges, automation event stream, cloud backup,
+  sidecar process management, ANN index and reranker. E7 in particular is
+  Windows-specific and tied to the hub, making it a strong permanent exclusion.
+
 ## Recommended sequencing
 
 Ordered so each wave depends only on what precedes it.
