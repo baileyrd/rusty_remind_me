@@ -124,6 +124,22 @@ pub struct MemorySearchInput {
     /// [`MemoryAddInput::sensitive`] for why this is not access control.
     #[serde(default)]
     pub include_sensitive: bool,
+    /// Which RRF weight profile to fuse with.
+    ///
+    /// Defaults to [`RetrievalStrategy::Auto`], which routes on query shape.
+    /// The other three pin a preset — an escape hatch, and the thing to reach
+    /// for when A/B testing retrieval rather than in ordinary use.
+    ///
+    /// **Precedence against the environment.** This selects a *multiplier
+    /// profile* applied on top of whatever
+    /// [`crate::retrieval::RrfWeights::from_env`] resolved, so the
+    /// `REMIND_ME_RRF_W_*` variables still set the baseline and a per-call
+    /// strategy scales it. `Balanced` applies the identity multiplier, so it
+    /// reproduces the configured baseline exactly rather than overriding it
+    /// back to the built-in defaults — which is what lets an operator zero a
+    /// signal and have it stay zeroed under every strategy.
+    #[serde(default)]
+    pub strategy: RetrievalStrategy,
     /// Only controls *surfacing*. Associations are reinforced on every search
     /// regardless — see [`crate::expansion::record_co_retrieval`].
     #[serde(default)]

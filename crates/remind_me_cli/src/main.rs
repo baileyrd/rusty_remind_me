@@ -190,6 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let query = args[2..].join(" ");
                 let search_input = MemorySearchInput {
+                    strategy: Default::default(),
                     include_sensitive: false,
                     query,
                     category: None,

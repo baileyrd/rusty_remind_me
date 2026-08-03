@@ -1,0 +1,120 @@
+# Parity-loop decision log
+
+Decisions taken **autonomously** while working the `parity-gap` issues from
+`gap-analysis.md`, recorded here rather than raised as questions.
+
+Each entry says what was decided, why, and what would have to be true to
+revisit it. Anything a reviewer would want to have been consulted about belongs
+here — if it is not written down, it did not happen deliberately.
+
+Entries are newest last, grouped by issue.
+
+---
+
+## #102 — `remind_me_recalibrate_candidates`
+
+**The issue asked for `markdown` and `json` `response_format` variants. Not
+implemented; matched the reference instead.**
+
+The reference's `RecalibrateCandidatesInput` (`models.py:1350`) carries only
+`limit` and always returns JSON. Its models are `extra="forbid"`, so a caller
+sending `response_format` would be *rejected* by `remind_me` while being
+accepted here — divergence in the direction that breaks drop-in
+interoperability quietly rather than loudly.
+
+Revisit if: the reference adds the field, or drop-in interoperability stops
+being the point of this port.
+
+---
+
+## #104 — version in server status
+
+**The issue asked for the version in *both* `remind_me_stats` and
+`remind_me_server_status`. Implemented in `server_status` only.**
+
+`pid.py:176` puts `version` into `get_server_status`'s payload; `admin.py:622`
+prints it. `remind_me_stats` (`admin.py:408`) contains no version field at all
+— zero occurrences of the word in the whole tool body.
+
+**The issue's second criterion (peer versions from the `/health` probe) was
+deferred to #114.** It surfaces through `remind_me_sync_status`, which does not
+exist here yet; building half of it would leave a field nothing populates.
+
+**The gap analysis's T10 row was corrected in place**, because it asserted the
+"both tools" claim and is where the next run would re-derive it.
+
+---
+
+## #105 — the sensitive flag
+
+**Implemented two fields the issue did not name.**
+
+`MemoryUpdateInput.sensitive` (`models.py:382`) — without it a memory marked at
+creation can never be unmarked, so the feature is half-usable. `Option<bool>`
+rather than `bool` so an update that does not mention the flag cannot silently
+clear it.
+
+`SyncRecord.sensitive` — required to make the issue's *own* "round-trips
+through the sync outbox payload" criterion true in both directions. #101
+delivered the sending half; without the receiving half a peer stores the memory
+unmarked and surfaces it in ordinary search.
+
+**Deliberately did not expose `sensitive` on the public `Memory` read struct.**
+The reference's memory payloads do carry it, so this is a real follow-up — but
+it means adding a field to a widely-constructed public struct, and no
+acceptance criterion needed it. Filed as a note here rather than done quietly.
+
+**The semantic half of search is filtered in Rust, not by threading a parameter
+through `semantic_search_scored`.** Threading it would change an existing public
+signature, which this loop does not do unattended. The cost is one extra query
+per search that excludes sensitive memories.
+
+---
+
+## #106 — per-call retrieval strategy
+
+**Most of the issue's acceptance criteria were already satisfied before any
+code was written, and were covered with characterisation tests rather than
+reimplemented.**
+
+The `RetrievalStrategy` enum, the three multiplier presets, the `Auto` router
+and all three shape heuristics (`looks_keyword_shaped`, `looks_semantic_shaped`,
+`looks_temporal_shaped`) already existed in `retrieval.rs`. `search_memories`
+simply hardcoded `RetrievalStrategy::Auto` instead of reading the caller's
+choice. The only missing piece was the field and one line threading it through.
+
+Rewriting working, tuned retrieval logic to "implement" criteria it already met
+would have risked changing search behaviour for no gain. What was missing was
+*coverage*: none of it was reachable from the test suite. It is now.
+
+**Weights are asserted as ratios against `Balanced`, never as absolute
+numbers.** The presets are multipliers composed on top of
+`RrfWeights::from_env`, deliberately, so a preset cannot resurrect a signal an
+operator zeroed. Asserting absolutes would bake the default config into the
+tests and fail for anyone who tuned theirs.
+
+**Precedence between the env vars and the per-call value is documented on the
+field** (the issue asked for it to be documented, not changed): the environment
+sets the baseline, the strategy scales it, and `Balanced` is the identity
+multiplier rather than a reset to built-in defaults.
+
+---
+
+## Process corrections made mid-loop
+
+**The local gate now runs `cargo test --workspace --no-fail-fast`.** `cargo
+test` stops at the first failing binary, and the four pre-existing
+`updater::tests` failures (a container git-signing artifact, not a code defect)
+abort the run before any integration test executes. Every "clean except the
+four known failures" reported on #125–#130 was therefore describing only the
+lib binary. CI caught what the local gate could not — the `SyncRecord.sensitive`
+deserialisation bug on #130.
+
+**Build and lint checks assert exit status, not `grep '^error'`.** Cargo
+colourises its output, so ANSI escapes precede the word `error` and the pattern
+never matches. Three real compile errors were reported as clean before this was
+noticed.
+
+**CI state is read with `actions_get` / `get_workflow_job`, not
+`pull_request_read` / `get_check_runs`.** The latter lags, reporting
+`in_progress` for minutes after a job has finished.

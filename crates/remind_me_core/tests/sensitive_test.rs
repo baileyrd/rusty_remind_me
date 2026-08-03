@@ -38,6 +38,7 @@ fn search(conn: &Connection, query: &str, include_sensitive: bool) -> Vec<String
     queries::search_memories(
         conn,
         &MemorySearchInput {
+            strategy: Default::default(),
             query: query.to_string(),
             category: None,
             tags: None,

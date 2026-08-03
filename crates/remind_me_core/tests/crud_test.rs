@@ -24,6 +24,7 @@ fn add(conn: &Connection, content: &str, category: &str, source: &str, tags: &[&
 
 fn search(conn: &Connection, query: &str) -> Vec<String> {
     let input = MemorySearchInput {
+        strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
         category: None,

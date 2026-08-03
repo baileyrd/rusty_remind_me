@@ -398,7 +398,8 @@ impl McpServer {
                                         "expand_entities": { "type": "boolean", "default": false, "description": "Also surface memories mentioning the same entities" },
                                         "include_neighbors": { "type": "boolean", "default": false, "description": "Also surface adjacent chunks of the same source document" },
                                         "expand_co_retrieval": { "type": "boolean", "default": false, "description": "Also surface memories frequently retrieved alongside these" },
-                                        "include_sensitive": { "type": "boolean", "default": false, "description": "Include memories marked sensitive. Off by default, so sensitive content never surfaces in an ordinary request." }
+                                        "include_sensitive": { "type": "boolean", "default": false, "description": "Include memories marked sensitive. Off by default, so sensitive content never surfaces in an ordinary request." },
+                                        "strategy": { "type": "string", "enum": ["auto", "balanced", "keyword_favored", "semantic_favored"], "default": "auto", "description": "RRF weight profile. Leave at auto (routes by query shape: quoted phrases, prefix* wildcards and very short queries favour keyword relevance; long or question-shaped queries favour semantic similarity) unless deliberately A/B testing a pinned preset." }
                                     },
                                     "required": ["query"]
                                 }

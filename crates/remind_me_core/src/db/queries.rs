@@ -5,9 +5,9 @@ use crate::models::{
     BulkTagInput, BulkTagResult, ExtractBatchInput, ExtractBatchResult, Memory, MemoryAddInput,
     MemoryListInput, MemoryListResult, MemorySearchInput, MemorySearchResult, MemoryUpdateInput,
     ReclassifyBatchInput, ReclassifyBatchResult, ReclassifyInput, ReclassifyResult,
-    RetrievalStrategy, SearchPageInput, SearchPageResult, TagMode, UnannotatedMemory,
-    UnclassifiedMemory, UpdateOutcome, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, LIST_LIMIT_MAX,
-    LIST_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNCLASSIFIED,
+    SearchPageInput, SearchPageResult, TagMode, UnannotatedMemory, UnclassifiedMemory,
+    UpdateOutcome, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
+    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNCLASSIFIED,
 };
 use crate::retrieval::{
     choose_rrf_weights, rank_rrf, rrf_k_from_env, trim_by_token_budget, RrfConfig, RrfFusion,
@@ -637,7 +637,7 @@ pub fn search_memories(
     conn: &Connection,
     input: &MemorySearchInput,
 ) -> Result<Vec<MemorySearchResult>> {
-    let weights = choose_rrf_weights(&input.query, RetrievalStrategy::Auto);
+    let weights = choose_rrf_weights(&input.query, input.strategy);
 
     // Raw user text is not a valid FTS5 MATCH expression — ordinary punctuation
     // is operator syntax there, so a question like "what's the plan?" was a

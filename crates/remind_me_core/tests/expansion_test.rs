@@ -53,6 +53,7 @@ fn search(
     configure: impl FnOnce(&mut MemorySearchInput),
 ) -> remind_me_core::expansion::MemorySearchResponse {
     let mut input = MemorySearchInput {
+        strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
         category: None,
