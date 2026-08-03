@@ -40,6 +40,27 @@ fn default_metadata() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
+/// Accept SQLite's integer booleans as well as real JSON booleans.
+///
+/// A payload built by this crate's own triggers carries `0`/`1`; one built by
+/// hand or by a future writer may carry `false`/`true`. Both have to work, and
+/// a null has to read as false rather than as a parse error, because the field
+/// is absent-by-default on older peers.
+fn de_sqlite_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Bool(b) => Ok(b),
+        Value::Number(n) => Ok(n.as_i64().unwrap_or(0) != 0),
+        Value::Null => Ok(false),
+        other => Err(serde::de::Error::custom(format!(
+            "expected a boolean or 0/1 for `sensitive`, got {}",
+            other
+        ))),
+    }
+}
+
 /// One `memories` row as it travels the wire, matching the column set this
 /// crate's `memories_outbox_ai`/`memories_outbox_au` triggers snapshot into
 /// `sync_outbox.payload` — see `crates/remind_me_core/src/db/schema_triggers.sql`.
@@ -104,10 +125,18 @@ pub struct SyncRecord {
     /// confidentiality breach — this was never access control — but it defeats
     /// the flag's entire purpose the moment two nodes sync.
     ///
-    /// `#[serde(default)]` matters here: a record from a node that predates the
-    /// v27 schema has no `sensitive` key at all, and must parse as not-sensitive
-    /// rather than failing the whole pull.
-    #[serde(default)]
+    /// The custom deserializer is not decoration. SQLite has no boolean type,
+    /// so the outbox trigger's `json_object('sensitive', NEW.sensitive)` emits
+    /// the integer `0` or `1` — and serde refuses to read an integer into a
+    /// `bool`. With a plain `#[serde(default)]` every *memory* record in a push
+    /// batch failed to deserialise, the receiving node counted them all as
+    /// failures, and `push_outbox` reported `pushed: 0` while the hub stayed
+    /// empty. Sync stopped working entirely, and nothing local looked wrong.
+    ///
+    /// `default` still matters on top of that: a record from a node predating
+    /// the v27 schema has no `sensitive` key at all, and must read as
+    /// not-sensitive rather than failing the whole pull.
+    #[serde(default, deserialize_with = "de_sqlite_bool")]
     pub sensitive: bool,
 }
 

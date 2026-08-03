@@ -142,6 +142,44 @@ fn an_incoming_sensitive_record_stays_hidden_on_this_node() {
 }
 
 #[test]
+fn a_boolean_valued_sensitive_key_also_parses() {
+    // A payload built by hand, or by a future writer that uses real JSON
+    // booleans, has to keep working — the deserializer accepts both rather
+    // than trading one wire shape for the other.
+    let base = serde_json::json!({
+        "id": "mem_bool",
+        "content": "x",
+        "category": "general",
+        "tags": [],
+        "source": "manual",
+        "metadata": {},
+        "created_at": "2030-01-01T00:00:00+00:00",
+        "updated_at": "2030-01-01T00:00:00+00:00",
+        "access_count": 0,
+        "decay_rate": 0.1,
+        "vitality": 1.0,
+        "base_weight": 1.0,
+        "status": "active",
+        "memory_type": "unclassified",
+        "client": ""
+    });
+
+    for (value, want) in [
+        (serde_json::json!(true), true),
+        (serde_json::json!(false), false),
+        (serde_json::json!(1), true),
+        (serde_json::json!(0), false),
+        (serde_json::json!(null), false),
+    ] {
+        let mut json = base.clone();
+        json["sensitive"] = value.clone();
+        let record: SyncRecord = serde_json::from_value(json)
+            .unwrap_or_else(|e| panic!("sensitive={} should parse: {}", value, e));
+        assert_eq!(record.sensitive, want, "for sensitive={}", value);
+    }
+}
+
+#[test]
 fn a_record_from_a_pre_v27_peer_parses_as_not_sensitive() {
     // A node still on the old schema sends no `sensitive` key at all. That has
     // to deserialise as false rather than fail, or one stale peer breaks the

@@ -20,7 +20,13 @@ Dated entries, newest first. One entry per merged pull request.
   memory unmarked and it surfaced in that node's ordinary search — the flag
   defeated by the first sync rather than by anything visible locally. Same
   reasoning ADR-0007 records for `deleted_at`. `#[serde(default)]`, so a record
-  from a pre-v27 peer parses as not-sensitive instead of failing the pull.
+  from a pre-v27 peer parses as not-sensitive instead of failing the pull, and
+  a custom deserializer that accepts SQLite's integer booleans: the outbox
+  trigger's `json_object` emits `0`/`1`, and serde will not read an integer
+  into a `bool`. Without it **every memory record in a push batch failed to
+  deserialise** — the receiver counted them as failures, `push_outbox` reported
+  `pushed: 0`, and nothing looked wrong on the sending node. Sync stopped
+  working entirely.
 
 ### Notes
 - **This is not access control.** It is a single-user store: anyone who can read
