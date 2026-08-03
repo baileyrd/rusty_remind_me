@@ -174,3 +174,55 @@ payload changes (gaps S2/S3/S10 — `remind_at` and `sensitive` on the wire)
 will reach existing databases at all. Dropping is safe for a trigger in a way
 it would not be for a table — a trigger holds no rows — and SQLite offers no
 `CREATE OR REPLACE TRIGGER`.
+
+## Addendum, 2026-08-03: regenerated at v27, and the generator is now a script (issue #101)
+
+The schema has been regenerated from `remind_me` v1.54.0 (`_SCHEMA_VERSION =
+27`) and `SCHEMA_VERSION` bumped 19 → 27. Object-level diff, verified before
+committing: **5 tables added** (`analytics_snapshots`, `memory_revisions`,
+`reminder_deliveries`, `saved_searches`, `saved_search_seen_memories`), **6
+indexes added**, **5 columns added** (`memories.remind_at`,
+`memories.sensitive`, `sync_log.last_pull_at`/`.last_push_at`/
+`.last_attempt_at`), the two `memories_outbox_*` payloads extended with
+`remind_at`/`sensitive`, and **nothing removed**. The four graph outbox
+triggers show as changed but differ only in line wrapping.
+
+**The generation method is now `scripts/regenerate_schema.py`.** The original
+ADR described the method in prose and performed it by hand, which meant the
+next person to need it had to reconstruct an ad-hoc procedure from a document —
+and the whole point of generating is to remove reconstruction steps. The script
+stubs the reference's runtime-only dependencies (`httpx`, `numpy` via
+`embeddings`) and, more importantly, installs a namespace stub for the
+`remind_me_mcp` package root so that `__init__.py` — which imports the entire
+MCP tool surface — never executes. That is what "import `db.py` standalone"
+actually requires in practice, and it was the part most likely to be
+rediscovered painfully. It also refuses to write anything if the generated
+database's `user_version` does not match the reference's `_SCHEMA_VERSION`,
+so a partial ladder cannot produce a mislabelled dump.
+
+**The previous addendum's prediction held.** The `memories_outbox_au` guard
+forward-ported by hand for issue #100 came back identical in the v27 dump, so
+the annotated exception erased itself exactly as claimed rather than needing to
+be reapplied. `schema_test.rs` now pins that
+(`the_read_amplification_guard_survived_regeneration`) — the failure mode
+worth guarding is a regeneration silently reverting a fix with no test
+noticing, and "it will be fine because the reference has it too" is a claim, not
+a check.
+
+**On testing a generated artifact.** The pre-existing whole-schema tests
+compare the live database against the shipped `schema_*.sql`, which catches
+`migrations.rs` drifting from the SQL but not the SQL drifting from
+`remind_me` — both sides would agree just as happily at v19. Asserting the dump
+matches a checked-in copy of itself would be circular. So the new tests name
+the v20–v27 objects explicitly, sourced from the reference's
+`_migrate_vN_to_vN+1` function names rather than from the dump, which makes
+regenerating against an older reference a test failure rather than a silent
+downgrade.
+
+**§5 of `ARCHITECTURE.md` no longer reproduces the DDL.** It had gone stale in
+precisely the way this ADR exists to prevent — still showing
+`last_accessed_at`, an `entities` with no `node_id`, cascading foreign keys on
+`memory_entities`, and a `wiki_pages.topic` column, four shapes the schema
+tests assert are wrong. A hand-maintained copy of a generated artifact is the
+same failure as a hand-transcribed migration ladder, so it was replaced with
+pointers to the generated files and the tests that police them.

@@ -5,6 +5,7 @@
 //! unnoticed — the check was shaped like the mistake. These compare the whole
 //! schema: every table, index and trigger, by normalised DDL.
 
+use remind_me_core::backup::list_backups;
 use remind_me_core::db::migrations::SCHEMA_VERSION;
 use remind_me_core::db::queries;
 use remind_me_core::embedder::{EMBEDDING_BACKEND_ENV, EMBEDDING_DIM_ENV, OLLAMA_MODEL_ENV};
@@ -613,4 +614,258 @@ fn reopening_with_the_embedding_backend_disabled_never_clears_stored_vectors() {
 
     std::env::remove_var(OLLAMA_MODEL_ENV);
     std::env::remove_var(EMBEDDING_DIM_ENV);
+}
+
+// ---------------------------------------------------------------------------
+// The v19 -> v27 step (issue #101)
+// ---------------------------------------------------------------------------
+//
+// The whole-schema tests above compare the live database against the shipped
+// `schema_*.sql`. That catches `migrations.rs` drifting from the SQL files, but
+// not the SQL files drifting from `remind_me` — they would agree with each
+// other just as happily at v19 as at v27.
+//
+// These name the eight migration steps' worth of objects explicitly, taken
+// from the reference's own migration functions rather than from the dump, so
+// regenerating against an older reference (or hand-editing one back out) fails
+// here instead of silently shipping a schema that claims a version it does not
+// have.
+
+/// Every object `remind_me` added between v19 and v27, with the migration that
+/// introduced it. Sourced from `db.py`'s `_migrate_vN_to_vN+1` functions.
+const V27_TABLES: &[(&str, &str)] = &[
+    ("reminder_deliveries", "_migrate_v22_to_v23"),
+    ("memory_revisions", "_migrate_v23_to_v24"),
+    ("analytics_snapshots", "_migrate_v24_to_v25"),
+    ("saved_searches", "_migrate_v26_to_v27"),
+    ("saved_search_seen_memories", "_migrate_v26_to_v27"),
+];
+
+const V27_INDEXES: &[(&str, &str)] = &[
+    ("idx_memories_normalized_from", "_migrate_v20_to_v21"),
+    ("idx_memories_remind_at", "_migrate_v22_to_v23"),
+    (
+        "idx_reminder_deliveries_memory_remind_at",
+        "_migrate_v22_to_v23",
+    ),
+    ("idx_memory_revisions_memory_edited", "_migrate_v23_to_v24"),
+    ("idx_analytics_snapshots_captured_at", "_migrate_v24_to_v25"),
+    (
+        "idx_saved_search_seen_memories_search_memory",
+        "_migrate_v26_to_v27",
+    ),
+];
+
+const V27_COLUMNS: &[(&str, &str, &str)] = &[
+    ("sync_log", "last_pull_at", "_migrate_v19_to_v20"),
+    ("sync_log", "last_push_at", "_migrate_v19_to_v20"),
+    ("sync_log", "last_attempt_at", "_migrate_v19_to_v20"),
+    ("memories", "remind_at", "_migrate_v22_to_v23"),
+    ("memories", "sensitive", "_migrate_v25_to_v26"),
+];
+
+#[test]
+fn the_schema_version_is_the_references_current_one() {
+    // Not a tautology against the dump: `remind_me` v1.54.0 reports
+    // `_SCHEMA_VERSION = 27` (db.py:462), and a database this crate creates is
+    // only readable by it if the stamp matches the schema actually present.
+    assert_eq!(SCHEMA_VERSION, 27);
+}
+
+#[test]
+fn the_generated_schema_carries_every_v27_object() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+
+    let tables = objects(&conn, "table");
+    let indexes = objects(&conn, "index");
+
+    let mut missing = Vec::new();
+    for (name, migration) in V27_TABLES {
+        if !tables.contains_key(*name) {
+            missing.push(format!("  table {} ({})", name, migration));
+        }
+    }
+    for (name, migration) in V27_INDEXES {
+        if !indexes.contains_key(*name) {
+            missing.push(format!("  index {} ({})", name, migration));
+        }
+    }
+    for (table, column, migration) in V27_COLUMNS {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", table))
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        if !cols.contains(&column.to_string()) {
+            missing.push(format!("  column {}.{} ({})", table, column, migration));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "the schema is stamped v{} but is missing objects the reference added \
+         on the way there — regenerate from a current remind_me:\n{}",
+        SCHEMA_VERSION,
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn the_outbox_payloads_carry_the_new_columns() {
+    // Gap S10. A synced peer reconstructs a memory from the trigger's
+    // json_object payload alone, so a column that exists in `memories` but not
+    // in the payload is silently dropped in transit — the failure is invisible
+    // locally and only shows up as data loss on the other node.
+    let db = Database::open_in_memory().unwrap();
+    let triggers = objects(&db.conn(), "trigger");
+
+    for trigger in ["memories_outbox_ai", "memories_outbox_au"] {
+        let sql = triggers
+            .get(trigger)
+            .unwrap_or_else(|| panic!("{} is missing entirely", trigger));
+        for column in ["remind_at", "sensitive"] {
+            assert!(
+                sql.contains(column),
+                "{} does not carry {} in its payload; a synced peer would drop it",
+                trigger,
+                column
+            );
+        }
+    }
+}
+
+#[test]
+fn the_read_amplification_guard_survived_regeneration() {
+    // Issue #100 hand-added `AND NEW.updated_at IS NOT OLD.updated_at` to
+    // `memories_outbox_au` ahead of this regeneration, on the reasoning that a
+    // v27 dump would reinstate the identical line and erase the exception.
+    // This asserts that actually happened rather than the fix being quietly
+    // regenerated away — which would restore the bug with no test failing.
+    let db = Database::open_in_memory().unwrap();
+    let triggers = objects(&db.conn(), "trigger");
+    let sql = triggers.get("memories_outbox_au").unwrap();
+    assert!(
+        sql.contains("new.updated_at is not old.updated_at"),
+        "memories_outbox_au lost its access-tracking guard: {}",
+        sql
+    );
+}
+
+#[test]
+fn a_v19_database_with_rows_reconciles_to_v27() {
+    let tmp = TempDb::new("v19_to_v27");
+
+    // A database written by this crate at v19: the shipped schema with
+    // everything v20-v27 added taken back out — the tables *and* the columns,
+    // since dropping only the tables would leave `reconcile_columns` with
+    // nothing to do and the test would pass without exercising it.
+    {
+        let conn = Connection::open(&tmp.0).unwrap();
+        conn.execute_batch(SCHEMA_TABLES).unwrap();
+        conn.execute_batch(SCHEMA_INDEXES).unwrap();
+        for (name, _) in V27_TABLES {
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS {};", name))
+                .unwrap();
+        }
+        // Indexes before columns: SQLite refuses to drop a column an index
+        // still references, and `idx_memories_remind_at` covers one of them.
+        for (name, _) in V27_INDEXES {
+            conn.execute_batch(&format!("DROP INDEX IF EXISTS {};", name))
+                .unwrap();
+        }
+        for (table, column, _) in V27_COLUMNS {
+            conn.execute_batch(&format!("ALTER TABLE {} DROP COLUMN {};", table, column))
+                .unwrap();
+        }
+        // The v19 outbox triggers: the shipped ones with the two payload pairs
+        // v23/v26 added taken back out. Installed *after* the column drops so
+        // they reference only columns that exist at v19.
+        //
+        // This is what makes the S10 half of this issue testable at all. A
+        // database that already had triggers keeps them unless something
+        // replaces them, and a trigger whose json_object payload omits
+        // `remind_at`/`sensitive` drops those fields silently in transit — the
+        // receiving peer just never sees them.
+        let v19_triggers = SCHEMA_TRIGGERS
+            .replace(", 'remind_at', NEW.remind_at", "")
+            .replace(", 'sensitive', NEW.sensitive", "");
+        assert!(
+            !v19_triggers.contains("NEW.remind_at") && !v19_triggers.contains("NEW.sensitive"),
+            "the payload-stripping replacements no longer match the generated \
+             trigger text; update them or this fixture is not a v19 database"
+        );
+        conn.execute_batch(&v19_triggers).unwrap();
+
+        conn.execute_batch(
+            "
+            INSERT INTO memories (id, content, created_at, updated_at)
+            VALUES ('mem_v19', 'survivor', '2020-06-15T12:00:00+00:00',
+                    '2020-06-15T12:00:00+00:00');
+            PRAGMA user_version = 19;
+            ",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&tmp.0).unwrap();
+    let conn = db.conn();
+
+    let version: i32 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 27, "the stamp must advance with the schema");
+
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM memories WHERE id = 'mem_v19'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(content, "survivor", "reconciliation must not drop rows");
+
+    assert_matches_schema(&conn, "table");
+    assert_matches_schema(&conn, "index");
+    assert_matches_schema(&conn, "trigger");
+
+    // Explicit rather than leaning on assert_matches_schema above: this is the
+    // S10 failure mode, and it is the one that would not announce itself. A
+    // stale trigger keeps working — it just quietly ships an incomplete payload
+    // to every peer, so the damage lands on a different machine.
+    //
+    // Note what this does *not* prove. On this path the triggers are replaced
+    // because `memories` and `sync_log` changed shape, so `rebuild_table` drops
+    // them along with the tables and the create pass puts them back — the
+    // assertion below still holds with `reconcile_triggers` removed entirely
+    // (checked). `reconcile_triggers` is what covers the other case, a trigger
+    // body changing while its table does not, and `outbox_test`'s
+    // `an_existing_database_has_its_stale_trigger_rebuilt_on_open` is the test
+    // that actually fails without it.
+    let triggers = objects(&conn, "trigger");
+    for trigger in ["memories_outbox_ai", "memories_outbox_au"] {
+        for column in ["remind_at", "sensitive"] {
+            assert!(
+                triggers[trigger].contains(column),
+                "{} was not replaced during reconciliation and still omits {}",
+                trigger,
+                column
+            );
+        }
+    }
+
+    // #95's pre-migration snapshot guard has to still fire for this step in
+    // particular: v19 -> v27 is the largest reconciliation this crate has ever
+    // shipped, and it is exactly the transition a user would most want a
+    // rollback from. The label carries the version read *before* migrating.
+    let backups = list_backups(&tmp.0.parent().unwrap().join("backups")).unwrap();
+    assert_eq!(backups.len(), 1, "the v19 -> v27 step must be snapshotted");
+    assert!(
+        backups[0].filename.contains("pre-migration-v19"),
+        "snapshot should be labelled with the pre-migration version, got {}",
+        backups[0].filename
+    );
 }

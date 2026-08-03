@@ -192,8 +192,10 @@ Each is a multi-issue epic, not a single gap. Listed so the omission is visible.
 Scope approved 2026-08-03: **waves 1–7**. Waves 8 (import formats) and the
 remaining epics are deliberately deferred — see "Deferred by decision" below.
 
-All 23 are **still open and unworked** as of the 2026-08-03 re-verification;
-none has a branch or PR against it yet.
+**Progress.** #100 (S5) merged as PR #125. #101 (S1 + S2, S3, S4, S6, S7, S8,
+S9, S10) is in flight — that one issue closes nine of the ten schema gaps, so
+the "Correctness" and "Schema — missing objects" tables above are fully worked
+once it lands. The remaining 21 issues are open and unworked.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |
