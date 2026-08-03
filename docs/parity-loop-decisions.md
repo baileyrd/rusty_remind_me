@@ -278,6 +278,25 @@ reads it from.
 
 ---
 
+## #114 — sync status and repair
+
+**`sync_repair` resets only the pull cursors, never the `_at` liveness
+columns.** Those record what actually happened; rewriting them to force a
+re-pull would destroy the evidence you were reading when you decided a repair
+was needed.
+
+**Repairing a remote with no `sync_log` row reports that rather than
+succeeding.** A remote never contacted has nothing to repair, and a false
+success sends the caller waiting for a re-pull that is not coming.
+
+**Direction and rate were deliberately separated after a real bug.** The first
+implementation gated the drain verdict on elapsed time, and two calls a few
+hundred microseconds apart elapse zero whole milliseconds — so a backlog that
+had visibly not moved reported `Unknown`. The delta alone answers "is it
+moving"; only the per-minute figure needs a clock.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

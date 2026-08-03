@@ -26,16 +26,16 @@ use remind_me_core::{
     FeedbackInput, HistoryInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
     MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput, NormalizeBatchInput,
     RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput, ResponseFormat, RevertInput,
-    SaveSearchInput, SavedSearchNameInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN,
-    CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX,
-    CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
-    DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
-    EXTRACT_BATCH_MIN, EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
-    IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
-    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
-    RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
-    UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
+    SaveSearchInput, SavedSearchNameInput, SyncRepairInput, UndoImportInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
+    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
+    CONTRADICTION_LIMIT_MAX, CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN,
+    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
+    EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN,
+    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX,
+    MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
+    NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX,
+    RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -596,6 +596,21 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_sync_status",
+                                "description": "Report multi-node sync state: outbox depth with a drain verdict, tombstone counts, and per-remote contact times. Liveness comes from wall-clock contact timestamps, not content cursors, so a quiet healthy remote is distinguishable from a wedged one. The first call establishes a drain baseline and reports 'unknown'; call again after ~30s for a rate.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
+                                "name": "remind_me_sync_repair",
+                                "description": "Reset a remote's pull cursors so the next sync re-pulls history from the beginning. Only the cursors are reset — the contact timestamps record what actually happened and are left intact.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "remote_id": { "type": "string", "default": "hub", "description": "Which remote to repair" }
                                     }
                                 }
                             },
@@ -1417,6 +1432,35 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Normalize batch error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_sync_status" => match remind_me_core::sync::sync_status(&conn) {
+                        Ok(status) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&status).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Sync status error: {}", e) }] })
+                        }
+                    },
+                    "remind_me_sync_repair" => {
+                        let input: SyncRepairInput =
+                            serde_json::from_value(args).unwrap_or(SyncRepairInput {
+                                remote_id: "hub".to_string(),
+                            });
+                        match remind_me_core::sync::sync_repair(&conn, &input.remote_id) {
+                            Ok(true) => {
+                                json!({ "content": [{ "type": "text", "text": format!("Reset pull cursors for '{}'. The next sync will re-pull its history.", input.remote_id) }] })
+                            }
+                            // Distinct from success: a remote that was never
+                            // contacted has nothing to repair, and reporting
+                            // success would send the caller waiting for a
+                            // re-pull that is not coming.
+                            Ok(false) => {
+                                json!({ "content": [{ "type": "text", "text": format!("No sync_log row for '{}' — nothing to repair.", input.remote_id) }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Sync repair error: {}", e) }] })
                             }
                         }
                     }

@@ -2,6 +2,35 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — remind_me_sync_status and remind_me_sync_repair (#114)
+
+### Added
+- **`remind_me_sync_status`** — outbox depth with a drain verdict
+  (`draining`/`stalled`/`growing`/`idle`/`unknown`), tombstone counts split by
+  what is compactable now, and per-remote contact state. When sync is off it
+  names the specific missing environment variables rather than just saying so.
+- **`remind_me_sync_repair`** — resets a remote's pull cursors so the next sync
+  re-pulls history.
+
+### Notes
+- **Liveness is read from `last_attempt_at`/`last_push_at`/`last_pull_at`,
+  never from the `last_pull`/`last_push` cursors.** This is what the v20
+  columns exist for: a quiet-but-healthy remote advances its contact clocks
+  every cycle while its cursors stand still, so reading liveness off the
+  cursors reports that remote as stalled — and reports a genuinely wedged one
+  as fine the moment anything happens to move.
+- A never-contacted remote sits at the epoch default rather than NULL, so
+  "never tried" is recognised by value and stays distinguishable from "tried
+  and failing".
+- **Repair touches only the cursors.** The contact timestamps record what
+  actually happened; rewriting them to force a re-pull would destroy the
+  evidence you were reading when you decided to repair.
+- The drain verdict reports direction from the delta alone and a per-minute
+  rate only when measurable time has passed — gating the verdict on elapsed
+  time made back-to-back calls report `unknown` for a backlog that had
+  visibly not moved.
+- Tool coverage: 54 → **56 of 61**.
+
 ## 2026-08-03 — GET /count on the peer server (#113)
 
 ### Added

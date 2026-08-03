@@ -1446,3 +1446,84 @@ pub enum CapturedSnapshot {
     Captured { id: i64 },
     AlreadyToday { id: i64 },
 }
+
+// ---------------------------------------------------------------------------
+// Sync status (gap T2a, issue #114)
+// ---------------------------------------------------------------------------
+
+/// Which way the outbox backlog is moving.
+///
+/// `Unknown` is a real answer, not a failure: a direction needs two
+/// observations, and the first call after a restart only has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrainVerdict {
+    Draining,
+    Stalled,
+    Growing,
+    Idle,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutboxStatus {
+    pub pending: i64,
+    pub sent: i64,
+    pub total: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_pending: Option<String>,
+    pub drain: DrainVerdict,
+    /// Change per minute since the previous observation. Negative is draining.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_minute: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TombstoneStatus {
+    pub total: i64,
+    pub compactable_now: i64,
+}
+
+/// One remote's contact state.
+///
+/// The three timestamps are wall-clock contact times, never content cursors —
+/// see `sync::status`' module docs for why conflating them makes a quiet
+/// healthy peer indistinguishable from a wedged one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteStatus {
+    pub remote_id: String,
+    pub last_attempt_at: String,
+    pub last_push_at: String,
+    pub last_pull_at: String,
+    /// False when the timestamps are still at their epoch default — which is
+    /// what separates "never tried" from "tried and failing".
+    pub ever_contacted: bool,
+    pub pending: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SyncStatus {
+    Disabled {
+        missing: Vec<String>,
+        hint: String,
+    },
+    Enabled {
+        node_id: String,
+        hub_url: String,
+        outbox: OutboxStatus,
+        tombstones: TombstoneStatus,
+        remotes: Vec<RemoteStatus>,
+    },
+}
+
+/// Request to reset a remote's pull cursors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncRepairInput {
+    #[serde(default = "default_repair_remote")]
+    pub remote_id: String,
+}
+
+fn default_repair_remote() -> String {
+    "hub".to_string()
+}

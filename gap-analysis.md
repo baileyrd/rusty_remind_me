@@ -204,7 +204,8 @@ PR #132.
 **Wave 4 is complete**: #108 (T3) as PR #133, #109 (T4) as PR #134, #110 (T6)
 as PR #135, #111 (T5) as PR #136, #112 (A1) as PR #137.
 
-Wave 5 is in progress: #113 (A5) is in flight. #114-#115 remain.
+Wave 5 is in progress: #113 (A5) merged as PR #138; #114 (T2a) is in flight.
+#115 remains.
 Waves 6-7 remain: #116-#118 (reminders), #119-#122 (ops surface).
 
 | Wave | Gap IDs | Issue |
