@@ -2,6 +2,31 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — Analytics snapshots and GET /api/analytics/trend (#112)
+
+### Added
+- **Daily analytics snapshots** — total memories, vitality buckets and
+  category counts, recorded at most once per calendar day. `remind_me_stats`
+  and the vitality report answer "what does the vault look like now"; nothing
+  could answer "is it getting better or worse", because nothing was recorded to
+  compare against.
+- **`GET /api/analytics/trend`** — the full series, oldest first, which is what
+  the re-copied dashboard (#107) plots. That fetch had been 404ing since #107;
+  it now returns data.
+
+### Notes
+- **The route captures on read.** The reference captures from its scheduler;
+  this crate has no always-on loop yet, so a scheduler-only capture would leave
+  the chart permanently empty on exactly the installs most likely to open it.
+  Safe only because capture is idempotent per calendar day — there is a route
+  test hitting the endpoint three times and asserting one data point.
+- Comparison is by **date**, not timestamp: a server restarted three times in a
+  day would otherwise show three points and read as a spike that never
+  happened.
+- A malformed stored value degrades to an empty map rather than failing the
+  read — one bad row should not blank the chart.
+- HTTP route coverage: 21 → **22 of 25**. **Wave 4 complete.**
+
 ## 2026-08-03 — remind_me_digest (#111)
 
 ### Added

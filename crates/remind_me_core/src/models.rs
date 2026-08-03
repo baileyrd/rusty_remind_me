@@ -1422,3 +1422,27 @@ pub struct DigestInput {
 fn default_digest_since_days() -> i64 {
     crate::digest::DEFAULT_SINCE_DAYS
 }
+
+// ---------------------------------------------------------------------------
+// Analytics snapshots (gap A1, issue #112)
+// ---------------------------------------------------------------------------
+
+/// One day's recorded shape of the vault.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticsSnapshot {
+    pub captured_at: String,
+    pub total_memories: i64,
+    pub vitality_buckets: std::collections::BTreeMap<String, usize>,
+    pub category_counts: std::collections::BTreeMap<String, i64>,
+}
+
+/// What a capture attempt did.
+///
+/// `AlreadyToday` is a normal outcome rather than an error: the caller is a
+/// poll loop, and being asked twice in a day is expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CapturedSnapshot {
+    Captured { id: i64 },
+    AlreadyToday { id: i64 },
+}

@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod backup;
 pub mod capture;
 pub mod consolidation;

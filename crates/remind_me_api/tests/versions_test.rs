@@ -69,3 +69,35 @@ fn api_versions_is_behind_auth_unlike_health() {
     assert_eq!(authed_get(&srv, "/api/versions").status, 200);
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn the_analytics_trend_route_returns_a_series() {
+    let (srv, root) = server("analytics-trend");
+
+    let response = get(&srv, "/api/analytics/trend");
+
+    assert_eq!(response.status, 200);
+    let body = response.json();
+    // A capture happens on read, so even a fresh install has one point rather
+    // than an empty chart the dashboard cannot distinguish from a broken one.
+    assert!(body["snapshots"].is_array());
+    assert_eq!(body["snapshots"].as_array().unwrap().len(), 1);
+    assert!(body["snapshots"][0]["captured_at"].is_string());
+    assert!(body["snapshots"][0]["total_memories"].is_number());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn repeated_trend_requests_do_not_multiply_snapshots() {
+    let (srv, root) = server("analytics-trend-idempotent");
+
+    get(&srv, "/api/analytics/trend");
+    get(&srv, "/api/analytics/trend");
+    let response = get(&srv, "/api/analytics/trend");
+
+    // Capture-on-read is only safe because it is idempotent per day. Without
+    // that, every dashboard refresh would add a data point and the chart would
+    // measure page loads rather than the vault.
+    assert_eq!(response.json()["snapshots"].as_array().unwrap().len(), 1);
+    std::fs::remove_dir_all(&root).unwrap();
+}
