@@ -23,6 +23,7 @@ mod pull;
 mod push;
 mod record;
 mod server;
+mod status;
 mod worker;
 
 pub use graph::{
@@ -36,6 +37,7 @@ pub use pull::{
 pub use push::{push_outbox, PushError, PushReport};
 pub use record::{upsert_record, ApplyOutcome, SyncApplyError, SyncRecord};
 pub use server::{serve_once, PeerServer, PeerServerConfig, PeerServerStatus, SyncPeer};
+pub use status::{sync_repair, sync_status};
 pub use worker::{
     disabled_status as sync_worker_disabled_status, SyncWorker, SyncWorkerStatus, HUB_REMOTE_ID,
 };
