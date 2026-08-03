@@ -2,6 +2,34 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — Edit history and revert (#109)
+
+### Added
+- **`remind_me_history`** — a memory's revisions, newest first. Each is a
+  snapshot of content, category, tags, metadata and the sensitive flag as they
+  were *before* an edit replaced them.
+- **`remind_me_revert`** — restores all five together. Reverting is itself an
+  edit: it records a revision of the state just before the revert, so a
+  mistaken revert is recoverable.
+
+### Notes
+- **Revisions are written from the update path alone.** The issue warned that
+  "a revision row has to be written by every existing mutation path" and listed
+  seven, asking for the list to be audited against the reference. The audit
+  answer is one: the reference records from `_apply_memory_field_update` only.
+  Reclassify, normalize, annotate, consolidate and decompose record nothing,
+  and that is followed here — a revision exists to recover a value a *human*
+  replaced, and recording the derived-data paths would bury those under
+  machine-generated noise. Pinned by tests in both directions.
+- Access tracking never produces a revision: it writes `accessed_at` and no
+  tracked column. Without that, a vault would accumulate a revision per read —
+  the same shape of bug #100 fixed in the sync outbox.
+- A same-value update records nothing, mirroring the outbox trigger's "only on
+  genuine change" discipline.
+- Reverting to the state a memory already holds reports `no_change` rather than
+  writing a no-op revision and an outbox row that says nothing changed.
+- Tool coverage: 50 → **52 of 61**.
+
 ## 2026-08-03 — Saved and watched searches (#108)
 
 ### Added

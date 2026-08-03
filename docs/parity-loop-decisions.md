@@ -171,6 +171,32 @@ the memory had been deleted.
 
 ---
 
+## #109 — edit history and revert
+
+**The issue's scope warning listed seven mutation paths and asked for them to
+be audited rather than assumed. The audit answer is one.** The reference writes
+`memory_revisions` rows from its update path alone (`tools/crud.py`'s
+`_apply_memory_field_update`) — reclassify, normalize, annotate, consolidate
+and decompose record nothing.
+
+Followed rather than "corrected", and the reasoning holds: a revision exists to
+recover a value a human replaced. The other paths either add derived data
+alongside the original or change recomputable classification metadata, and
+recording them would bury the edits worth reverting under machine-generated
+noise. Both halves are pinned by tests — updates record, reclassify does not —
+because "we forgot to wire it up" and "the reference deliberately does not" are
+indistinguishable from the outside.
+
+**Reverting to a memory's current state reports `NoChange` rather than writing
+a no-op revision.** The alternative is an outbox row that says nothing changed
+and a history entry recording a non-edit.
+
+**`TrackedChanges` compares stored representations, not parsed values.** Tags
+and metadata are compared as their JSON strings, so a metadata
+re-serialisation with reordered keys is not mistaken for an edit.
+
+---
+
 ## Process corrections made mid-loop
 
 **The local gate now runs `cargo test --workspace --no-fail-fast`.** `cargo
