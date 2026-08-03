@@ -12,8 +12,8 @@ use remind_me_core::{
     backup, capture,
     consolidation::consolidate,
     db::queries,
-    dbs_import, entity, export, importer, mempalace_import, normalize, recalibrate, saved_searches,
-    stats, status,
+    dbs_import, entity, export, history, importer, mempalace_import, normalize, recalibrate,
+    saved_searches, stats, status,
     sync::{SyncPeer, SyncWorker},
     undo_import, updater, vectors, vitality, watcher,
     webhook::Webhook,
@@ -21,18 +21,19 @@ use remind_me_core::{
     wiki_fs::Wiki,
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
     ConsolidateInput, Database, DbsImportInput, DecomposeBatchInput, DecomposeInput, EntityInput,
-    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, MemoryAddInput,
-    MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
+    EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput, HistoryInput,
+    MemoryAddInput, MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
     NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
-    ReclassifyInput, SaveSearchInput, SavedSearchNameInput, UndoImportInput, UpdateOutcome,
-    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
-    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
-    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
-    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
-    IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX,
-    MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX,
-    NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX,
-    RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
+    ReclassifyInput, RevertInput, SaveSearchInput, SavedSearchNameInput, UndoImportInput,
+    UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
+    CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
+    CONSOLIDATE_SIMILARITY_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
+    DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
+    EXTRACT_BATCH_MIN, EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
+    IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
+    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
+    RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -594,6 +595,31 @@ impl McpServer {
                                     "properties": {
                                         "batch_size": { "type": "integer", "default": 20, "minimum": NORMALIZE_BATCH_MIN, "maximum": NORMALIZE_BATCH_MAX }
                                     }
+                                }
+                            },
+                            {
+                                "name": "remind_me_history",
+                                "description": "List a memory's edit history — snapshots of its content, category, tags, metadata and sensitive flag taken before each edit replaced them. Newest first. Revision ids from here are what remind_me_revert takes.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" },
+                                        "limit": { "type": "integer", "default": 20, "minimum": HISTORY_LIMIT_MIN, "maximum": HISTORY_LIMIT_MAX }
+                                    },
+                                    "required": ["memory_id"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_revert",
+                                "description": "Restore a memory's content, category, tags, metadata and sensitive flag to a prior revision. Reverting is itself an edit: it records a new revision of the state just before the revert, so a revert can be undone.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" },
+                                        "revision_id": { "type": "integer", "description": "A revision id from remind_me_history for this same memory" },
+                                        "reason": { "type": "string", "description": "Optional note recorded on the revision this revert creates" }
+                                    },
+                                    "required": ["memory_id", "revision_id"]
                                 }
                             },
                             {
@@ -1371,6 +1397,44 @@ impl McpServer {
                             }
                         }
                     }
+                    "remind_me_history" => match serde_json::from_value::<HistoryInput>(args) {
+                        Ok(mut input) => {
+                            input.limit = input.limit.clamp(HISTORY_LIMIT_MIN, HISTORY_LIMIT_MAX);
+                            if !history::memory_is_live(&conn, &input.memory_id).unwrap_or(false) {
+                                json!({ "content": [{ "type": "text", "text": format!("Memory '{}' not found.", input.memory_id) }] })
+                            } else {
+                                match history::history(&conn, &input.memory_id, input.limit) {
+                                    Ok(revisions) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&revisions).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("History error: {}", e) }] })
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid history input: {}", e) }] })
+                        }
+                    },
+                    "remind_me_revert" => match serde_json::from_value::<RevertInput>(args) {
+                        Ok(input) => match history::revert(
+                            &conn,
+                            &input.memory_id,
+                            input.revision_id,
+                            input.reason.as_deref(),
+                        ) {
+                            Ok(outcome) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Revert error: {}", e) }] })
+                            }
+                        },
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid revert input: {}", e) }] })
+                        }
+                    },
                     "remind_me_save_search" => {
                         match serde_json::from_value::<SaveSearchInput>(args) {
                             Ok(input) => match saved_searches::save_search(&conn, &input) {

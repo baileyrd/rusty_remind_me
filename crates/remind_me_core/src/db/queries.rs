@@ -276,6 +276,29 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
         return Ok(UpdateOutcome::NoFields);
     }
 
+    // Before the UPDATE, not after: a revision exists to hold the value this
+    // edit is about to replace. Issue #109's audit found the reference writes
+    // revisions from this path alone — reclassify, normalize, annotate,
+    // consolidate and decompose record nothing — so this is the only call
+    // site, and `history.rs`'s module docs carry the reasoning.
+    //
+    // Access tracking never reaches here (it writes `accessed_at` directly),
+    // so a read cannot produce a revision.
+    let tracked = crate::history::TrackedChanges {
+        content: input.content.clone(),
+        category: input.category.clone(),
+        tags_json: input
+            .tags
+            .as_ref()
+            .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".to_string())),
+        metadata_json: input
+            .metadata
+            .as_ref()
+            .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string())),
+        sensitive: input.sensitive,
+    };
+    crate::history::capture_revision(conn, &input.memory_id, &tracked, None)?;
+
     sets.push("updated_at = ?");
     bindings.push(Value::Text(Utc::now().to_rfc3339()));
     bindings.push(Value::Text(input.memory_id.clone()));

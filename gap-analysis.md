@@ -201,7 +201,8 @@ closed, and the downstream schema-dependent issues are unblocked.
 as PR #129, #105 (T11) as PR #130, #106 (T12) as PR #131, #107 (A3, A6) as
 PR #132.
 
-Wave 4 is in progress: #108 (T3) is in flight. #109–#112 remain.
+Wave 4 is in progress: #108 (T3) merged as PR #133; #109 (T4) is in flight.
+#110–#112 remain.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |

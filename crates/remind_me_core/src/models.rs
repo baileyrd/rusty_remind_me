@@ -1263,3 +1263,67 @@ pub struct SaveSearchInput {
 pub struct SavedSearchNameInput {
     pub name: String,
 }
+
+// ---------------------------------------------------------------------------
+// Edit history (gap T4, issue #109)
+// ---------------------------------------------------------------------------
+
+/// One snapshot of a memory's tracked columns, taken before an edit replaced
+/// them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryRevision {
+    pub id: i64,
+    pub memory_id: String,
+    pub content: String,
+    pub category: String,
+    /// Stored form (a JSON array string), matching the `memories` column it
+    /// snapshots, so a revert can write it straight back.
+    pub tags: String,
+    pub metadata: String,
+    /// `None` for a revision captured before the column existed.
+    pub sensitive: Option<bool>,
+    pub edited_at: String,
+    pub revision_reason: Option<String>,
+}
+
+/// Request for a memory's revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryInput {
+    pub memory_id: String,
+    #[serde(default = "default_history_limit")]
+    pub limit: usize,
+}
+
+fn default_history_limit() -> usize {
+    20
+}
+
+pub const HISTORY_LIMIT_MIN: usize = 1;
+pub const HISTORY_LIMIT_MAX: usize = 100;
+
+/// Request to restore a memory to a prior revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevertInput {
+    pub memory_id: String,
+    pub revision_id: i64,
+    /// Free text recorded on the revision the revert itself creates.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// What a revert did.
+///
+/// The two not-found cases are distinct because they need different fixes: a
+/// missing memory means the id is wrong, a missing revision means the revision
+/// id is wrong or belongs to a different memory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RevertOutcome {
+    Reverted {
+        revision_id: i64,
+    },
+    /// The memory already holds this revision's values.
+    NoChange,
+    MemoryNotFound,
+    RevisionNotFound,
+}
