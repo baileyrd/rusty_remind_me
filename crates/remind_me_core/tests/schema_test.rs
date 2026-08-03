@@ -345,6 +345,7 @@ fn writes_still_reach_the_sync_outbox() {
     queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "syncable".into(),
             category: "general".into(),
             tags: vec![],
@@ -389,6 +390,7 @@ fn writes_do_not_reach_the_outbox_while_sync_is_unconfigured() {
     queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "not synced anywhere".into(),
             category: "general".into(),
             tags: vec![],

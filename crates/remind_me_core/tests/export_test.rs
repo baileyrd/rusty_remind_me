@@ -17,6 +17,7 @@ fn add(
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: category.to_string(),
             tags: tags.iter().map(|t| t.to_string()).collect(),

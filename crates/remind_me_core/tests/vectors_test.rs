@@ -74,6 +74,7 @@ fn add(conn: &Connection, content: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: "general".into(),
             tags: vec![],
@@ -93,6 +94,7 @@ fn add_with_category(conn: &Connection, content: &str, category: &str) -> String
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: category.to_string(),
             tags: vec![],

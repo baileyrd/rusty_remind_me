@@ -13,6 +13,7 @@ fn add(conn: &Connection, content: &str) -> String {
 
 fn add_with_entities(conn: &Connection, content: &str, entities: Vec<EntityInput>) -> String {
     let input = MemoryAddInput {
+        sensitive: false,
         content: content.to_string(),
         category: "general".to_string(),
         tags: vec![],

@@ -77,6 +77,7 @@ fn a_store_without_imports_has_nothing_to_normalize() {
     queries::add_memory(
         &conn,
         MemoryAddInput {
+            sensitive: false,
             content: "written by hand".into(),
             category: "general".into(),
             tags: vec![],
@@ -480,6 +481,7 @@ fn the_distillation_is_searchable() {
     let found = queries::search_memories(
         &conn,
         &remind_me_core::MemorySearchInput {
+            include_sensitive: false,
             query: "quokka".into(),
             category: None,
             tags: None,

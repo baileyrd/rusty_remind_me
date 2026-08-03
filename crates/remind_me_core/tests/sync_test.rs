@@ -26,6 +26,7 @@ fn add(conn: &Connection, content: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: "general".into(),
             tags: vec![],
@@ -578,6 +579,51 @@ fn push_outbox_reports_a_clear_error_when_the_hub_is_unreachable() {
     .unwrap_err();
     assert!(!err.to_string().is_empty());
     disable_sync();
+}
+
+#[test]
+fn a_sensitive_memory_pushes_with_its_flag_intact() {
+    // The end-to-end join the unit tests could not reach. `sensitive` is stored
+    // as INTEGER — SQLite has no boolean type — so the outbox trigger's
+    // json_object emits 0/1, and serde will not read an integer into a `bool`.
+    // When SyncRecord first gained the field, every *memory* record in a push
+    // batch failed to deserialise on the receiving side: the hub counted them
+    // as failures, push reported `pushed: 0`, and nothing looked wrong on the
+    // sending node. Only a real push over the wire catches that.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("local-node");
+    let hub = TestHub::start("hub-node");
+    let local_db = Database::open_in_memory().unwrap();
+    let local_conn = local_db.conn();
+    let id = queries::add_memory(
+        &local_conn,
+        MemoryAddInput {
+            content: "sensitive content".into(),
+            category: "general".into(),
+            tags: vec![],
+            source: "manual".into(),
+            metadata: serde_json::json!({}),
+            subject: None,
+            predicate: None,
+            object: None,
+            entities: vec![],
+            sensitive: true,
+        },
+    )
+    .unwrap()
+    .id;
+
+    let report = push_outbox(&local_conn, &hub.url, SECRET, "local-node", "hub").unwrap();
+
+    assert_eq!(report.pushed, 1, "the record must reach the hub at all");
+    let stored: i64 = hub
+        .db
+        .conn()
+        .query_row("SELECT sensitive FROM memories WHERE id = ?", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, 1, "and arrive still marked");
 }
 
 #[test]

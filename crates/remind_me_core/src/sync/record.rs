@@ -40,6 +40,27 @@ fn default_metadata() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
+/// Accept SQLite's integer booleans as well as real JSON booleans.
+///
+/// A payload built by this crate's own triggers carries `0`/`1`; one built by
+/// hand or by a future writer may carry `false`/`true`. Both have to work, and
+/// a null has to read as false rather than as a parse error, because the field
+/// is absent-by-default on older peers.
+fn de_sqlite_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Bool(b) => Ok(b),
+        Value::Number(n) => Ok(n.as_i64().unwrap_or(0) != 0),
+        Value::Null => Ok(false),
+        other => Err(serde::de::Error::custom(format!(
+            "expected a boolean or 0/1 for `sensitive`, got {}",
+            other
+        ))),
+    }
+}
+
 /// One `memories` row as it travels the wire, matching the column set this
 /// crate's `memories_outbox_ai`/`memories_outbox_au` triggers snapshot into
 /// `sync_outbox.payload` — see `crates/remind_me_core/src/db/schema_triggers.sql`.
@@ -51,7 +72,8 @@ fn default_metadata() -> Value {
 /// conflict-resolved over sync, only produced locally. `deleted_at` **is**
 /// included: unlike `doc_id`/`chunk_index`, the reference's `_upsert_one`
 /// does apply it, via the same LWW path as every other column, which is what
-/// lets a tombstone propagate at all (`#76`).
+/// lets a tombstone propagate at all (`#76`). `sensitive` is included on the
+/// same grounds (issue #105).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
     pub id: String,
@@ -98,6 +120,24 @@ pub struct SyncRecord {
     pub superseded_by: Option<String>,
     #[serde(default)]
     pub deleted_at: Option<String>,
+    /// Applied for the same reason as `deleted_at`: the payload carries it, so
+    /// a peer that drops it silently unhides a memory the author marked. Not a
+    /// confidentiality breach — this was never access control — but it defeats
+    /// the flag's entire purpose the moment two nodes sync.
+    ///
+    /// The custom deserializer is not decoration. SQLite has no boolean type,
+    /// so the outbox trigger's `json_object('sensitive', NEW.sensitive)` emits
+    /// the integer `0` or `1` — and serde refuses to read an integer into a
+    /// `bool`. With a plain `#[serde(default)]` every *memory* record in a push
+    /// batch failed to deserialise, the receiving node counted them all as
+    /// failures, and `push_outbox` reported `pushed: 0` while the hub stayed
+    /// empty. Sync stopped working entirely, and nothing local looked wrong.
+    ///
+    /// `default` still matters on top of that: a record from a node predating
+    /// the v27 schema has no `sensitive` key at all, and must read as
+    /// not-sensitive rather than failing the whole pull.
+    #[serde(default, deserialize_with = "de_sqlite_bool")]
+    pub sensitive: bool,
 }
 
 #[derive(Debug)]
@@ -253,8 +293,8 @@ pub fn upsert_record(
                 id, content, category, tags, source, metadata, created_at, updated_at,
                 capture_id, node_id, client, accessed_at, access_count, decay_rate,
                 vitality, base_weight, status, memory_type, source_capture_id,
-                subject, predicate, object, superseded_by, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                subject, predicate, object, superseded_by, deleted_at, sensitive
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 category = excluded.category,
@@ -277,7 +317,8 @@ pub fn upsert_record(
                 predicate = excluded.predicate,
                 object = excluded.object,
                 superseded_by = excluded.superseded_by,
-                deleted_at = excluded.deleted_at",
+                deleted_at = excluded.deleted_at,
+                sensitive = excluded.sensitive",
             params![
                 record.id,
                 record.content,
@@ -303,6 +344,7 @@ pub fn upsert_record(
                 record.object,
                 record.superseded_by,
                 record.deleted_at,
+                record.sensitive,
             ],
         )?;
         let rowid: i64 = conn.query_row(

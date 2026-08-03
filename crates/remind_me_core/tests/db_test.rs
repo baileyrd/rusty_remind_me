@@ -6,6 +6,7 @@ fn test_database_creation_and_add_memory() {
     let db = Database::open_in_memory().expect("Failed to open in-memory database");
 
     let add_input = MemoryAddInput {
+        sensitive: false,
         content: "Rust implementation of remind_me with FTS5 search".to_string(),
         category: "project".to_string(),
         tags: vec!["rust".to_string(), "mcp".to_string()],
@@ -28,6 +29,7 @@ fn test_database_creation_and_add_memory() {
     assert_eq!(fetched.content, mem.content);
 
     let search_input = MemorySearchInput {
+        include_sensitive: false,
         query: "FTS5".to_string(),
         category: None,
         tags: None,

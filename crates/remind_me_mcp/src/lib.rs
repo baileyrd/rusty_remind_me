@@ -321,7 +321,8 @@ impl McpServer {
                                         "content": { "type": "string" },
                                         "category": { "type": "string", "default": "general" },
                                         "tags": { "type": "array", "items": { "type": "string" } },
-                                        "source": { "type": "string", "default": "manual" }
+                                        "source": { "type": "string", "default": "manual" },
+                                        "sensitive": { "type": "boolean", "default": false, "description": "Mark this memory sensitive: kept out of ordinary search and list results unless include_sensitive is set. A convenience flag, NOT access control — this is a single-user store and anyone with the database reads everything regardless." }
                                     },
                                     "required": ["content"]
                                 }
@@ -351,7 +352,8 @@ impl McpServer {
                                         },
                                         "source": { "type": "string" },
                                         "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 },
-                                        "offset": { "type": "integer", "default": 0, "minimum": 0 }
+                                        "offset": { "type": "integer", "default": 0, "minimum": 0 },
+                                        "include_sensitive": { "type": "boolean", "default": false, "description": "Include memories marked sensitive. Off by default, so sensitive content never surfaces in an ordinary request." }
                                     }
                                 }
                             },
@@ -365,7 +367,8 @@ impl McpServer {
                                         "content": { "type": "string" },
                                         "category": { "type": "string" },
                                         "tags": { "type": "array", "items": { "type": "string" } },
-                                        "metadata": { "type": "object" }
+                                        "metadata": { "type": "object" },
+                                        "sensitive": { "type": "boolean", "description": "Set or clear the sensitive flag. Omit to leave it unchanged." }
                                     },
                                     "required": ["memory_id"]
                                 }
@@ -394,7 +397,8 @@ impl McpServer {
                                         "min_vitality": { "type": "number", "default": 0, "description": "Only return memories at or above this current vitality" },
                                         "expand_entities": { "type": "boolean", "default": false, "description": "Also surface memories mentioning the same entities" },
                                         "include_neighbors": { "type": "boolean", "default": false, "description": "Also surface adjacent chunks of the same source document" },
-                                        "expand_co_retrieval": { "type": "boolean", "default": false, "description": "Also surface memories frequently retrieved alongside these" }
+                                        "expand_co_retrieval": { "type": "boolean", "default": false, "description": "Also surface memories frequently retrieved alongside these" },
+                                        "include_sensitive": { "type": "boolean", "default": false, "description": "Include memories marked sensitive. Off by default, so sensitive content never surfaces in an ordinary request." }
                                     },
                                     "required": ["query"]
                                 }

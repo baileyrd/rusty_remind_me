@@ -2,6 +2,46 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — The sensitive-memory flag (#105)
+
+### Added
+- **`MemoryAddInput.sensitive`**, **`MemorySearchInput.include_sensitive`** and
+  **`MemoryListInput.include_sensitive`**, all defaulting to `false`, plus the
+  matching MCP tool-schema properties and dashboard `?include_sensitive=1`
+  support. A sensitive memory stays out of ordinary search and list results
+  unless asked for.
+- **`MemoryUpdateInput.sensitive: Option<bool>`** — set or clear the flag after
+  creation. Not named by the issue; added because the reference has it
+  (`models.py:382`) and because without it a memory marked at creation could
+  never be unmarked. `Option` rather than `bool` so an update that does not
+  mention the flag cannot silently clear it.
+- **`SyncRecord.sensitive`**, so the flag survives a sync. #101 put it into the
+  outbox payload (the sending half); without this the receiving peer stored the
+  memory unmarked and it surfaced in that node's ordinary search — the flag
+  defeated by the first sync rather than by anything visible locally. Same
+  reasoning ADR-0007 records for `deleted_at`. `#[serde(default)]`, so a record
+  from a pre-v27 peer parses as not-sensitive instead of failing the pull, and
+  a custom deserializer that accepts SQLite's integer booleans: the outbox
+  trigger's `json_object` emits `0`/`1`, and serde will not read an integer
+  into a `bool`. Without it **every memory record in a push batch failed to
+  deserialise** — the receiver counted them as failures, `push_outbox` reported
+  `pushed: 0`, and nothing looked wrong on the sending node. Sync stopped
+  working entirely.
+
+### Notes
+- **This is not access control.** It is a single-user store: anyone who can read
+  the database file reads every memory in it, marked or not. The flag is a
+  "don't surface by default" convenience and nothing more. Said plainly in the
+  tool schema, the model doc comments, and the test module docs.
+- Filtering is applied in SQL, not after the query, so `COUNT`, `LIMIT` and
+  `OFFSET` agree — a total that counted hidden rows would make pagination skip
+  a page.
+- The search filter covers **both** halves of the RRF fusion. Filtering only the
+  keyword SQL would leave a sensitive memory able to arrive through the semantic
+  half and rank into the output.
+- Adding three fields to widely-constructed input structs touched 80 struct
+  literals across 34 files. That part of the diff is mechanical.
+
 ## 2026-08-03 — The serving build is reported in server status (#104)
 
 ### Added

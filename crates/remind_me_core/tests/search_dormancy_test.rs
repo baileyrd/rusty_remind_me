@@ -12,6 +12,7 @@ fn add(conn: &Connection, content: &str, category: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: category.to_string(),
             tags: vec![],
@@ -38,6 +39,7 @@ fn age_by_days(conn: &Connection, id: &str, days: i64) {
 
 fn search(conn: &Connection, query: &str, include_dormant: bool, min_vitality: f64) -> Vec<String> {
     let input = MemorySearchInput {
+        include_sensitive: false,
         query: query.to_string(),
         category: None,
         tags: None,

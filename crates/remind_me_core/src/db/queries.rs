@@ -91,8 +91,8 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
         "INSERT INTO memories (
             id, content, category, tags, source, metadata, created_at, updated_at,
             subject, predicate, object, decay_rate, vitality, base_weight, access_count, accessed_at,
-            node_id, client
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+            node_id, client, sensitive
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
         params![
             id,
             input.content,
@@ -111,6 +111,7 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
             now_iso,
             crate::sync::configured_node_id(),
             crate::sync::configured_client(),
+            input.sensitive,
         ],
     )?;
 
@@ -159,6 +160,13 @@ pub fn get_memory_by_id(conn: &Connection, id: &str) -> Result<Option<Memory>> {
 fn list_filters(input: &MemoryListInput) -> (String, Vec<Value>) {
     let mut conditions = vec!["m.deleted_at IS NULL".to_string()];
     let mut bindings: Vec<Value> = Vec::new();
+
+    // Applied here rather than after the query so `COUNT`, `LIMIT` and
+    // `OFFSET` all agree — the same reason every other filter in this function
+    // is a SQL condition rather than a post-filter.
+    if !input.include_sensitive {
+        conditions.push("m.sensitive = 0".to_string());
+    }
 
     if let Some(category) = input.category.as_ref().filter(|c| !c.is_empty()) {
         conditions.push("m.category = ?".to_string());
@@ -255,6 +263,13 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
         bindings.push(Value::Text(
             serde_json::to_string(metadata).unwrap_or_else(|_| "{}".to_string()),
         ));
+    }
+
+    // `Option<bool>` rather than `bool`: `None` means "leave it alone", so an
+    // update that does not mention the flag cannot silently clear it.
+    if let Some(sensitive) = input.sensitive {
+        sets.push("sensitive = ?");
+        bindings.push(Value::Integer(sensitive as i64));
     }
 
     if sets.is_empty() {
@@ -605,6 +620,19 @@ fn effective_vitality_sql() -> String {
     )
 }
 
+/// Ids of every memory currently marked sensitive.
+///
+/// One query rather than a per-result check: the set is small by construction
+/// — a flag a user sets deliberately, on a single-user store — and the callers
+/// need membership tests, not rows.
+fn sensitive_ids(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM memories WHERE sensitive = 1")?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<std::collections::HashSet<String>>>()?;
+    Ok(ids)
+}
+
 pub fn search_memories(
     conn: &Connection,
     input: &MemorySearchInput,
@@ -643,6 +671,9 @@ pub fn search_memories(
     }
     if let Some(ref cat) = input.category {
         sql.push_str(&format!(" AND m.category = '{}'", cat.replace('\'', "''")));
+    }
+    if !input.include_sensitive {
+        sql.push_str(" AND m.sensitive = 0");
     }
 
     sql.push_str(" ORDER BY bm25(memories_fts) LIMIT ?");
@@ -684,6 +715,17 @@ pub fn search_memories(
             for (memory, sim) in scored {
                 similarity.insert(memory.id.clone(), sim as f64);
                 memories.push(memory);
+            }
+            // Filtering the keyword SQL alone would not be enough: RRF fuses
+            // two independent result sets, so a sensitive memory excluded from
+            // the keyword half could still arrive through the semantic half and
+            // rank into the output. Done here rather than by threading a
+            // parameter through `semantic_search_scored`, which would change an
+            // existing public signature.
+            if !input.include_sensitive {
+                let hidden = sensitive_ids(conn)?;
+                memories.retain(|m| !hidden.contains(&m.id));
+                similarity.retain(|id, _| !hidden.contains(id));
             }
             (memories, similarity)
         }

@@ -21,6 +21,7 @@ fn add_with_vector(conn: &Connection, content: &str, category: &str, vector: &[f
     let id = queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: category.to_string(),
             tags: vec![],

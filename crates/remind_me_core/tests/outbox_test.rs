@@ -38,6 +38,7 @@ fn add(conn: &Connection, content: &str) -> String {
     queries::add_memory(
         conn,
         MemoryAddInput {
+            sensitive: false,
             content: content.to_string(),
             category: "general".into(),
             tags: vec![],
@@ -57,6 +58,7 @@ fn search(conn: &Connection, query: &str) {
     queries::search_with_expansions(
         conn,
         &MemorySearchInput {
+            include_sensitive: false,
             query: query.to_string(),
             category: None,
             tags: None,
@@ -136,6 +138,7 @@ fn a_real_content_change_still_reaches_the_outbox() {
     let outcome = queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id,
             content: Some("quokka sighting, confirmed".into()),
             category: None,
@@ -217,6 +220,7 @@ fn an_existing_database_has_its_stale_trigger_rebuilt_on_open() {
     queries::update_memory(
         &conn,
         &MemoryUpdateInput {
+            sensitive: None,
             memory_id: id,
             content: Some("quokka sighting, confirmed".into()),
             category: None,

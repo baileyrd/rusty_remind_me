@@ -193,6 +193,7 @@ fn a_capture_is_searchable() {
     let found: Vec<String> = queries::search_memories(
         &conn,
         &MemorySearchInput {
+            include_sensitive: false,
             query: "quokka".into(),
             category: None,
             tags: None,
