@@ -29,6 +29,7 @@ fn add(conn: &Connection, content: &str, category: &str) -> String {
 
 fn input(query: &str) -> MemorySearchInput {
     MemorySearchInput {
+        strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
         category: None,
@@ -123,6 +124,7 @@ fn a_memory_in_regular_use_outlives_an_abandoned_one() {
     queries::search_with_expansions(
         &conn,
         &MemorySearchInput {
+            strategy: Default::default(),
             include_sensitive: false,
             query: "use".into(),
             ..input("use")

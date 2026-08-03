@@ -2,6 +2,29 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — Per-call retrieval strategy (#106)
+
+### Added
+- **`MemorySearchInput.strategy`**, defaulting to `auto`, with the reference's
+  four values (`auto`, `balanced`, `keyword_favored`, `semantic_favored`) and a
+  matching MCP tool-schema property. Previously the RRF weight profile was
+  reachable only through environment variables, with `search_memories`
+  hardcoding `Auto`.
+
+### Notes
+- **Nearly all of this already existed.** The enum, the three multiplier
+  presets, the `Auto` router and its shape heuristics were all in
+  `retrieval.rs` — only the field and one line threading it through were
+  missing. The rest of the work was coverage: none of that logic was reachable
+  from the test suite, and now 12 tests pin it, including the four `Auto`
+  branches and the keyword-wins-over-semantic precedence that an `if`/`else if`
+  reordering would silently flip.
+- **Precedence against the environment:** `REMIND_ME_RRF_W_*` sets the
+  baseline, the strategy scales it. `Balanced` is the identity multiplier, so
+  it reproduces the configured baseline exactly rather than resetting to
+  built-in defaults — which is what lets an operator zero a signal and have it
+  stay zeroed under every strategy.
+
 ## 2026-08-03 — The sensitive-memory flag (#105)
 
 ### Added

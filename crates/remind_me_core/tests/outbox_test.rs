@@ -58,6 +58,7 @@ fn search(conn: &Connection, query: &str) {
     queries::search_with_expansions(
         conn,
         &MemorySearchInput {
+            strategy: Default::default(),
             include_sensitive: false,
             query: query.to_string(),
             category: None,

@@ -39,6 +39,7 @@ fn age_by_days(conn: &Connection, id: &str, days: i64) {
 
 fn search(conn: &Connection, query: &str, include_dormant: bool, min_vitality: f64) -> Vec<String> {
     let input = MemorySearchInput {
+        strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
         category: None,

@@ -198,7 +198,8 @@ in the "Correctness" and "Schema — missing objects" tables above is therefore
 closed, and the downstream schema-dependent issues are unblocked.
 
 Wave 3 is in progress: #102 (T7) merged as PR #127, #103 (T8) as PR #128,
-#104 (T10) as PR #129; #105 (T11) is in flight. #106–#107 remain.
+#104 (T10) as PR #129, #105 (T11) as PR #130; #106 (T12) is in flight.
+#107 remains.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |

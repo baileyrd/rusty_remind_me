@@ -46,6 +46,7 @@ fn search_ids(conn: &Connection, query: &str, include_sensitive: bool) -> Vec<St
     queries::search_memories(
         conn,
         &MemorySearchInput {
+            strategy: Default::default(),
             query: query.to_string(),
             category: None,
             tags: None,
