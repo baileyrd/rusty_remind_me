@@ -19,6 +19,7 @@ pub mod models;
 pub mod normalize;
 pub mod pid;
 pub mod recalibrate;
+pub mod reminders;
 pub mod remote;
 pub mod retrieval;
 pub mod saved_searches;

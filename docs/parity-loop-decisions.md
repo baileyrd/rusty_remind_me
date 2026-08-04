@@ -321,6 +321,58 @@ would test the harness more than the judgment.
 
 ---
 
+## #116 — reminders: set, clear, list
+
+**The reference does not apply `remind_at` on the receiving side of sync, and
+this crate does.** `sync.py`'s `_upsert_one` writes 24 columns and neither
+`remind_at` nor `sensitive` is among them, even though its own outbox trigger
+puts both in the payload — so the reference ships a payload carrying two fields
+nobody reads back. The issue's acceptance criteria asked for a round-trip, and
+the same call was already made for `sensitive` under #105. A reminder is a
+property of the memory, not of the machine holding it: dropping it would make a
+reminder set on your laptop invisible on your desktop while every other
+property of that same memory arrived intact. Divergence from the reference,
+deliberate, with an end-to-end test in `reminders_sync_test.rs`.
+
+**One consequence of that is accepted rather than worked around.**
+`reminder_deliveries` is local-only, so a reminder already delivered on one
+node is still pending on another and will fire there too. Being told twice on
+two machines beats being told on neither because the machine that fired it was
+the one you weren't sitting at.
+
+**A past `remind_at` is rejected, not stored.** Stored, it lands straight in
+the overdue bucket — the one that means "nothing was running when this came
+due" — so a typo would be indistinguishable from a genuine missed delivery.
+The reference makes the same call, in a pydantic validator.
+
+**Setting a reminder writes no revision.** In the reference this falls out of a
+shared helper's column gate rather than being stated; here it is explicit. The
+revision log exists to recover a value a human replaced, and a vault whose
+history is half scheduling noise is harder to read back than one that only
+records edits.
+
+**Naive timestamps are read as UTC, not local.** Local would be friendlier to
+type and worse to store: the same string would mean different instants on two
+synced machines, and `remind_at` is compared as a *string* against a UTC `now`
+in every window query.
+
+**`Memory` gained `remind_at` and `sensitive`, so every memory-returning tool
+now carries both.** `remind_at` is required by the listing. `sensitive` came
+with it because the reference's `_fmt_memory_md` — which this crate now
+mirrors for the markdown listing — marks sensitive memories with a lock, and a
+renderer that cannot see the flag cannot show it. Wider than issue #116 asked
+for, and toward the reference in both cases.
+
+**The digest's reminder and sync sections are wired up in the same change.**
+Both were modelled as `Option` and omitted while their subsystems did not
+exist, with the module docs promising "a one-line change for whichever issue
+lands first". #114 landed the sync half and #116 the reminder half, so both
+now report real answers — including an explicit "no reminders set" for an
+empty vault, which is now a true statement rather than the false one it would
+have been before.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

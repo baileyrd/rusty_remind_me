@@ -2,6 +2,46 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-03 — Reminders: set, clear and list (#116)
+
+### Added
+- **`remind_me_set_reminder`** — sets `memories.remind_at` on an existing
+  memory, or clears it. Omitted, null and blank all mean "clear".
+- **`remind_me_list_reminders`** — memories with a reminder, soonest first, in
+  one of three windows: `upcoming` (still in the future), `overdue` (came due
+  with no matching `reminder_deliveries` row), `all`. Both `markdown` and
+  `json` response formats.
+- `Memory` now carries `remind_at` and `sensitive`, so every memory-returning
+  tool reports both. The markdown renderer mirrors the reference's
+  `_fmt_memory_md`, lock marker and 2000-char truncation included.
+- The digest's **Reminders** and **Sync health** sections are now populated.
+  Both were omitted while their subsystems did not exist; #114 and #116 supply
+  them, and each reads from the exact function its own tool calls, so the
+  digest cannot disagree with `remind_me_list_reminders` or
+  `remind_me_sync_status`.
+
+### Notes
+- **`remind_at` is applied on the receiving side of sync — the reference drops
+  it.** `sync.py`'s `_upsert_one` writes neither `remind_at` nor `sensitive`
+  even though its own outbox trigger emits both, so the reference ships a
+  payload carrying two fields nobody reads back. A reminder is a property of
+  the memory, not of the machine holding it. Deliberate divergence, same call
+  as `sensitive` under #105, tested end-to-end in both directions.
+- `reminder_deliveries` stays local, so a reminder delivered on one node is
+  still pending on another and fires there too. Being told twice on two
+  machines beats being told on neither because the machine that fired it was
+  the one you weren't at.
+- **A past `remind_at` is rejected, not stored.** Stored, it would land in the
+  overdue bucket — the one meaning "nothing was running when this came due" —
+  making a typo indistinguishable from a genuine missed delivery.
+- Delivery is keyed on `(memory_id, remind_at)`, so rescheduling a delivered
+  reminder makes it pending again rather than staying suppressed forever.
+- Setting a reminder writes **no revision**: the revision log exists to recover
+  a value a human replaced, not to record scheduling.
+- Naive timestamps are read as UTC and stored canonicalized, because
+  `remind_at` is string-compared against a UTC `now` in every window query.
+- Tool coverage: 58 → **60 of 61**.
+
 ## 2026-08-03 — remind_me_sync_reconcile and _peer (#115)
 
 ### Added

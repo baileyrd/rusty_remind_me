@@ -413,6 +413,8 @@ fn result(id: &str, score: f64) -> MemorySearchResult {
             accessed_at: String::new(),
             doc_id: None,
             chunk_index: None,
+            remind_at: None,
+            sensitive: false,
         },
         score,
         fts_score: Some(score),

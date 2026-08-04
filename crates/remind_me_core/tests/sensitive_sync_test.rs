@@ -123,6 +123,7 @@ fn an_incoming_sensitive_record_stays_hidden_on_this_node() {
         superseded_by: None,
         deleted_at: None,
         sensitive: true,
+        remind_at: None,
     };
 
     upsert_record(&conn, &record).unwrap();

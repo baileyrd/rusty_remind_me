@@ -8,19 +8,21 @@
 //! response to a specific question, so there is no per-call caller intent to
 //! opt back in against. The reference makes the same call for the same reason.
 //!
-//! # Sections that are not here yet
+//! # Every section reads from the tool that owns it
 //!
-//! The reference's digest has five sections. Two of them —
-//! upcoming/overdue reminders, and sync status — read from subsystems this
-//! crate does not have yet (issues #116 and #114 respectively).
+//! Reminders come from [`crate::reminders::list_reminders`] and sync health
+//! from [`crate::sync::sync_status`] — the exact functions
+//! `remind_me_list_reminders` and `remind_me_sync_status` call. That is what
+//! makes it structurally impossible for the digest to disagree with them; a
+//! second query here would be a second opinion about what "overdue" means.
 //!
-//! They are modelled as `Option` and **omitted** rather than rendered empty.
-//! A "Reminders: none" line on a build with no reminders subsystem would say
-//! something false: it reads as "you have nothing due", when the truth is
-//! "nothing here can tell". Omitting the section is the honest shape, and
-//! filling it in is a one-line change for whichever issue lands first.
+//! Both sections were previously `Option` and omitted, because their
+//! subsystems did not exist yet and a "Reminders: none" line would have read
+//! as "you have nothing due" when the truth was "nothing here can tell". Both
+//! subsystems now exist (issues #116 and #114), so the honest shape is the
+//! real answer.
 
-use crate::models::{DigestData, DigestRecentMemory};
+use crate::models::{DigestData, DigestRecentMemory, DigestReminder, ReminderWindow, SyncStatus};
 use crate::vitality::build_vitality_report;
 use rusqlite::{params, Connection, Result};
 
@@ -32,6 +34,22 @@ pub const MAX_RECENT_MEMORIES: usize = 20;
 
 pub const DIGEST_SINCE_DAYS_MIN: i64 = 1;
 pub const DIGEST_SINCE_DAYS_MAX: i64 = 365;
+
+/// Cap on the reminders listed per section.
+pub const MAX_DIGEST_REMINDERS: i64 = 10;
+
+/// Project a memory down to what the digest shows for a reminder.
+fn digest_reminder(memory: &crate::models::Memory) -> DigestReminder {
+    let mut content: String = memory.content.chars().take(120).collect();
+    if memory.content.chars().count() > 120 {
+        content.push('…');
+    }
+    DigestReminder {
+        id: memory.id.clone(),
+        remind_at: memory.remind_at.clone(),
+        content,
+    }
+}
 
 /// Assemble the digest's underlying data.
 pub fn build_digest(conn: &Connection, since_days: i64) -> Result<DigestData> {
@@ -71,18 +89,34 @@ pub fn build_digest(conn: &Connection, since_days: i64) -> Result<DigestData> {
         recent_memories,
         recent_total,
         vitality: build_vitality_report(conn)?,
-        reminders_upcoming: None,
-        reminders_overdue: None,
-        sync: None,
+        reminders_upcoming: crate::reminders::list_reminders(
+            conn,
+            ReminderWindow::Upcoming,
+            MAX_DIGEST_REMINDERS,
+        )?
+        .iter()
+        .map(digest_reminder)
+        .collect(),
+        reminders_overdue: crate::reminders::list_reminders(
+            conn,
+            ReminderWindow::Overdue,
+            MAX_DIGEST_REMINDERS,
+        )?
+        .iter()
+        .map(digest_reminder)
+        .collect(),
+        // Local-only, no network: the digest has to stay callable from a
+        // scheduled path that cannot afford to block on a remote. The
+        // hub-reconcile verdict is a network call and stays out.
+        sync: crate::sync::sync_status(conn)?,
     })
 }
 
 /// Render a digest as Markdown.
 ///
-/// Sections with no data still appear with an explicit "nothing" line —
-/// "no new memories this week" is information. Sections whose *subsystem* is
-/// absent are omitted entirely, because there is nothing to report either way
-/// and a false "none" would be worse than silence.
+/// Every section appears, and one with no data says so explicitly — "no new
+/// memories this week" and "no reminders set" are both information, and a
+/// section that silently vanished would read as "nothing happened" either way.
 pub fn render_markdown(data: &DigestData) -> String {
     let mut out = String::from("# Vault digest\n\n");
     out.push_str(&format!(
@@ -126,20 +160,69 @@ pub fn render_markdown(data: &DigestData) -> String {
         vitality.average_vitality
     ));
 
-    if let Some(upcoming) = &data.reminders_upcoming {
-        out.push_str("## Reminders\n\n");
-        if upcoming.is_empty() {
-            out.push_str("_Nothing upcoming._\n\n");
-        } else {
-            for line in upcoming {
-                out.push_str(&format!("- {}\n", line));
+    out.push_str("## Reminders\n\n");
+    if data.reminders_upcoming.is_empty() && data.reminders_overdue.is_empty() {
+        out.push_str("_No reminders set._\n\n");
+    } else {
+        out.push_str(&format!(
+            "**Upcoming:** {}  |  **Overdue:** {}\n",
+            data.reminders_upcoming.len(),
+            data.reminders_overdue.len()
+        ));
+        // Overdue first: something that should already have reached you and
+        // did not is the more urgent of the two, and a reader who stops after
+        // the first subsection should have stopped on that one.
+        for (heading, reminders) in [
+            ("Overdue", &data.reminders_overdue),
+            ("Upcoming", &data.reminders_upcoming),
+        ] {
+            if reminders.is_empty() {
+                continue;
             }
-            out.push('\n');
+            out.push_str(&format!("\n### {}\n", heading));
+            for reminder in reminders.iter() {
+                out.push_str(&format!(
+                    "- `{}` due {}: {}\n",
+                    reminder.id,
+                    reminder.remind_at.as_deref().unwrap_or("?"),
+                    reminder.content
+                ));
+            }
         }
+        out.push('\n');
     }
 
-    if let Some(sync) = &data.sync {
-        out.push_str(&format!("## Sync\n\n{}\n", sync));
+    out.push_str("## Sync health\n\n");
+    match &data.sync {
+        SyncStatus::Disabled { hint, .. } => {
+            out.push_str(&format!("_Sync disabled — {}_\n", hint));
+        }
+        SyncStatus::Enabled {
+            node_id,
+            hub_url,
+            outbox,
+            remotes,
+            ..
+        } => {
+            out.push_str(&format!(
+                "Node `{}` → {}, outbox {} pending ({}).\n",
+                node_id,
+                hub_url,
+                outbox.pending,
+                format!("{:?}", outbox.drain).to_lowercase()
+            ));
+            for remote in remotes {
+                let state = if remote.ever_contacted {
+                    "ok"
+                } else {
+                    "never contacted"
+                };
+                out.push_str(&format!(
+                    "- **{}**: {} pending — {}\n",
+                    remote.remote_id, remote.pending, state
+                ));
+            }
+        }
     }
 
     out

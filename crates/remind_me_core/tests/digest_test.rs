@@ -101,7 +101,7 @@ fn an_empty_window_says_so_rather_than_rendering_nothing() {
 }
 
 #[test]
-fn sections_whose_subsystem_is_absent_are_omitted_not_emptied() {
+fn the_reminder_and_sync_sections_report_emptiness_rather_than_vanishing() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     add(&conn, "something", false);
@@ -109,20 +109,23 @@ fn sections_whose_subsystem_is_absent_are_omitted_not_emptied() {
     let data = build_digest(&conn, 7).unwrap();
     let markdown = render_markdown(&data);
 
-    // Reminders (#116) and sync status (#114) do not exist yet. A
-    // "Reminders: none" line would read as "you have nothing due" when the
-    // truth is "nothing here can tell" — so the section is absent entirely,
-    // and the field is None rather than an empty vec.
-    assert!(data.reminders_upcoming.is_none());
-    assert!(data.sync.is_none());
-    assert!(!markdown.contains("## Reminders"));
-    assert!(!markdown.contains("## Sync"));
+    // Both sections were omitted while their subsystems did not exist, because
+    // "Reminders: none" would have read as "you have nothing due" when the
+    // truth was "nothing here can tell". Both now exist (#116, #114), so an
+    // empty vault genuinely has nothing due and the section says so.
+    assert!(data.reminders_upcoming.is_empty());
+    assert!(data.reminders_overdue.is_empty());
+    assert!(markdown.contains("## Reminders"));
+    assert!(markdown.contains("_No reminders set._"));
+    assert!(markdown.contains("## Sync health"));
 
-    // The JSON form omits them too, rather than serialising nulls a consumer
-    // would have to special-case.
+    // Sync is off in the test environment, and saying so is the answer — an
+    // absent section would leave the reader unable to tell "off" from "fine".
+    assert!(markdown.contains("Sync disabled"));
+
     let json = serde_json::to_value(&data).unwrap();
-    assert!(json.get("reminders_upcoming").is_none());
-    assert!(json.get("sync").is_none());
+    assert_eq!(json["reminders_upcoming"], serde_json::json!([]));
+    assert_eq!(json["sync"]["state"], "disabled");
 }
 
 #[test]
