@@ -821,6 +821,8 @@ pub enum ImportKind {
     /// and inline `#tag` extraction. Markdown only — the conventions are
     /// Markdown conventions.
     Obsidian,
+    /// A PDF: per-page text extraction. Requires the `pdf` feature.
+    Pdf,
     /// A saved Readwise export: one memory per highlight. Must be requested
     /// explicitly — never chosen by `Auto`, because a Readwise export and a
     /// chat export are both an unadorned `.json` and guessing wrong silently

@@ -914,6 +914,48 @@ keep passing if the emit path started sending something else entirely.
 
 ---
 
+## #153 — PDF import
+
+**The dependency was proved to build here before a line of import logic was
+written.** That is the discipline I committed to for #156 and it applies to
+every optional-dependency issue: `pdf-extract` is pure Rust, 71 transitive
+crates, ~19 seconds. Had it needed a C++ toolchain, the right answer would
+have been to stop and say so rather than merge something that compiles on one
+machine.
+
+**Optional feature, not an unconditional dependency.** Most builds do not want
+a PDF parser, and the reference reached the same conclusion with a lazily
+imported extra. Feature-off behaviour is a **clear refusal naming the flag to
+rebuild with** — "unsupported format" would send someone to inspect their file
+when the problem is their build.
+
+**CI now compiles and tests the feature-on configuration.** Default-off
+features are invisible to a default CI run, so without this the parser could
+rot untested and break only for whoever actually turned it on. Adding the step
+is part of adding the feature, not a follow-up.
+
+**A PDF with no extractable text is refused rather than imported as nothing.**
+A scan parses cleanly and yields empty text on every page. "Imported
+successfully, zero memories" is exactly the silent failure #147 had just fixed
+for JSONL transcripts, and it would be a regression to reintroduce it one
+format over. The message names the cause and points at OCR.
+
+**`raw_bytes` threaded through `import_content`.** A PDF is binary and the
+lossy UTF-8 decode text connectors receive has already destroyed it. Changing
+that signature is wider than the issue asked for, and unavoidable: there is no
+correct way to read a PDF from a mangled string.
+
+**Extraction runs inside `catch_unwind`.** The parser panics rather than
+erroring on some malformed inputs. A corrupt attachment must not take down the
+process that was merely asked to read it — the same reasoning as the
+maintenance counts swallowing their own failures.
+
+**`auto` routes `.pdf`, unlike `readwise`.** A `.pdf` is unambiguous; there is
+no second thing it could plausibly be, so the argument that kept Readwise out
+of auto-detection does not apply here.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

@@ -195,9 +195,9 @@ fn import_input_schema(directory: bool) -> Value {
             // `auto` deliberately never selects either: a Readwise export and
             // a chat export are both an unadorned `.json`, and guessing wrong
             // silently corrupts a working chat import.
-            "enum": ["auto", "chat", "document", "obsidian", "readwise"],
+            "enum": ["auto", "chat", "document", "obsidian", "readwise", "pdf"],
             "default": "auto",
-            "description": "auto/chat/document sniff by content; obsidian (.md, frontmatter + [[wikilinks]] + #tags) and readwise (.json export, one memory per highlight) must be named explicitly"
+            "description": "auto/chat/document sniff by content; pdf is picked automatically for .pdf and needs the `pdf` build feature; obsidian (.md, frontmatter + [[wikilinks]] + #tags) and readwise (.json export, one memory per highlight) must be named explicitly"
         }
     });
     let object = properties.as_object_mut().expect("just built an object");

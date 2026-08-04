@@ -2,6 +2,43 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — PDF import (#153)
+
+### Added
+- **`pdf` import kind**, behind an **optional `pdf` Cargo feature**
+  (`pdf-extract`). Per-page text extraction feeding the existing chunker, each
+  chunk tagged `{"page": N}`.
+- `.pdf` joins the supported extensions and is picked automatically by `auto`
+  — unlike `readwise`, a `.pdf` is unambiguous, so there is nothing to
+  misroute it as.
+- **CI now builds and tests the feature-on configuration**, so an optional
+  feature cannot rot untested and break only for whoever enabled it.
+
+### Notes
+- **The dependency was verified to build here before any code was written.**
+  `pdf-extract` is pure Rust, 71 transitive crates, ~19s. Optional because most
+  builds do not want a PDF parser, mirroring the reference's lazily-imported
+  extra.
+- **Feature-off is a clear refusal naming the flag to rebuild with** — not a
+  crash, and not a silent success. "unsupported format" would send someone
+  looking at their file instead of their build.
+- **A PDF with no extractable text is refused, not imported as nothing.** A
+  pure scan parses fine and yields empty text on every page; recorded as a
+  successful import of zero memories, that is indistinguishable from importing
+  an empty file — the silent failure #147 fixed for JSONL. It says what
+  happened and points at OCR.
+- **Per page, not per document.** A page is the only positional anchor a PDF
+  reliably has, and it is what lets a search hit be found again in the
+  original.
+- `raw_bytes` is now threaded through `import_content`. A PDF is binary, and
+  the lossy UTF-8 decode every text connector receives has already destroyed
+  it by then.
+- Extraction is wrapped in `catch_unwind`: the parser can panic on some
+  malformed files, and a corrupt attachment must not take down the process
+  that was merely asked to read it.
+- `raw_entries` counts **pages that carried text**, not chunks produced — the
+  honest answer to "how much of this document was readable".
+
 ## 2026-08-04 — Automation event stream (#152)
 
 ### Added

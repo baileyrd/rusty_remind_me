@@ -49,3 +49,12 @@ jobs:
       # --all-targets so tests and benches are linted too, not just lib/bin.
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Optional features are off by default, so the steps above never compile
+      # them. Without this, a feature could rot untested and only break for
+      # whoever actually enabled it.
+      - name: cargo test --features pdf
+        run: cargo test -p remind_me_core --features pdf --locked
+
+      - name: cargo clippy --features pdf
+        run: cargo clippy -p remind_me_core --features pdf --all-targets --locked -- -D warnings
