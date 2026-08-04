@@ -385,16 +385,30 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 fn write_response<W: Write>(stream: &mut W, status: u16, body: &Value) -> io::Result<()> {
+    write_response_with(stream, status, body, "")
+}
+
+/// As [`write_response`], with `extra` inserted verbatim into the header block
+/// — used only for `Retry-After` on a 429, which is defined in whole seconds
+/// and is what tells a rejected client when to come back.
+fn write_response_with<W: Write>(
+    stream: &mut W,
+    status: u16,
+    body: &Value,
+    extra: &str,
+) -> io::Result<()> {
     let payload = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     write!(
         stream,
         "HTTP/1.1 {} {}\r\n\
          Content-Type: application/json\r\n\
+         {extra}\
          Content-Length: {}\r\n\
          Connection: close\r\n\r\n",
         status,
         reason_phrase(status),
-        payload.len()
+        payload.len(),
+        extra = extra,
     )?;
     stream.write_all(&payload)?;
     stream.flush()
@@ -616,6 +630,20 @@ pub fn serve_once<S: Read + Write>(
     conn: &Connection,
     counters: &WebhookCounters,
 ) -> io::Result<()> {
+    serve_once_from(stream, config, conn, counters, "")
+}
+
+/// [`serve_once`] told who is calling, so the rate limiter can bucket by
+/// address. An empty `peer_addr` shares one `ip:unknown` bucket rather than
+/// bypassing the limit — an unidentifiable caller is exactly the one not to
+/// exempt.
+pub fn serve_once_from<S: Read + Write>(
+    stream: &mut S,
+    config: &WebhookConfig,
+    conn: &Connection,
+    counters: &WebhookCounters,
+    peer_addr: &str,
+) -> io::Result<()> {
     let (head, body_prefix) = match read_head(stream)? {
         HeadOutcome::Complete(head, prefix) => (head, prefix),
         HeadOutcome::TooLarge => {
@@ -628,6 +656,30 @@ pub fn serve_once<S: Read + Write>(
         // Nothing to reply to.
         HeadOutcome::Unusable => return Ok(()),
     };
+
+    // Checked *before* authentication, deliberately. This endpoint is
+    // reachable from the internet when tunnelled, and a limiter that only
+    // engages after a valid credential would leave an unauthenticated flood
+    // entirely unbounded — which is the flood that matters.
+    let bucket = crate::rate_limit::resolve_key(
+        head.authorization
+            .strip_prefix("Bearer ")
+            .unwrap_or(&head.authorization),
+        peer_addr,
+        Some(config.secret.as_str()),
+    );
+    if let Some(verdict) = crate::rate_limit::check(&bucket) {
+        if !verdict.allowed {
+            drain_body(stream, &head.content_length, body_prefix.len());
+            let retry = crate::rate_limit::retry_after_seconds(verdict.retry_after);
+            return write_response_with(
+                stream,
+                429,
+                &json!({ "error": "rate limit exceeded" }),
+                &format!("Retry-After: {}\r\n", retry),
+            );
+        }
+    }
 
     if !constant_time_eq(
         head.authorization.as_bytes(),
@@ -743,7 +795,17 @@ impl WebhookServer {
                                 // A protocol-level I/O error is the client's
                                 // connection dying, not this server's problem;
                                 // the loop takes the next one.
-                                let _ = serve_once(&mut stream, &config, &conn, &thread_counters);
+                                let peer = stream
+                                    .peer_addr()
+                                    .map(|a| a.ip().to_string())
+                                    .unwrap_or_default();
+                                let _ = serve_once_from(
+                                    &mut stream,
+                                    &config,
+                                    &conn,
+                                    &thread_counters,
+                                    &peer,
+                                );
                             }
                             let _ = stream.shutdown(std::net::Shutdown::Both);
                         }

@@ -212,7 +212,8 @@ as PR #135, #111 (T5) as PR #136, #112 (A1) as PR #137.
 **Wave 7 is in progress**: #119 (A4) as PR #144, #120 (T9) as PR #145. HTTP
 routes reach **25 of 25** and tool coverage reaches **61 of 61** — every tool
 the reference exposes, plus the target-only `remind_me_wiki_import`.
-Remaining: #121-#122 (rate limiting, tool profiles).
+#121 (E2) as PR #146.
+Remaining: #122 (tool profiles).
 
 *Correction:* the #118 entry claimed 61 of 61 tools. That counted the
 target-only `remind_me_wiki_import` toward the reference's 61; the real figure

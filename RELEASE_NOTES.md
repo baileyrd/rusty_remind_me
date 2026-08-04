@@ -2,6 +2,37 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Rate limiting on the webhook and remote MCP endpoints (#121)
+
+### Added
+- **A fixed-window, in-memory request limiter** (`remind_me_core::rate_limit`)
+  applied to the webhook ingest endpoint and the remote MCP connector — the two
+  surfaces exposed to the internet when tunnelled.
+- Defaults match the reference: **60 requests per 60 seconds**, on by default,
+  `REMIND_ME_RATE_LIMIT_ENABLED=""` to opt out. Over-limit returns **429** with
+  a whole-second `Retry-After`.
+- No new dependency: a map behind a `Mutex`.
+
+### Notes
+- **The limiter runs before authentication on both surfaces.** One that only
+  engaged after a valid credential would leave an unauthenticated flood
+  unbounded, which is the flood that matters here.
+- `resolve_key` compares the secret in **constant time** even though it only
+  picks a bucket — a fast-path `==` would make the limiter the timing oracle
+  the auth check avoids being.
+- **A rejected call does not extend the window it was rejected by**, so a
+  client that backs off meets a clean window rather than one its own retries
+  primed.
+- One shared limiter across both endpoints: the limit is a property of the
+  caller, not of the route.
+- A correct secret shares one `auth:known` bucket; everyone else is bucketed by
+  address, and an unknown address shares `ip:unknown` rather than bypassing the
+  limit.
+- **Single-process only** — counters are per process with no shared store, so
+  two nodes behind one tunnel each enforce separately.
+- Expired buckets are pruned lazily during ordinary calls, so a long-running
+  server seeing many addresses does not leak.
+
 ## 2026-08-04 — Named, scope-limited API keys (#120)
 
 ### Added

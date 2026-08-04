@@ -22,6 +22,7 @@ pub mod models;
 pub mod normalize;
 pub mod notifications;
 pub mod pid;
+pub mod rate_limit;
 pub mod recalibrate;
 pub mod reminders;
 pub mod remote;
