@@ -17,6 +17,8 @@ uuid.workspace = true
 sha256.workspace = true
 dirs.workspace = true
 pdf-extract = { version = "0.12", optional = true }
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
 
 [features]
 default = []
@@ -25,3 +27,6 @@ default = []
 # lazily-imported `pdf` extra. Feature-off, `.pdf` import reports the format
 # as unavailable rather than failing obscurely.
 pdf = ["dep:pdf-extract"]
+# Cloud backup upload. Optional for the same reason as `pdf`: the AWS SDK is a
+# 233-crate tree, and a build that does not upload backups should not carry it.
+cloud-backup = ["dep:aws-sdk-s3", "dep:aws-config"]

@@ -956,6 +956,46 @@ of auto-detection does not apply here.
 
 ---
 
+## #154 — cloud backup upload
+
+**My issue omitted the security control the whole module exists around.** I
+wrote criteria about endpoints, prefixes and credentials and said nothing about
+the plaintext gate. When the DB encryption key is unset, the backup file is
+plaintext personal data; the reference refuses to upload it without an explicit
+opt-in, checked before any client is constructed. Shipping this without that
+gate would have turned "enable cloud backup" into "silently start sending an
+unencrypted copy of the entire vault to a third party". Fifth issue this loop
+whose criteria diverged from the reference, and the highest-consequence one.
+
+**I also had credentials backwards.** I wrote that they should come from "the
+same environment variables the reference uses". There are none, deliberately:
+the SDK's own credential chain is used, because a parallel secret-storage
+convention is one more thing to get right with none of the existing hardening.
+A test now pins that no configuration name here looks like a credential.
+
+**The gate is a pure function of the environment.** That is what lets it be
+tested with no bucket, no network and the optional feature compiled *out* —
+which matters, because gating the test behind the feature flag would mean the
+default build never exercises the control that protects the default build.
+
+**Only a truthy opt-in counts.** `0`, `false`, `off`, blank and whitespace all
+still refuse. This is the direction where being wrong ships someone's data, so
+the permissive set is enumerated rather than inferred from "is the variable
+present".
+
+**The upload is reported, not logged and forgotten.** The reference logs and
+swallows; `BackupOutcome.upload` carries the result instead, so a refusal
+reaches whoever asked for the backup rather than only a log file they may never
+read. It still cannot fail the backup — the outcome is a report, never an
+error.
+
+**CI clippy-checks the feature-on build rather than running its full tests.**
+The SDK is a 233-crate, ~2-minute tree, and the decision that actually matters
+is covered unconditionally by the default run. Recorded here because it is a
+deliberate reduction in coverage, not an oversight.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

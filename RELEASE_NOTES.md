@@ -2,6 +2,45 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Cloud backup upload (#154)
+
+### Added
+- **Optional `cloud-backup` feature** (`aws-sdk-s3`) uploading a finished local
+  backup to S3 or any S3-compatible endpoint. Reported on `BackupOutcome` as
+  `upload`.
+
+### Notes
+- **The plaintext gate is the point of this module, and my issue missed it
+  entirely.** When `REMIND_ME_DB_ENCRYPTION_KEY` is unset the backup file is
+  **plaintext personal data** — every memory the vault holds, in the clear.
+  Uploading it requires the explicit
+  `REMIND_ME_BACKUP_S3_ALLOW_PLAINTEXT_UPLOAD` opt-in, checked **before any
+  client is built or any byte leaves the machine**. Without it, "enable cloud
+  backup" would silently mean "ship an unencrypted copy of everything to a
+  third party" — a materially different decision from the one being made.
+  Uploading plaintext personal data to third-party storage needs explicit
+  consent, not silent default behaviour.
+- **No bespoke credential environment variables**, and my issue had this
+  backwards too. The AWS SDK's own credential chain is used; a parallel
+  secret-storage convention would be one more thing to get right with none of
+  the existing hardening. Only bucket, prefix, endpoint and region are read
+  here. A test pins that none of those names looks like a credential, so a
+  future `..._SECRET_KEY` reads as the regression it would be.
+- **The local backup always wins.** Upload runs strictly after the local file
+  is finalised, and a refused, failed or unconfigured upload is reported
+  *alongside* the backup rather than instead of it. `upload_backup` cannot
+  return an error into the backup path.
+- **The gate is a pure function of the environment**, so it is tested without
+  a bucket, a network, or the optional feature compiled in — gating its
+  coverage behind a feature flag would mean the default build never checks the
+  control protecting the default build. Only a truthy opt-in counts; `0`,
+  `false`, `off` and blank all still refuse.
+- Prefix slashes are normalised, so `/host/backups/` and `host/backups` are the
+  same key and a blank prefix uploads at the root.
+- CI clippy-checks the feature-on build. It is a check rather than a second
+  full test run because the SDK is a 233-crate tree and the decision that
+  matters is already covered unconditionally.
+
 ## 2026-08-04 — PDF import (#153)
 
 ### Added
