@@ -837,6 +837,43 @@ literally.
 
 ---
 
+## #151 — maintenance nudges
+
+**The throttle slot is claimed before the counts run.** The natural ordering —
+count the queues, then decide whether anything is worth saying — pays six
+`COUNT(*)`s on the search hot path every single time, including on a vault
+where nothing is pending. Claiming the timer first bounds how often the *work*
+happens rather than how often a notice appears. There is a test asserting the
+slot is claimed even when the notice comes back empty, because that is
+precisely the case the obvious implementation gets wrong and nothing else would
+catch.
+
+**Timers are keyed rather than global.** Independent advisories have different
+cadences; sharing one slot means whichever fires first silences the others for
+a full interval.
+
+**A queue whose query fails reports 0.** On a partially-migrated database a
+missing table would otherwise make a status helper the thing that breaks a
+search. Reporting 0 for the broken queue and honestly for the rest is the only
+version of this that cannot make things worse than not having it.
+
+**Counts go through each tool's own predicate.** `contradictions::candidate_count`
+and `recalibrate::candidate_count` were added reusing the existing
+`pairs_sql`/`candidate_where` rather than writing second queries, so the nudge
+cannot point at a backlog that draining it does not find. A nudge that
+disagrees with the tool it recommends trains the reader to ignore it.
+
+**Only three backlogs are named, and ties break by key.** A list of every queue
+is a wall of text nobody acts on. Unstable ordering between calls would make an
+unchanged situation read as new information.
+
+**`ever_captured` is a separate field from `captures > 0` being inferable.**
+The whole point is that a client where auto-capture was never configured and
+one where it was but nothing was worth capturing are both silent. Naming the
+state is what makes it visible.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

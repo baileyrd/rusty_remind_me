@@ -2,6 +2,40 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Maintenance nudges and capture health (#151)
+
+### Added
+- **`maintenance::pending_counts`** — depth of every maintenance queue:
+  undecomposed captures, unannotated memories, unnormalized imports,
+  unclassified memories, contradiction candidates, recalibration candidates.
+- **`maintenance::capture_health`** — whether conversation capture is actually
+  happening, counted by distinct `capture_id` so the dialog/summary pair one
+  capture writes counts once rather than twice.
+- **A throttled nudge** naming the three deepest backlogs and the prompt that
+  drains each.
+
+### Notes
+- **The throttle slot is claimed before the counts run, not after.** The
+  obvious ordering — count, then decide whether to emit — pays six `COUNT(*)`s
+  on every search even when nothing is pending. Claiming first bounds the
+  *work*, not just the output, so a quiet vault costs the same as a busy one.
+  There is a test asserting the slot is claimed even when no notice is
+  produced, because that is the case the natural implementation gets wrong.
+- **Timers are keyed, not global.** Two independent advisories with different
+  cadences competing for one slot means whichever fires first silences the
+  other.
+- **A queue whose query fails reports 0 rather than propagating.** These are
+  status helpers; on a partially-migrated database, letting one make an
+  advisory the thing that breaks a search is an absurd trade.
+- Contradiction and recalibration counts go through
+  `candidate_count`, which reuses each tool's own predicate — so the nudge
+  cannot claim a backlog that draining it does not find.
+- **`ever_captured` exists to make "never configured" visible.** A client where
+  auto-capture was never set up is indistinguishable from one where it was but
+  nothing was worth capturing — both are silent.
+- Only the three deepest backlogs are named; equal counts break ties by key so
+  a nudge does not reshuffle between calls and read as new information.
+
 ## 2026-08-04 — Readwise highlight import (#150)
 
 ### Added

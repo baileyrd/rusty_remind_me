@@ -87,6 +87,22 @@ fn candidate_where() -> String {
 /// `total_candidates` is counted rather than derived from the returned batch:
 /// the point of the number is to tell the caller how much is left behind the
 /// `limit`, so it has to come from the same predicate without it.
+/// How many memories are due an importance review, without materialising them.
+///
+/// Reuses [`candidate_where`] for the same reason as the contradiction count:
+/// a nudge that disagrees with the tool it points at trains the reader to
+/// ignore it.
+pub fn candidate_count(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM memories m WHERE {}",
+            candidate_where()
+        ),
+        [],
+        |r| r.get(0),
+    )
+}
+
 pub fn candidates(
     conn: &Connection,
     input: &RecalibrateCandidatesInput,

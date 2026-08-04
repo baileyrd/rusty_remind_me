@@ -16,6 +16,7 @@ pub mod history;
 pub mod ics;
 pub mod import_paths;
 pub mod importer;
+pub mod maintenance;
 pub mod mempalace_import;
 pub mod metrics;
 pub mod models;

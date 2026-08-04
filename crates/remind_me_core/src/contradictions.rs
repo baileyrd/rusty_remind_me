@@ -115,6 +115,18 @@ fn side(conn: &Connection, memory_id: &str) -> Result<ContradictionSide> {
 }
 
 /// A batch of candidate pairs, plus the full backlog size.
+/// How many candidate pairs there are, without materialising any of them.
+///
+/// Reuses [`pairs_sql`] rather than approximating with a second query, so the
+/// maintenance nudge cannot claim a backlog that draining it does not find.
+pub fn candidate_count(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM ({}) p", pairs_sql()),
+        [],
+        |r| r.get(0),
+    )
+}
+
 pub fn candidates(conn: &Connection, limit: usize) -> Result<ContradictionCandidatesResult> {
     let pairs = pairs_sql();
 
