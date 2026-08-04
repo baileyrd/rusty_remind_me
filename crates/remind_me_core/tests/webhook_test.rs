@@ -73,11 +73,27 @@ fn serve(conn: &Connection, raw: &str) -> (u16, serde_json::Value) {
     serve_with(conn, raw, &counters)
 }
 
+/// Turn the rate limiter off for this binary.
+///
+/// These tests assert ingest *semantics*, and the limiter (issue #121) is a
+/// process-wide singleton bucketing by peer address — so with it on, the
+/// 61st request anywhere in this binary starts 429ing and every test becomes
+/// coupled to how many requests every other one happens to make. Rate
+/// limiting on this endpoint has its own binary, `webhook_rate_limit_test.rs`,
+/// where it is the subject rather than ambient interference.
+///
+/// Set from every helper rather than once, because the tests run in parallel
+/// and there is no ordered setup hook.
+fn disable_rate_limit() {
+    std::env::set_var(remind_me_core::rate_limit::RATE_LIMIT_ENABLED_ENV, "");
+}
+
 fn serve_with(
     conn: &Connection,
     raw: &str,
     counters: &WebhookCounters,
 ) -> (u16, serde_json::Value) {
+    disable_rate_limit();
     let mut stream = FakeStream::new(raw.as_bytes().to_vec());
     webhook::serve_once(&mut stream, &config(), conn, counters).expect("no I/O failure");
     parse_response(&stream.output)
