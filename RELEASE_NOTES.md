@@ -2,6 +2,75 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Automation event stream (#152)
+
+### Added
+- **`events::emit`** — POSTs `created` / `updated` / `deleted` to
+  `REMIND_ME_EVENT_WEBHOOK_URL` as memories are mutated locally, for a relay,
+  a second indexer, or an audit log.
+
+### Notes
+- **The payload is metadata only** — `event`, `memory_id`, `category`,
+  `timestamp` — and carries **no memory content, tags or metadata**. This is an
+  event-notification stream, not a content-sync mechanism; a consumer that
+  wants the memory calls back with the id, where the ordinary sensitive-memory
+  rules apply. Content on the wire here would silently turn every configured
+  webhook into an egress path for the whole vault. My issue said the opposite
+  ("carry enough to act on without a follow-up read") and was corrected first.
+  A test asserts the payload has exactly four keys, because a fifth added
+  carelessly is how content leaks in.
+- **Sync-applied writes emit nothing.** Only local mutations do. Emitting on a
+  record arriving from a peer is how two synced nodes would echo each other's
+  mutations forever.
+- **A separate config and delivery path from notifications, not a second use
+  of it.** Notifications are human-facing and deliberately throttled; this has
+  **no throttling at all**, because suppressing a "repeat" would silently drop
+  a real mutation. Same transport, opposite requirements.
+- **Unconfigured is a true no-op** — no thread started, not one that discovers
+  it has nowhere to go. This runs on every write. A blank URL counts as unset,
+  which is how it arrives from many process managers.
+- **A dead endpoint cannot fail the write.** The POST runs on a detached
+  thread whose handle is held until it finishes: a write must not wait on a
+  webhook, but a handle dropped immediately can also lose the POST mid-flight.
+- Tests run against a real listening socket rather than only inspecting the
+  payload builder — the no-content guarantee is a property of what is actually
+  sent, and a builder-only test would keep passing if the emit path started
+  sending the whole memory.
+
+## 2026-08-04 — Maintenance nudges and capture health (#151)
+
+### Added
+- **`maintenance::pending_counts`** — depth of every maintenance queue:
+  undecomposed captures, unannotated memories, unnormalized imports,
+  unclassified memories, contradiction candidates, recalibration candidates.
+- **`maintenance::capture_health`** — whether conversation capture is actually
+  happening, counted by distinct `capture_id` so the dialog/summary pair one
+  capture writes counts once rather than twice.
+- **A throttled nudge** naming the three deepest backlogs and the prompt that
+  drains each.
+
+### Notes
+- **The throttle slot is claimed before the counts run, not after.** The
+  obvious ordering — count, then decide whether to emit — pays six `COUNT(*)`s
+  on every search even when nothing is pending. Claiming first bounds the
+  *work*, not just the output, so a quiet vault costs the same as a busy one.
+  There is a test asserting the slot is claimed even when no notice is
+  produced, because that is the case the natural implementation gets wrong.
+- **Timers are keyed, not global.** Two independent advisories with different
+  cadences competing for one slot means whichever fires first silences the
+  other.
+- **A queue whose query fails reports 0 rather than propagating.** These are
+  status helpers; on a partially-migrated database, letting one make an
+  advisory the thing that breaks a search is an absurd trade.
+- Contradiction and recalibration counts go through
+  `candidate_count`, which reuses each tool's own predicate — so the nudge
+  cannot claim a backlog that draining it does not find.
+- **`ever_captured` exists to make "never configured" visible.** A client where
+  auto-capture was never set up is indistinguishable from one where it was but
+  nothing was worth capturing — both are silent.
+- Only the three deepest backlogs are named; equal counts break ties by key so
+  a nudge does not reshuffle between calls and read as new information.
+
 ## 2026-08-04 — Readwise highlight import (#150)
 
 ### Added
