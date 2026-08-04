@@ -199,10 +199,36 @@ impl ApiServer {
             Some(key) => {
                 let expected = format!("Bearer {}", key);
                 if constant_time_eq(request.authorization.as_bytes(), expected.as_bytes()) {
-                    None
-                } else {
-                    Some((401, Body::Json(json!({ "error": "Unauthorized" }))))
+                    // The flat key is always read-write, exactly as it was
+                    // before scopes existed. Adding scopes must not
+                    // retroactively restrict a deployment already relying on
+                    // it.
+                    return None;
                 }
+
+                // A named, scope-limited key (issue #120). Checked only after
+                // the flat key misses, so the common path is one comparison.
+                if let Some(presented) = request.authorization.strip_prefix("Bearer ") {
+                    if let Some(verified) = remind_me_core::api_keys::verify(presented) {
+                        if verified.may_use(&request.method) {
+                            return None;
+                        }
+                        // 403, not 401: the key is genuine and was
+                        // authenticated. Answering 401 would send the holder
+                        // looking for a credentials problem they do not have.
+                        return Some((
+                            403,
+                            Body::Json(json!({
+                                "error": format!(
+                                    "API key '{}' is read-only (scope=read); {} requires a read-write key",
+                                    verified.name, request.method
+                                )
+                            })),
+                        ));
+                    }
+                }
+
+                Some((401, Body::Json(json!({ "error": "Unauthorized" }))))
             }
             None => {
                 if MUTATING_METHODS.contains(&request.method.as_str()) {

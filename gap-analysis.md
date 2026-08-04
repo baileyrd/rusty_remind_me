@@ -209,8 +209,14 @@ as PR #135, #111 (T5) as PR #136, #112 (A1) as PR #137.
 
 **Wave 6 is complete**: #116 (T1a) as PR #141, #117 (T1b) as PR #142, #118
 (T1c, A2) as PR #143. Tool coverage reaches **61 of 61**.
-**Wave 7 is in progress**: #119 (A4) as PR #144. HTTP routes reach **25 of
-25**. Remaining: #120-#122 (scoped API keys, rate limiting, tool profiles).
+**Wave 7 is in progress**: #119 (A4) as PR #144, #120 (T9) as PR #145. HTTP
+routes reach **25 of 25** and tool coverage reaches **61 of 61** — every tool
+the reference exposes, plus the target-only `remind_me_wiki_import`.
+Remaining: #121-#122 (rate limiting, tool profiles).
+
+*Correction:* the #118 entry claimed 61 of 61 tools. That counted the
+target-only `remind_me_wiki_import` toward the reference's 61; the real figure
+at that point was 60 of 61, with `remind_me_api_key` outstanding until #120.
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |

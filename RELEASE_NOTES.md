@@ -2,6 +2,40 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Named, scope-limited API keys (#120)
+
+### Added
+- **`remind_me_api_key`** — issue, list and revoke named dashboard API keys
+  with a `read` or `read-write` scope.
+- Scope enforcement in the HTTP auth gate: a `read` key is refused **403** on
+  every mutating method.
+- `remind_me_core::api_keys` — a `0600` JSON store written by atomic replace,
+  holding SHA-256 hashes only.
+
+### Notes
+- **Tool coverage: 60 → 61 of 61.** Every tool the reference exposes is now
+  covered, plus the target-only `remind_me_wiki_import` (62 advertised).
+- **The enforcement is the feature.** A read-scoped key that could still write
+  would be worse than no feature at all, because it gets handed out on the
+  understanding that it is safe — so the test checks every mutating route
+  rather than one representative.
+- **Not multi-tenancy.** Every key reads and writes the same vault; only the
+  permitted methods differ.
+- The plaintext is shown **exactly once**, at issuance. Only its hash is
+  stored, so a key can be revoked and replaced but never recovered.
+- **Unknown scopes fail closed** — a hand-edited or future-versioned file is
+  treated as read-only, because the alternative grants write access on a typo.
+- **A corrupt store authorises nothing** rather than everything.
+- The store is **re-read on every request**, so a key revoked in another
+  process stops working on the next call rather than at the next restart.
+- Written by atomic replace with permissions tightened *before* the rename —
+  between a world-readable create and a later chmod, the hashes are exposed.
+- **401 and 403 stay distinct**: 401 means "I do not know this credential",
+  403 means "I know it and it may not do that". Collapsing them sends a
+  read-key holder hunting an auth problem they do not have.
+- The flat `REMIND_ME_API_KEY` stays implicitly read-write, so adding scopes
+  cannot retroactively restrict a deployment already relying on it.
+
 ## 2026-08-04 — Prometheus metrics and the PWA manifest (#119)
 
 ### Added
@@ -62,7 +96,10 @@ Dated entries, newest first. One entry per merged pull request.
 - Folding splits on UTF-8 character boundaries, so non-ASCII reminders survive
   the round trip. Escaping matters more than it looks: an unescaped comma
   corrupts every VEVENT *after* the one containing it.
-- **Tool coverage: 60 → 61 of 61.** HTTP routes 22 → 23 of 25.
+- **Tool coverage: 59 → 60 of 61.** HTTP routes 22 → 23 of 25.
+  (An earlier version of this entry said 61 of 61. That counted the
+  target-only `remind_me_wiki_import` toward the reference's 61;
+  `remind_me_api_key` was still missing and lands in #120.)
 
 ### Known limitations
 - **Rotation, not revocation** — matching the reference. Deleting the token
