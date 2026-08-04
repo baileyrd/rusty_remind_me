@@ -23,20 +23,20 @@ use remind_me_core::{
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
     ConsolidateInput, ContradictionCandidatesInput, Database, DbsImportInput, DecomposeBatchInput,
     DecomposeInput, DigestInput, EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput,
-    FeedbackInput, HistoryInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
-    MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput, NormalizeBatchInput,
-    RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput, ReconcilePeerInput,
-    ResponseFormat, RevertInput, SaveSearchInput, SavedSearchNameInput, SyncRepairInput,
-    UndoImportInput, UpdateOutcome, WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN,
-    CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX,
-    CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX, CONTRADICTION_LIMIT_MIN,
-    DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN,
-    DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
-    HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
-    MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX,
-    NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, RECALIBRATE_LIMIT_MAX,
-    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, UNDO_IMPORT_LIMIT_MAX,
-    UNDO_IMPORT_LIMIT_MIN,
+    FeedbackInput, HistoryInput, ListRemindersInput, MemoryAddInput, MemoryListInput,
+    MemorySearchInput, MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput,
+    NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput,
+    ReconcilePeerInput, ResponseFormat, RevertInput, SaveSearchInput, SavedSearchNameInput,
+    SetReminderInput, SyncRepairInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN,
+    CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX,
+    CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
+    DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
+    EXTRACT_BATCH_MIN, EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
+    IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
+    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
+    RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
+    REMINDER_LIMIT_MAX, REMINDER_LIMIT_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -614,6 +614,30 @@ impl McpServer {
                                         "node_id": { "type": "string", "description": "Which discovered peer to reconcile against" }
                                     },
                                     "required": ["node_id"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_set_reminder",
+                                "description": "Set a future reminder on an existing memory, or clear one already set. Pass an ISO-8601 timestamp for remind_at; omit it or pass null to clear. Naive timestamps are read as UTC. A timestamp already in the past is rejected rather than stored, because it could never fire.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string", "description": "The memory to set or clear a reminder on" },
+                                        "remind_at": { "type": ["string", "null"], "description": "ISO-8601 timestamp for when to surface this memory. Must be in the future. Omit or null to clear." }
+                                    },
+                                    "required": ["memory_id"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_list_reminders",
+                                "description": "List memories with a reminder set, soonest first. 'upcoming' is still in the future; 'overdue' came due but has not been delivered — typically because nothing was running when it fired; 'all' is both. A delivered reminder drops out of every window.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "when": { "type": "string", "enum": ["upcoming", "overdue", "all"], "default": "upcoming" },
+                                        "limit": { "type": "integer", "default": 20, "minimum": REMINDER_LIMIT_MIN, "maximum": REMINDER_LIMIT_MAX },
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown" }
+                                    }
                                 }
                             },
                             {
@@ -1476,6 +1500,50 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid reconcile_peer input: {}. node_id is required.", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_set_reminder" => {
+                        match serde_json::from_value::<SetReminderInput>(args) {
+                            Ok(input) => match remind_me_core::reminders::set_reminder(
+                                &conn,
+                                &input.memory_id,
+                                input.remind_at.as_deref(),
+                            ) {
+                                Ok(outcome) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Set reminder error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid set_reminder input: {}. memory_id is required.", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_list_reminders" => {
+                        let input: ListRemindersInput =
+                            serde_json::from_value(args).unwrap_or_default();
+                        let limit = input.limit.clamp(REMINDER_LIMIT_MIN, REMINDER_LIMIT_MAX);
+                        match remind_me_core::reminders::list_reminders(&conn, input.when, limit) {
+                            Ok(memories) => {
+                                let text = match input.response_format {
+                                    ResponseFormat::Json => json!({
+                                        "count": memories.len(),
+                                        "memories": memories,
+                                    })
+                                    .to_string(),
+                                    ResponseFormat::Markdown => {
+                                        remind_me_core::reminders::render_memories_markdown(
+                                            &memories,
+                                        )
+                                    }
+                                };
+                                json!({ "content": [{ "type": "text", "text": text }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("List reminders error: {}", e) }] })
                             }
                         }
                     }

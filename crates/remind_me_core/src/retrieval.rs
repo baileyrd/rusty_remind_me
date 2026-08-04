@@ -766,6 +766,8 @@ mod tests {
             accessed_at: String::new(),
             doc_id: None,
             chunk_index: None,
+            remind_at: None,
+            sensitive: false,
         }
     }
 

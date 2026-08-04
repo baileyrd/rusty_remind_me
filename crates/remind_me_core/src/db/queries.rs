@@ -24,7 +24,7 @@ use rusqlite::{params, params_from_iter, Connection, Result, Row};
 /// Columns selected wherever a full [`Memory`] is parsed via [`parse_memory_row`].
 pub const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata, created_at, \
      updated_at, capture_id, subject, predicate, object, superseded_by, decay_rate, vitality, \
-     base_weight, access_count, accessed_at, doc_id, chunk_index";
+     base_weight, access_count, accessed_at, doc_id, chunk_index, remind_at, sensitive";
 
 /// [`MEMORY_COLUMNS`] with each name qualified by `alias`, for queries that join.
 pub fn prefixed_memory_columns(alias: &str) -> String {
@@ -71,6 +71,10 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
             .unwrap_or_else(|| created_at.clone()),
         doc_id: row.get("doc_id")?,
         chunk_index: row.get("chunk_index")?,
+        remind_at: row.get("remind_at")?,
+        // SQLite has no boolean type and the column is nullable, so this
+        // arrives as 0/1/NULL. Same shape trap as `SyncRecord::sensitive`.
+        sensitive: row.get::<_, Option<i64>>("sensitive")?.unwrap_or(0) != 0,
     })
 }
 

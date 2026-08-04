@@ -57,6 +57,12 @@ pub struct Memory {
     /// `include_neighbors` finds nothing for a manually added memory.
     pub doc_id: Option<String>,
     pub chunk_index: Option<i64>,
+    /// When this memory should be surfaced as a reminder, or `None` for no
+    /// reminder. Stored as UTC.
+    pub remind_at: Option<String>,
+    /// The "don't surface by default" flag. Carried on every memory rather
+    /// than only where it is filtered on, so a rendered memory can say so.
+    pub sensitive: bool,
 }
 
 /// Input model for adding a memory.
@@ -1402,12 +1408,21 @@ pub struct DigestData {
     /// The true count, uncapped, so the `MAX_RECENT_MEMORIES` cap is visible.
     pub recent_total: i64,
     pub vitality: crate::vitality::VitalityReport,
+    pub reminders_upcoming: Vec<DigestReminder>,
+    pub reminders_overdue: Vec<DigestReminder>,
+    pub sync: SyncStatus,
+}
+
+/// One reminder as the digest lists it.
+///
+/// A trimmed projection rather than the whole memory: the digest is a scan,
+/// and a full memory block per reminder would bury the four other sections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestReminder {
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reminders_upcoming: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reminders_overdue: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sync: Option<String>,
+    pub remind_at: Option<String>,
+    pub content: String,
 }
 
 /// Request for a vault digest.
@@ -1607,4 +1622,84 @@ pub enum ReconcileReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconcilePeerInput {
     pub node_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Reminders
+// ---------------------------------------------------------------------------
+
+/// Which reminders `remind_me_list_reminders` surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReminderWindow {
+    /// Set and still in the future.
+    #[default]
+    Upcoming,
+    /// Due, and not yet recorded in `reminder_deliveries` — typically because
+    /// the scheduler was offline when it came due.
+    Overdue,
+    /// The union of both.
+    All,
+}
+
+/// Input for `remind_me_set_reminder`: set or clear a memory's reminder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetReminderInput {
+    pub memory_id: String,
+    /// ISO-8601 timestamp. Naive timestamps are read as UTC. Omitted or null
+    /// clears an existing reminder instead of setting one.
+    #[serde(default)]
+    pub remind_at: Option<String>,
+}
+
+/// What a `set_reminder` call did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum SetReminderOutcome {
+    /// No live memory with that id.
+    NotFound {
+        memory_id: String,
+    },
+    /// The timestamp could not be parsed, or was not in the future. Rejected
+    /// rather than stored, because a reminder that can never fire is a
+    /// silently broken one.
+    Rejected {
+        reason: String,
+    },
+    Cleared {
+        memory_id: String,
+    },
+    Set {
+        memory_id: String,
+        /// Canonicalized to UTC, which is what was actually stored.
+        remind_at: String,
+    },
+}
+
+/// Input for `remind_me_list_reminders`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListRemindersInput {
+    #[serde(default)]
+    pub when: ReminderWindow,
+    #[serde(default = "default_reminder_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub response_format: ResponseFormat,
+}
+
+fn default_reminder_limit() -> i64 {
+    20
+}
+
+pub const REMINDER_LIMIT_MIN: i64 = 1;
+pub const REMINDER_LIMIT_MAX: i64 = 100;
+
+impl Default for ListRemindersInput {
+    fn default() -> Self {
+        Self {
+            when: ReminderWindow::default(),
+            limit: default_reminder_limit(),
+            response_format: ResponseFormat::default(),
+        }
+    }
 }

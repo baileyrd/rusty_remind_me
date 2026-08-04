@@ -72,8 +72,12 @@ where
 /// conflict-resolved over sync, only produced locally. `deleted_at` **is**
 /// included: unlike `doc_id`/`chunk_index`, the reference's `_upsert_one`
 /// does apply it, via the same LWW path as every other column, which is what
-/// lets a tombstone propagate at all (`#76`). `sensitive` is included on the
-/// same grounds (issue #105).
+/// lets a tombstone propagate at all (`#76`). `sensitive` (issue #105) and
+/// `remind_at` (issue #116) are included on the same grounds — both are
+/// properties of the memory rather than of the machine holding it, and the
+/// reference's `_upsert_one` drops both, which leaves its own outbox payload
+/// carrying two fields nobody reads back. That divergence is deliberate and
+/// recorded in `docs/parity-loop-decisions.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {
     pub id: String,
@@ -138,6 +142,19 @@ pub struct SyncRecord {
     /// not-sensitive rather than failing the whole pull.
     #[serde(default, deserialize_with = "de_sqlite_bool")]
     pub sensitive: bool,
+    /// Applied for the same reason as `sensitive`: the payload carries it, so
+    /// dropping it on receipt would leave a reminder set on your laptop
+    /// invisible to your desktop, while every other property of the same
+    /// memory arrived intact — the kind of half-wiring that reads as a bug
+    /// long before anyone finds the missing column.
+    ///
+    /// One consequence is deliberate: `reminder_deliveries` is local, so a
+    /// reminder that has already fired on one node is still pending on
+    /// another and will fire there too. That is the right default for a
+    /// reminder — being told twice on two machines beats being told on
+    /// neither because the machine that fired it was the one you weren't at.
+    #[serde(default)]
+    pub remind_at: Option<String>,
 }
 
 #[derive(Debug)]
@@ -293,8 +310,9 @@ pub fn upsert_record(
                 id, content, category, tags, source, metadata, created_at, updated_at,
                 capture_id, node_id, client, accessed_at, access_count, decay_rate,
                 vitality, base_weight, status, memory_type, source_capture_id,
-                subject, predicate, object, superseded_by, deleted_at, sensitive
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                subject, predicate, object, superseded_by, deleted_at, sensitive,
+                remind_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 category = excluded.category,
@@ -318,7 +336,8 @@ pub fn upsert_record(
                 object = excluded.object,
                 superseded_by = excluded.superseded_by,
                 deleted_at = excluded.deleted_at,
-                sensitive = excluded.sensitive",
+                sensitive = excluded.sensitive,
+                remind_at = excluded.remind_at",
             params![
                 record.id,
                 record.content,
@@ -345,6 +364,7 @@ pub fn upsert_record(
                 record.superseded_by,
                 record.deleted_at,
                 record.sensitive,
+                record.remind_at,
             ],
         )?;
         let rowid: i64 = conn.query_row(
