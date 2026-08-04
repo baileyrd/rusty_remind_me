@@ -39,6 +39,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::extract::{Request, State};
 use axum::http::uri::PathAndQuery;
 use axum::http::{header, HeaderValue, StatusCode, Uri};
@@ -47,6 +48,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use remind_me_core::webhook::constant_time_eq;
 use serde_json::json;
+use std::net::SocketAddr;
 
 /// The one path the MCP transport is mounted at. Not configurable: nothing
 /// in this crate exposes a different mount point, unlike the reference
@@ -118,6 +120,37 @@ impl GateConfig {
     }
 }
 
+/// Whatever credential this request would be authenticated by: the secret
+/// path segment in secret-path mode, otherwise the bearer token.
+fn presented_credential(request: &Request<Body>, path: &str) -> String {
+    let prefix = format!("{MCP_PATH}/");
+    if let Some(after_prefix) = path.strip_prefix(&prefix) {
+        return after_prefix
+            .split_once('/')
+            .map(|(segment, _)| segment)
+            .unwrap_or(after_prefix)
+            .to_string();
+    }
+    request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 429 with `Retry-After`, which is what tells a rejected client when to
+/// come back rather than immediately retrying into the same wall.
+fn too_many_requests(retry_after: u64) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, retry_after.to_string())],
+        Json(json!({ "error": "rate limit exceeded" })),
+    )
+        .into_response()
+}
+
 /// The axum middleware itself.
 pub async fn secret_gate(
     State(config): State<Arc<GateConfig>>,
@@ -134,6 +167,33 @@ pub async fn secret_gate(
             .any(|prefix| path.starts_with(prefix))
     {
         return next.run(request).await;
+    }
+
+    // Rate limited before any credential is checked (issue #121). This
+    // endpoint is reachable from the internet when tunnelled, and a limiter
+    // that only engaged after a valid token would leave an unauthenticated
+    // flood entirely unbounded — the flood that actually matters.
+    //
+    // The credential is taken from whichever place this request would carry
+    // it, so a caller presenting the right one lands in the shared
+    // `auth:known` bucket either way rather than being limited per address.
+    let presented = presented_credential(&request, &path);
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().to_string())
+        .unwrap_or_default();
+    let bucket =
+        remind_me_core::rate_limit::resolve_key(&presented, &peer, Some(config.token.as_str()));
+    // Synchronous, and safe to call from this async context: the critical
+    // section is a map update with no I/O and nothing awaited while the lock
+    // is held, so it cannot block the executor for longer than that.
+    if let Some(verdict) = remind_me_core::rate_limit::check(&bucket) {
+        if !verdict.allowed {
+            return too_many_requests(remind_me_core::rate_limit::retry_after_seconds(
+                verdict.retry_after,
+            ));
+        }
     }
 
     let prefix = format!("{MCP_PATH}/");

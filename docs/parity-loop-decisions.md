@@ -610,6 +610,101 @@ and `gap-analysis.md` rather than quietly restated.
 
 ---
 
+## #121 — rate limiting
+
+**The limiter runs before authentication on both surfaces.** A limiter that
+only engages after a valid credential leaves an unauthenticated flood entirely
+unbounded — and that is the flood that matters on an endpoint reachable from
+the internet through a tunnel. Placing it first is the whole point.
+
+**`resolve_key` compares the presented secret in constant time**, even though
+it runs before authentication and its result is only a bucket name. A
+fast-path `==` here would leak the secret to a timing probe that never needed
+to authenticate at all — the limiter would become the oracle the auth check
+carefully avoids being.
+
+**A rejected call does not extend the window that rejected it.** The stored
+count is left untouched on refusal, so a client that backs off meets a clean
+window. Counting rejections would push the reset further out on every retry
+and a persistent client could never get back in.
+
+**One shared limiter, not one per endpoint.** The limit is a property of the
+caller: someone turned away by the webhook should not get a fresh allowance by
+switching to the MCP endpoint on the same host.
+
+**A correct secret shares one `auth:known` bucket; everyone else is bucketed
+by address.** The legitimate integration is identified, so it is limited as one
+client however many addresses it dials from, while every unauthenticated
+caller is isolated and cannot exhaust anyone else's allowance. An unknown
+address shares `ip:unknown` rather than bypassing the limit — an unidentifiable
+caller is precisely the one not to exempt. An empty configured secret never
+matches, or a deployment without one would collapse every caller into the
+shared bucket and make the limit globally exhaustible by one stranger.
+
+**On by default**, unlike metrics. Both guarded surfaces are internet-reachable
+in a documented deployment mode, so the safe default is the protective one and
+the opt-out is explicit.
+
+**Single-process, stated rather than implied.** Counters are per process with
+no shared store, so two nodes behind one tunnel each enforce the limit
+separately. That matches the architecture's non-goals, but an operator who
+assumed otherwise would under-provision — so the module says so first.
+
+**Called synchronously from the async middleware.** Safe because the critical
+section is a map update with no I/O and nothing awaited while the lock is
+held, so it cannot block the executor longer than that takes. Stated in the
+call site rather than left for a reader to worry about.
+
+**The window is tested with an injected clock, never by sleeping.** A test that
+sleeps a real 60 seconds gets deleted by the first person in a hurry, and one
+that sleeps a shortened window is a race waiting to fail on a loaded CI box.
+The boundary is pinned in both directions.
+
+---
+
+## #122 — tool profiles
+
+**Tier membership is copied from the reference exactly**, including
+`remind_me_server_status` sitting in `CORE` despite otherwise being an ops
+tool. It is what reports which profile is active, and a profile you cannot
+diagnose from inside a session is a trap.
+
+**An unlisted tool defaults to the most restricted tier.** Anything outside
+`CORE` and `MAINTENANCE` is treated as admin/ops, so a tool added later starts
+hidden under a narrowed profile rather than smuggling itself onto a surface
+someone deliberately trimmed. The default matters more than any individual
+assignment, because the list will keep growing.
+
+**An unknown profile falls back to `full`, not to an error and not to empty.**
+Refusing to start over a misspelled optimisation would be worse than the
+misspelling, and an empty surface would look like a broken server.
+
+**Hidden means gone**: absent from `tools/list` *and* refused on `tools/call`.
+Merely undocumented would be worse than having no profiles — a model that
+guessed the name would still reach it, and the caller would never learn their
+trimmed surface was porous. The refusal also names the way out, so someone who
+trimmed too far is not left guessing why a documented tool vanished.
+
+**Pruning happens once, after the whole surface is declared**, rather than by
+guarding each entry. Per-entry guards would put the tier decision in 62 places
+and let the next tool forget it.
+
+**Prompt pruning is wired although it is a no-op today.** This crate offers no
+maintenance prompts yet, so nothing is currently hidden by it — but a prompt
+added later is hidden with the tier it drives, rather than sequencing the model
+into calls that will be refused.
+
+**Two tests exist because of a mistake made writing them.** The first version
+of the hiding test named `remind_me_import`, which this crate does not
+advertise — it advertises `remind_me_import_chat`. The test passed anyway,
+because anything unlisted is hidden by default, so it was asserting nothing.
+There is now a check that every tiered name *and* every ops name the tests
+sample is actually advertised. A tier or a test naming a tool that does not
+exist is invisible otherwise: not to the table, not to the server, and not to
+a consistency check that only compares the two tiers against each other.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**
