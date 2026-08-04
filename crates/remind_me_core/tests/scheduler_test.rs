@@ -58,6 +58,12 @@ fn pass(conn: &Connection) -> Vec<String> {
     delivered
 }
 
+/// `POLL_INTERVAL_ENV` is process-wide, and two tests in this binary set it to
+/// different values. Without this, one test's scheduler can read the other's
+/// interval mid-run — which is how the loop test intermittently missed its
+/// deadline under full-suite load while passing every time in isolation.
+static POLL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_due_reminder_is_delivered_once_and_never_again() {
     let db = Database::open_in_memory().unwrap();
@@ -296,6 +302,7 @@ fn the_running_loop_delivers_without_anyone_calling_a_tool() {
     // The point of the whole issue: a reminder fires because time passed, not
     // because something asked. Everything above this test drives `poll_once`
     // by hand, which would pass just as happily against a loop that never ran.
+    let _env = POLL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var(remind_me_core::scheduler::POLL_INTERVAL_ENV, "1");
     let scheduler = remind_me_core::scheduler::start_scheduler(path.clone());
 
@@ -332,6 +339,7 @@ fn stopping_the_loop_does_not_wait_out_the_poll_interval() {
     // A long interval, so a `thread::sleep` loop would block shutdown for
     // most of it. Shutdown has to interrupt the wait, or stopping a server
     // stalls on a thread with nothing left to do.
+    let _env = POLL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var(remind_me_core::scheduler::POLL_INTERVAL_ENV, "3600");
     let scheduler = remind_me_core::scheduler::start_scheduler(path);
     let started = std::time::Instant::now();

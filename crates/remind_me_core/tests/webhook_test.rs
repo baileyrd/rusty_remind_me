@@ -545,7 +545,12 @@ fn an_unsupported_format_is_refused_as_content_not_as_a_bad_request() {
     // A pushed filename names nothing on disk, so it gets held to the same
     // format rule a real file would be — otherwise the extension would be a
     // way to reach a parser the file importer will not reach.
-    let (status, body) = serve(&conn, &authed(&push_body("payload.pdf", "%PDF-1.7")));
+    //
+    // `.exe` rather than `.pdf`: this used to use a PDF, and #153 made that a
+    // supported format, which quietly turned this into a test of the PDF
+    // parser instead of the format gate. The extension only has to be one
+    // nothing will ever import.
+    let (status, body) = serve(&conn, &authed(&push_body("payload.exe", "MZ")));
 
     // 422, not 400: the request was well-formed, the content was not usable.
     assert_eq!(status, 422);
@@ -583,7 +588,9 @@ fn the_counters_tally_each_outcome_separately() {
 
     serve_with(&conn, &authed(&push_body("chat.json", CHAT)), &counters);
     serve_with(&conn, &authed(&push_body("again.json", CHAT)), &counters);
-    serve_with(&conn, &authed(&push_body("bad.pdf", "x")), &counters);
+    // See the note in the unsupported-format test above for why this is not
+    // a `.pdf` any more.
+    serve_with(&conn, &authed(&push_body("bad.exe", "x")), &counters);
     // A rejection that never reaches the importer is not an ingestion
     // outcome, so it moves none of these.
     serve_with(&conn, &request("POST", "/ingest", None, "{}"), &counters);

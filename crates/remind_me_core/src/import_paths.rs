@@ -24,7 +24,7 @@ pub const IMPORT_ROOTS_ENV: &str = "REMIND_ME_IMPORT_ROOTS";
 pub const EXPORT_ROOTS_ENV: &str = "REMIND_ME_EXPORT_ROOTS";
 
 /// Extensions the importer accepts.
-pub const SUPPORTED_SUFFIXES: [&str; 5] = ["json", "jsonl", "md", "markdown", "txt"];
+pub const SUPPORTED_SUFFIXES: [&str; 6] = ["json", "jsonl", "md", "markdown", "txt", "pdf"];
 /// Extensions a *document* import accepts — a document is prose, not a chat log.
 pub const DOCUMENT_SUFFIXES: [&str; 3] = ["md", "markdown", "txt"];
 

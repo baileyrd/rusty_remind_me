@@ -674,6 +674,10 @@ pub fn restore_graph_records(
 pub fn import_content(
     conn: &Connection,
     raw: &str,
+    // The file's original bytes. A text connector reads `raw`; a binary one
+    // (PDF) must have these, because `raw` is a lossy UTF-8 decode that has
+    // already destroyed the file.
+    raw_bytes: &[u8],
     suffix: &str,
     filename: &str,
     hash: &str,
@@ -699,6 +703,9 @@ pub fn import_content(
         // An explicit Readwise request wins over the "json is always chat"
         // rule; `Auto` never reaches it, which is the whole point.
         (_, ImportKind::Readwise) => ImportKind::Readwise,
+        // `.pdf` is unambiguous, so unlike Readwise it is safe to route from
+        // `Auto` — there is no other thing a PDF could plausibly be.
+        ("pdf", _) => ImportKind::Pdf,
         ("json" | "jsonl", _) => ImportKind::Chat,
         (_, ImportKind::Auto) => {
             if looks_like_chat_markdown(raw) {
@@ -720,6 +727,47 @@ pub fn import_content(
         extras,
         frontmatter,
     } = match effective {
+        ImportKind::Pdf => {
+            let (pages, pages_with_text) = match crate::pdf_import::parse_pdf(raw_bytes, max_length)
+            {
+                Ok(parsed) => parsed,
+                // Refused rather than imported as zero memories: a scan
+                // that silently produces nothing is indistinguishable from
+                // an empty file, which is the failure #147 fixed.
+                Err(reason) => {
+                    return Ok(ImportOutcome::Failed {
+                        file: filename.to_string(),
+                        reason,
+                    })
+                }
+            };
+            let mut chunks = Vec::with_capacity(pages.len());
+            let mut extras = Vec::with_capacity(pages.len());
+            for page in pages {
+                chunks.push((page.content, None));
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("page".to_string(), serde_json::json!(page.page));
+                extras.push(ChunkExtras {
+                    extra_tags: Vec::new(),
+                    mention_entities: Vec::new(),
+                    metadata,
+                });
+            }
+            ParsedImport {
+                chunks,
+                // Pages that carried text, not chunks produced — the honest
+                // answer to "how much of this document was readable".
+                raw_entries: pages_with_text,
+                extras,
+                frontmatter: serde_json::Map::new(),
+                source: DOCUMENT_SOURCE,
+                category: if category.is_empty() || category == CHAT_SOURCE {
+                    crate::pdf_import::PDF_CATEGORY.to_string()
+                } else {
+                    category.to_string()
+                },
+            }
+        }
         ImportKind::Readwise => {
             let (highlights, raw_entries) =
                 match crate::readwise_import::parse_export(raw, max_length) {
@@ -954,6 +1002,12 @@ pub fn validate_kind_and_suffix(
             reason: format!("unsupported format: .{}", suffix),
         });
     }
+    if kind == ImportKind::Pdf && suffix != "pdf" {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!("pdf import does not support .{}", suffix),
+        });
+    }
     if kind == ImportKind::Readwise && suffix != "json" {
         return Some(ImportOutcome::Failed {
             file: filename.to_string(),
@@ -1029,6 +1083,7 @@ pub fn import_bytes(
     import_content(
         conn,
         &raw,
+        content,
         &suffix,
         filename,
         &hash,
@@ -1089,6 +1144,7 @@ pub fn import_file(
     import_content(
         conn,
         &raw,
+        &bytes,
         &suffix,
         &filename,
         &hash,

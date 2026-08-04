@@ -16,3 +16,12 @@ chrono.workspace = true
 uuid.workspace = true
 sha256.workspace = true
 dirs.workspace = true
+pdf-extract = { version = "0.12", optional = true }
+
+[features]
+default = []
+# PDF text extraction. Optional so a build that does not want a PDF parser
+# does not carry one (71 transitive crates), matching the reference's own
+# lazily-imported `pdf` extra. Feature-off, `.pdf` import reports the format
+# as unavailable rather than failing obscurely.
+pdf = ["dep:pdf-extract"]
