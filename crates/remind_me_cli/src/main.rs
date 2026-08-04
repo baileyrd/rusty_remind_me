@@ -113,8 +113,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // per-test, and a background `git fetch` on every one of those
         // would be slow, network-dependent, and racy across parallel tests.
         updater::start_background_check();
+        // Unconditional, unlike the folder watcher: reminders have no enable
+        // switch, only a poll interval. Without this the scheduler would be
+        // code nothing ever runs, and a reminder would only ever fire if
+        // someone happened to call a tool.
+        let scheduler = remind_me_core::scheduler::start_scheduler_for(&db.conn());
         let server = McpServer::new(db);
-        server.run_stdio_loop()?;
+        let result = server.run_stdio_loop();
+        // Joined before the database goes out of scope, so an in-flight poll
+        // cannot still be writing while the handle is torn down underneath it.
+        if let Some(scheduler) = scheduler {
+            scheduler.stop();
+        }
+        result?;
     } else {
         match args[1].as_str() {
             "configure" | "setup" => {
@@ -162,8 +173,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     remind_me_core::pid::write_pid_file(path, host, port)?;
                 }
 
+                let scheduler = remind_me_core::scheduler::start_scheduler_for(&db.conn());
                 let api_server = ApiServer::new(db);
                 let result = api_server.run(&addr);
+                if let Some(scheduler) = scheduler {
+                    scheduler.stop();
+                }
                 if let Some(path) = &pid_path {
                     remind_me_core::pid::remove_pid_file(path);
                 }

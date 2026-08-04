@@ -38,12 +38,17 @@ fn parse_url(url: &str) -> Result<ParsedUrl, HttpError> {
         Some(pos) => (&rest[..pos], rest[pos..].to_string()),
         None => (rest, "/".to_string()),
     };
-    let (host, port) = authority
-        .split_once(':')
-        .ok_or_else(|| HttpError(format!("sync URL has no port: {url:?}")))?;
-    let port: u16 = port
-        .parse()
-        .map_err(|_| HttpError(format!("invalid port in sync URL: {url:?}")))?;
+    // A sync peer is always addressed with an explicit port, but a webhook
+    // URL (`notifications.rs`) usually is not, so an absent port falls back to
+    // 80 rather than being rejected.
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (
+            host,
+            port.parse::<u16>()
+                .map_err(|_| HttpError(format!("invalid port in URL: {url:?}")))?,
+        ),
+        None => (authority, 80),
+    };
     Ok(ParsedUrl {
         host: host.to_string(),
         port,
@@ -57,7 +62,7 @@ fn parse_url(url: &str) -> Result<ParsedUrl, HttpError> {
 fn request(
     method: &str,
     url: &str,
-    secret: &str,
+    secret: Option<&str>,
     body: Option<&str>,
 ) -> Result<(u16, String), HttpError> {
     let parsed = parse_url(url)?;
@@ -72,24 +77,30 @@ fn request(
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
 
+    // Omitted entirely rather than sent empty when there is no secret: a bare
+    // `Authorization: Bearer` is a malformed credential, and some endpoints
+    // reject it outright where they would have accepted no header at all.
+    let auth = match secret {
+        Some(secret) => format!("Authorization: Bearer {secret}\r\n"),
+        None => String::new(),
+    };
     let request_text = match body {
         Some(body) => format!(
-            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {secret}\r\n\
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{auth}\
              Content-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
             method = method,
             path = parsed.path_and_query,
             host = parsed.host,
-            secret = secret,
+            auth = auth,
             len = body.len(),
             body = body,
         ),
         None => format!(
-            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {secret}\r\n\
-             Connection: close\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{auth}Connection: close\r\n\r\n",
             method = method,
             path = parsed.path_and_query,
             host = parsed.host,
-            secret = secret,
+            auth = auth,
         ),
     };
     stream
@@ -114,11 +125,18 @@ fn request(
 }
 
 pub fn post_json(url: &str, secret: &str, body: &str) -> Result<(u16, String), HttpError> {
-    request("POST", url, secret, Some(body))
+    request("POST", url, Some(secret), Some(body))
 }
 
 pub fn get(url: &str, secret: &str) -> Result<(u16, String), HttpError> {
-    request("GET", url, secret, None)
+    request("GET", url, Some(secret), None)
+}
+
+/// POST JSON with no `Authorization` header, for an endpoint this node does
+/// not share a secret with — a user-configured notification webhook, where
+/// any credential belongs in the URL the service itself issued.
+pub fn post_json_unauthenticated(url: &str, body: &str) -> Result<(u16, String), HttpError> {
+    request("POST", url, None, Some(body))
 }
 
 #[cfg(test)]
@@ -140,8 +158,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_url_rejects_a_url_with_no_port() {
-        assert!(parse_url("http://example.com/foo").is_err());
+    fn parse_url_defaults_a_missing_port_to_80() {
+        // Sync peers always carry an explicit port; webhook URLs usually do
+        // not, and rejecting them would make the notifier unusable against
+        // every ordinary endpoint.
+        let parsed = parse_url("http://example.com/foo").unwrap();
+        assert_eq!(parsed.host, "example.com");
+        assert_eq!(parsed.port, 80);
+        assert_eq!(parsed.path_and_query, "/foo");
     }
 
     #[test]

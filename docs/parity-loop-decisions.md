@@ -373,6 +373,79 @@ have been before.
 
 ---
 
+## #117 — the reminder scheduler and notification channels
+
+The issue said to stop and ask which channels are in scope, because some need
+a new crate. Asked, and answered "keep going", so the calls below were made
+and are recorded here rather than deferred.
+
+**The webhook channel ships; SMTP does not.** The reference has exactly two,
+both gated on env-var presence. Webhook needs no new dependency — this crate
+already has a hand-rolled `TcpStream` HTTP client in `sync::http`. SMTP is
+free in Python (`smtplib`) and is not in Rust: it needs `lettre` plus a TLS
+backend, and the workspace has no TLS dependency at all today. That is a
+dependency decision, so it is left for its own issue rather than taken here.
+
+**The webhook is `http://` only, and that is a sharper limitation here than
+elsewhere.** `sync::http` and `embedder` both already say "put a reverse proxy
+in front", and for a sync peer on your own network that is reasonable. The
+webhook endpoints people actually configure — Slack, Discord, ntfy — are
+public HTTPS, so this channel cannot reach them directly. Reaching them needs
+a TLS-capable client, which is the same dependency decision as SMTP and is
+flagged alongside it. What ships is honest and works against a local relay;
+it is not yet the whole feature the reference has.
+
+**The issue's "channel failure is logged and retried per the reference" does
+not match the reference — it does not retry**, and that is followed here. Its
+`poll_once` writes the `reminder_deliveries` row after calling the delivery
+hook unconditionally, and `notify()` swallows every channel error, so a
+webhook that is down means the reminder is logged, marked delivered, and never
+attempted again. The reasoning holds up: the log line is the channel that
+cannot fail, so the reminder *has* been delivered somewhere. Retrying would
+mean re-logging the same reminder every 60 seconds for as long as the webhook
+stayed down, turning one missed notification into an unbounded stream of
+duplicates through the channel that was working. Seventh issue whose
+acceptance criteria diverge from the reference; commented on the issue.
+
+**"A reminder due while the process was down is delivered on next start" —
+confirmed, not skipped.** The issue flagged this as needing checking against
+the reference. Its due query is `remind_at <= now` with no lower bound, so a
+late reminder fires once on the next pass. Skipping would lose precisely the
+reminders a scheduler exists to catch.
+
+**With no channel configured, a due reminder is still logged and still
+recorded as delivered.** "Channels are opt-in" governs whether a *notification*
+is attempted, not whether the reminder is handled — otherwise a vault with no
+webhook would accumulate undelivered reminders forever and re-log every one of
+them on every pass.
+
+**The delivery row is written after the hook, not before.** A hook that panics
+outright leaves the reminder pending for the next pass. Marked first, a crash
+mid-delivery would silently consume it. `INSERT OR IGNORE` keeps the unique
+index as the real exactly-once guarantee, so two racing pollers produce one
+delivery rather than an error that strands every later reminder in the batch.
+
+**The scheduler thread opens its own connection from a path.**
+`rusqlite::Connection` is not `Sync`, so sharing the caller's would trade a
+compile error for a runtime serialisation problem. Shutdown is a condvar
+rather than a sleep, so stopping does not block for up to a full poll interval.
+
+**The loop carries reminders only.** The reference's equivalent also
+piggybacks scheduled digests, watched-search polling, revision compaction and
+analytics snapshot capture/retention on the same thread, for stated reasons.
+Those belong to already-merged issues (#108, #109, #111, #112) whose functions
+exist here but currently run only when a tool is called; wiring them onto this
+loop is a follow-up rather than part of "reminders 2/3".
+
+**`sync::http` gained a default port and optional auth.** A webhook URL
+usually has no explicit port, and `parse_url` rejected that outright; and a
+user's webhook shares no secret with this node, where a bare
+`Authorization: Bearer` is a malformed credential some endpoints reject
+outright when they would have accepted no header at all. Both are additive —
+`post_json`/`get` keep sending the bearer token exactly as before.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

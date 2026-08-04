@@ -17,7 +17,9 @@ use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, Result};
 
 mod graph;
-mod http;
+// Public so `notifications` can reuse the one HTTP client this crate has
+// rather than growing a second.
+pub mod http;
 mod peers;
 mod pull;
 mod push;
