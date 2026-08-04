@@ -792,6 +792,51 @@ a section identity the entity graph does not have, and silently forking a
 
 ---
 
+## #150 — Readwise highlight import
+
+**The issue I filed described an API client. The reference has none.** I wrote
+criteria for an endpoint, an auth header, pagination, incremental
+`updated__gt`, a token environment variable, and a stub server for tests. The
+reference makes **no live call against Readwise whatsoever** — it is a file
+import, like every connector in that family. The user exports once and hands
+over the saved file, which keeps an access token out of this crate entirely.
+Corrected on the issue before writing code; this is the third issue in this
+loop whose criteria diverged materially from the reference.
+
+**One memory per highlight, not per book.** A highlight is Readwise's own
+atomic unit of meaning — nobody re-reads half a highlight the way they might
+re-read half a document section. Grouping would make every search hit for one
+highlight compete for ranking and embedding budget against every other
+highlight in the same book, diluting the retrieval precision the store exists
+to provide. The cost — losing the book as connective tissue — is paid back by
+attaching its context as metadata to every highlight, demoting it from "shapes
+the embedding" to "travels alongside it".
+
+**Kept out of `auto` detection.** A Readwise export and a chat export are both
+an unadorned `.json`. Content-sniffing works for chat *markdown* because role
+markers are a strong signal; JSON offers no equivalent, and sniffing for a
+`highlights`-shaped key would misroute a chat export that merely discusses
+Readwise. Silently corrupting a working chat import is strictly worse than
+requiring one explicit keyword.
+
+**The `("json" | "jsonl", _) => Chat` rule had to be qualified.** It would
+otherwise have swallowed an explicit Readwise request. The new arm matches on
+the requested kind first — which `Auto` can never produce, preserving the
+point above.
+
+**A malformed top level is refused; malformed parts are skipped.** One bad row
+must not cost the user the rest of a large export, but discovering partway
+through that the file was never an export is the wrong time to find out — and
+"imported successfully, zero memories" is the failure #147 had just fixed
+elsewhere.
+
+**My own test was wrong once here too**, in the same way as #149's: I asserted
+a note-appending format by string-munging the expected value rather than
+writing it out, which obscured what was actually being checked. Rewritten
+literally.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

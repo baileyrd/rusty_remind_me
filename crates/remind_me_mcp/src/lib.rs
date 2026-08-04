@@ -189,7 +189,16 @@ fn import_input_schema(directory: bool) -> Value {
             "description": "Which turns to keep from a chat export"
         },
         "max_length": { "type": "integer", "default": 10000, "minimum": IMPORT_MAX_LENGTH_MIN, "maximum": IMPORT_MAX_LENGTH_MAX, "description": "Characters per memory; longer content is chunked" },
-        "kind": { "type": "string", "enum": ["auto", "chat", "document"], "default": "auto" }
+        "kind": {
+            "type": "string",
+            // `obsidian` and `readwise` are reachable only by naming them.
+            // `auto` deliberately never selects either: a Readwise export and
+            // a chat export are both an unadorned `.json`, and guessing wrong
+            // silently corrupts a working chat import.
+            "enum": ["auto", "chat", "document", "obsidian", "readwise"],
+            "default": "auto",
+            "description": "auto/chat/document sniff by content; obsidian (.md, frontmatter + [[wikilinks]] + #tags) and readwise (.json export, one memory per highlight) must be named explicitly"
+        }
     });
     let object = properties.as_object_mut().expect("just built an object");
     if directory {
