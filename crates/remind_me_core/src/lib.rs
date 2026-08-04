@@ -9,6 +9,7 @@ pub mod dbs_import;
 pub mod digest;
 pub mod embedder;
 pub mod entity;
+pub mod events;
 pub mod expansion;
 pub mod export;
 pub mod fts;

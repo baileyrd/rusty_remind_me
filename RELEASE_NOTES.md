@@ -2,6 +2,41 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Automation event stream (#152)
+
+### Added
+- **`events::emit`** — POSTs `created` / `updated` / `deleted` to
+  `REMIND_ME_EVENT_WEBHOOK_URL` as memories are mutated locally, for a relay,
+  a second indexer, or an audit log.
+
+### Notes
+- **The payload is metadata only** — `event`, `memory_id`, `category`,
+  `timestamp` — and carries **no memory content, tags or metadata**. This is an
+  event-notification stream, not a content-sync mechanism; a consumer that
+  wants the memory calls back with the id, where the ordinary sensitive-memory
+  rules apply. Content on the wire here would silently turn every configured
+  webhook into an egress path for the whole vault. My issue said the opposite
+  ("carry enough to act on without a follow-up read") and was corrected first.
+  A test asserts the payload has exactly four keys, because a fifth added
+  carelessly is how content leaks in.
+- **Sync-applied writes emit nothing.** Only local mutations do. Emitting on a
+  record arriving from a peer is how two synced nodes would echo each other's
+  mutations forever.
+- **A separate config and delivery path from notifications, not a second use
+  of it.** Notifications are human-facing and deliberately throttled; this has
+  **no throttling at all**, because suppressing a "repeat" would silently drop
+  a real mutation. Same transport, opposite requirements.
+- **Unconfigured is a true no-op** — no thread started, not one that discovers
+  it has nowhere to go. This runs on every write. A blank URL counts as unset,
+  which is how it arrives from many process managers.
+- **A dead endpoint cannot fail the write.** The POST runs on a detached
+  thread whose handle is held until it finishes: a write must not wait on a
+  webhook, but a handle dropped immediately can also lose the POST mid-flight.
+- Tests run against a real listening socket rather than only inspecting the
+  payload builder — the no-content guarantee is a property of what is actually
+  sent, and a builder-only test would keep passing if the emit path started
+  sending the whole memory.
+
 ## 2026-08-04 — Maintenance nudges and capture health (#151)
 
 ### Added

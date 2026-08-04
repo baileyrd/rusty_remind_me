@@ -874,6 +874,46 @@ state is what makes it visible.
 
 ---
 
+## #152 — automation event stream
+
+**My issue's payload criterion was backwards, and correcting it mattered.** I
+wrote "events carry enough to act on without a follow-up read". The reference
+carries **metadata only** and never content, precisely so the stream cannot
+become a content channel. Building what I had written would have put every
+memory's text — sensitive ones included — onto whatever URL happened to be
+configured, with no per-call intent to check against. The fourth issue this
+loop whose criteria diverged materially from the reference.
+
+There is a test asserting the payload has exactly four keys. A fifth field
+added carelessly later is the realistic way content leaks in, and no
+per-field assertion would catch it.
+
+**Sync-applied writes emit nothing**, which answers my other bad criterion
+("distinguishable, or not emitted"). The reference's emit sites are exactly
+the local mutation paths; `_upsert_one` is not among them. Emitting there is
+how two synced nodes echo each other forever.
+
+**Not reusing the notification path, despite the identical transport.**
+Notifications are human-facing and deliberately throttled to avoid alert
+fatigue; automation events must never be throttled, because a suppressed
+"repeat" is a dropped mutation a consumer needed. Sharing the plumbing would
+hand automation the throttle and break it quietly.
+
+**The detached thread's handle is held rather than dropped.** Fire-and-forget
+is right for latency — a write must not wait on a webhook — but a handle
+dropped immediately can lose the request mid-flight, which is silent. The
+in-flight list reaps finished threads on each emit so it cannot grow unbounded.
+
+**The delete event captures its category before the row is gone.** A hard
+delete leaves nothing to read it back from, and an event that guessed would be
+worse than one that did not carry it.
+
+**Tested against a real socket, not the payload builder.** The no-content
+guarantee is a property of what is actually POSTed; a builder-only test would
+keep passing if the emit path started sending something else entirely.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

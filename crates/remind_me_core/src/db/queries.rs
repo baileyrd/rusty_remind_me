@@ -132,7 +132,15 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
         let _ = crate::vectors::embed_and_store(conn, &embedder, &id, &input.content);
     }
 
-    get_memory_by_id(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+    let memory = get_memory_by_id(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+    // Local mutation, so automation hears about it. A record arriving from a
+    // peer goes through `sync::upsert_record` instead, which deliberately
+    // emits nothing — see `events`' module docs for why echoing sync writes
+    // would make two nodes chase each other forever.
+    crate::events::emit(crate::events::Event::Created, &memory.id, &memory.category);
+
+    Ok(memory)
 }
 
 pub fn get_memory_by_id(conn: &Connection, id: &str) -> Result<Option<Memory>> {
@@ -324,6 +332,8 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
 
     let memory =
         get_memory_by_id(conn, &input.memory_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    crate::events::emit(crate::events::Event::Updated, &memory.id, &memory.category);
+
     Ok(UpdateOutcome::Updated(Box::new(memory)))
 }
 
@@ -363,13 +373,18 @@ pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
     // tombstone) rather than only cleaning up vectors on a hard delete —
     // a tombstoned memory's embeddings are stale the moment it stops being
     // searchable, same as an incoming sync tombstone's are.
-    let memory_rowid: Option<i64> = conn
+    // The category comes out with the rowid rather than in a second query: a
+    // hard delete removes the row, so after this point there is nothing left
+    // to read it from, and the event would have to guess.
+    let existing: Option<(i64, String)> = conn
         .query_row(
-            "SELECT rowid FROM memories WHERE id = ? AND deleted_at IS NULL",
+            "SELECT rowid, category FROM memories WHERE id = ? AND deleted_at IS NULL",
             params![memory_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .ok();
+    let memory_rowid: Option<i64> = existing.as_ref().map(|(rowid, _)| *rowid);
+    let category: Option<String> = existing.map(|(_, category)| category);
     if memory_rowid.is_none() {
         return Ok(false);
     }
@@ -408,6 +423,12 @@ pub fn delete_memory(conn: &Connection, memory_id: &str) -> Result<bool> {
         "DELETE FROM memory_associations WHERE memory_id_a = ? OR memory_id_b = ?",
         params![memory_id, memory_id],
     )?;
+
+    crate::events::emit(
+        crate::events::Event::Deleted,
+        memory_id,
+        category.as_deref().unwrap_or(""),
+    );
 
     Ok(true)
 }
