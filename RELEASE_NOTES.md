@@ -2,6 +2,37 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Prometheus metrics and the PWA manifest (#119)
+
+### Added
+- **`GET /metrics`** — Prometheus text exposition, gated on
+  `REMIND_ME_METRICS_ENABLED` and a plain 404 while off.
+- **`GET /manifest.json`** — the dashboard's Web App Manifest.
+- `remind_me_core::metrics` — counters for tool calls, their durations, search
+  tiers and rate-limit rejections, plus `remind_me_build_info` and ad-hoc
+  gauges computed per scrape.
+- Tool-call timing wired into the MCP dispatch, so the tool families carry
+  real samples rather than headers with nothing under them.
+
+### Notes
+- **404 while disabled, not 403 or an empty 200.** "Off" must be
+  indistinguishable from "this build does not have it", so a scrape pointed at
+  a metrics-disabled server fails loudly instead of silently recording nothing.
+- **Unauthenticated, gated on the enable flag** — same posture as `/health`,
+  and the reference's. Prometheus scrape configs typically send no headers.
+  While enabled this reveals usage *patterns* (tool call counts, search volume,
+  memory and outbox totals) to anyone who can reach the port; it exposes no
+  memory content.
+- **Gauges are computed per scrape, never shadowed as counters**, so
+  `remind_me_memories_total` and `remind_me_sync_outbox_pending` cannot drift
+  from the tables they describe.
+- `remind_me_build_info` is emitted unconditionally, including on a server that
+  has served nothing — an absent series reads as "scrape target down", not
+  "idle".
+- Search tiers are zero-filled, so a dashboard query renders a flat line at
+  zero rather than a gap.
+- HTTP routes: 23 → **25 of 25**.
+
 ## 2026-08-04 — Reminders calendar feed (#118)
 
 ### Added

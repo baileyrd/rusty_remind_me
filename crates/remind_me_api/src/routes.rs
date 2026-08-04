@@ -864,6 +864,16 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         methods: &["GET"],
+        pattern: "/metrics",
+        handler: metrics,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/manifest.json",
+        handler: manifest,
+    },
+    Route {
+        methods: &["GET"],
         pattern: "/api/analytics/trend",
         handler: api_analytics_trend,
     },
@@ -1026,4 +1036,90 @@ pub fn api_reminders_ics(conn: &Connection, token: &str) -> (u16, Body) {
         ),
         Err(e) => internal_err(e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Metrics and the PWA manifest (issue #119)
+// ---------------------------------------------------------------------------
+
+/// `GET /metrics` — Prometheus text exposition.
+///
+/// **404 while `REMIND_ME_METRICS_ENABLED` is unset**, rather than a 403 or an
+/// empty 200. "Off" should be indistinguishable from "this build does not have
+/// it", so a scrape configured against a server with metrics disabled fails
+/// loudly instead of silently recording nothing.
+///
+/// **Unauthenticated, gated on the enable flag instead of a bearer token** —
+/// the same posture as `/health`, and deliberate rather than an oversight.
+/// Prometheus scrape configs typically send no custom headers, so requiring
+/// one would mean hand-rolling a static-bearer scrape config for this single
+/// target; and exposure is already opt-in at the config level, unlike
+/// `/api/*`'s always-on surface.
+///
+/// The tradeoff is real and worth stating plainly: while enabled, this reveals
+/// usage patterns — which tools are called and how often, search volume,
+/// memory and outbox counts — to anyone who can reach the port. It exposes no
+/// memory *content*. An operator who considers the shape sensitive should
+/// place the port accordingly, which is how self-hosted exporters are
+/// generally run.
+pub fn metrics(
+    conn: &Connection,
+    _: &Wiki,
+    _: &Request,
+    _: &HashMap<String, String>,
+) -> (u16, Body) {
+    if !remind_me_core::metrics::metrics_enabled() {
+        return (404, Body::Json(json!({ "error": "Not Found" })));
+    }
+
+    // Computed per scrape rather than shadowed as counters, so they cannot
+    // drift from the tables they describe.
+    let mut gauges = Vec::new();
+    if let Ok(total) = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL",
+        [],
+        |r| r.get::<_, i64>(0),
+    ) {
+        gauges.push(remind_me_core::metrics::GaugeSpec::new(
+            "remind_me_memories_total",
+            "Total non-deleted memories currently in the store.",
+            total as f64,
+        ));
+    }
+    if remind_me_core::sync::sync_enabled() {
+        if let Ok(pending) = conn.query_row(
+            "SELECT COUNT(*) FROM sync_outbox WHERE sent_at = ''",
+            [],
+            |r| r.get::<_, i64>(0),
+        ) {
+            gauges.push(remind_me_core::metrics::GaugeSpec::new(
+                "remind_me_sync_outbox_pending",
+                "Sync outbox rows not yet acknowledged by the hub.",
+                pending as f64,
+            ));
+        }
+    }
+
+    (
+        200,
+        Body::Raw {
+            content_type: "text/plain; version=0.0.4",
+            payload: remind_me_core::metrics::render_prometheus_text(&gauges),
+        },
+    )
+}
+
+/// `GET /manifest.json` — the dashboard's Web App Manifest.
+///
+/// Unauthenticated like `/` and `/health`: a browser fetches a `<link
+/// rel="manifest">` with no `Authorization` header, so requiring one would
+/// simply mean the manifest never loads. It carries no user data.
+pub fn manifest(_: &Connection, _: &Wiki, _: &Request, _: &HashMap<String, String>) -> (u16, Body) {
+    (
+        200,
+        Body::Raw {
+            content_type: "application/manifest+json",
+            payload: remind_me_core::metrics::manifest_json().to_string(),
+        },
+    )
 }

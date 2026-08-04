@@ -209,7 +209,8 @@ as PR #135, #111 (T5) as PR #136, #112 (A1) as PR #137.
 
 **Wave 6 is complete**: #116 (T1a) as PR #141, #117 (T1b) as PR #142, #118
 (T1c, A2) as PR #143. Tool coverage reaches **61 of 61**.
-Remaining: wave 7 — #119-#122 (ops surface).
+**Wave 7 is in progress**: #119 (A4) as PR #144. HTTP routes reach **25 of
+25**. Remaining: #120-#122 (scoped API keys, rate limiting, tool profiles).
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |
