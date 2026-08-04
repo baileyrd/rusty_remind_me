@@ -745,6 +745,53 @@ hide a real outage behind a formatting problem.
 
 ---
 
+## #149 — Obsidian vault import
+
+**The issue's own criteria were wrong about the link target, and were
+corrected on the issue before any code was written.** I had written that
+wikilinks are "recorded in `wiki_links`". The reference resolves each
+`[[Note]]` to an **entity**, via the existing entity-upsert machinery, and
+links the mentioning memory to it. `wiki_links` belongs to the separate LLM
+Wiki layer and is untouched. Two other criteria were also wrong — a dangling
+wikilink needs no handling (entity upsert creates what is missing), and
+attachment skipping lives in the watcher layer, not the connector.
+
+**No YAML crate.** Real vault frontmatter is overwhelmingly flat, and a full
+YAML parser is a large dependency for that. The hand-rolled parser covers
+`key: value`, `key: [a, b]`, and `key:` + indented `- item`, and **degrades the
+whole block to "no fields" the moment it meets anything else** rather than
+extracting half of it — a caller cannot tell which half it got, so partial is
+worse than none. The delimiters are stripped either way, so the note's prose
+always imports cleanly. Layering a YAML crate in behind the same call site
+later is contained and additive.
+
+**Chunking is not reimplemented.** The connector strips frontmatter and hands
+the body to the existing per-section Markdown chunker. A second chunker is how
+Obsidian notes and plain documents would eventually disagree about what a
+section is.
+
+**Mentions attach per chunk, not per note.** Only the wikilinks whose literal
+`[[…]]` text landed in a given chunk. Chunking never rewrites text, so the
+markup survives verbatim into whichever chunk it fell into. Smeared across the
+note, every section would claim every mention.
+
+**A note's tags merge with the caller's rather than replacing them.** The
+caller asked for these memories to be tagged a certain way, and the note's own
+tags are additional information, not a correction.
+
+**`#2024/review` is a tag; `#123` is not.** Only *wholly* numeric tags are
+dropped — the slash is stripped before the digit test so the test answers "is
+this a bare number" rather than "does it contain one". My first test asserted
+the opposite and was wrong: dropping `#2024/review` would lose the commonest
+dated-note scheme there is.
+
+**The heading-anchor limitation is stated, not hidden.** `[[Note#Heading]]`
+resolves to an entity for `Note` as a whole. Resolving to a section would need
+a section identity the entity graph does not have, and silently forking a
+`Note#Heading` entity would be worse than the honest coarser answer.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

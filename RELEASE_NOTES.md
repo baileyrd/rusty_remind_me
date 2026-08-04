@@ -2,6 +2,51 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Obsidian vault import (#149)
+
+### Added
+- **`obsidian` import kind** — a vault note's own conventions, which a generic
+  document import treats as opaque prose:
+  - **YAML frontmatter**, parsed into fields, with `tags` folded into the
+    memory's tags exactly like an inline `#tag`.
+  - **`[[Wikilinks]]`**, each resolving to an **entity** for the linked note's
+    title, with the mentioning memory linked to it — so the vault's own link
+    graph becomes traversable through `remind_me_entity` /
+    `remind_me_entity_traverse` instead of being flattened into text.
+  - **Inline `#tag`**, deduplicated case-insensitively against the frontmatter
+    ones.
+- Its own `source` and `category`, so a search can filter specifically on
+  notes ingested from a vault.
+
+### Notes
+- **This is the entity graph, not `wiki_links`.** The issue's original
+  criteria said otherwise; `wiki_links` belongs to the separate LLM Wiki layer
+  and is untouched. Corrected on the issue before implementing.
+- **Chunking is not reimplemented** — the connector strips frontmatter and
+  hands the body to the same per-section Markdown chunker the document kind
+  uses. Only the per-note extraction is new.
+- **Frontmatter parsing is hand-rolled and deliberately partial**: flat
+  `key: value`, `key: [a, b]`, and `key:` + indented `- item`. Real vault
+  frontmatter is overwhelmingly that shape, and a YAML crate is a large
+  dependency for this bounded a need — the same call the reference made.
+  Anything unrecognised degrades the whole block to "no fields" rather than
+  erroring, and the delimiters are stripped either way, so the prose always
+  imports.
+- **Mentions attach per chunk**, not per note — only the wikilinks whose
+  literal `[[…]]` text landed in a chunk. Smeared across the file, every
+  section would claim every mention and the graph would say each section is
+  about everything the note touches.
+- **A note's tags merge with the caller's rather than replacing them.** The
+  caller asked for these memories to be tagged a certain way; the note's own
+  tags are additional information, not a correction.
+- Four `#` shapes are deliberately **not** tags: `# Heading` (the space),
+  `[[Note#Heading]]` (wikilink spans are masked), a `#` in fenced or inline
+  code, and a purely numeric `#123`. `#2024/review` **is** a tag — only wholly
+  numeric ones are dropped, or the commonest dated-note scheme would vanish.
+- **v1 limitation, stated rather than hidden**: a heading or block anchor is
+  stripped, so `[[Note#Heading]]` resolves to `Note` as a whole rather than
+  forking a second entity.
+
 ## 2026-08-04 — Two defects found by reference movement (#147, #148)
 
 Both come from `remind_me` commits landed past the pinned `935eb98`, and both

@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod models;
 pub mod normalize;
 pub mod notifications;
+pub mod obsidian_import;
 pub mod pid;
 pub mod rate_limit;
 pub mod recalibrate;
