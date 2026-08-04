@@ -16,6 +16,7 @@ pub mod ics;
 pub mod import_paths;
 pub mod importer;
 pub mod mempalace_import;
+pub mod metrics;
 pub mod models;
 pub mod normalize;
 pub mod notifications;

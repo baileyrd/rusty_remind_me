@@ -1050,6 +1050,10 @@ impl McpServer {
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 let conn = self.db.conn();
                 let mut span = remind_me_core::telemetry::maybe_span(&format!("tool.{tool_name}"));
+                // Started unconditionally: `record_tool_call` decides for
+                // itself whether metrics are on, the same way `maybe_span`
+                // above does, so this dispatch never grows an `if enabled`.
+                let started = std::time::Instant::now();
 
                 let result = match tool_name {
                     "remind_me_add" => {
@@ -2147,6 +2151,14 @@ impl McpServer {
                 {
                     span.mark_error();
                 }
+                // Recorded for failed calls too. A tool that errors still
+                // consumed time and still says something about how the
+                // server is being used; counting only successes would make a
+                // wholly broken tool look like an unused one.
+                remind_me_core::metrics::record_tool_call(
+                    tool_name,
+                    started.elapsed().as_secs_f64(),
+                );
 
                 let mut result = result;
                 // Surfaces once, on whatever tool call happens to be first

@@ -502,6 +502,61 @@ wants every reminder rather than the first page.
 
 ---
 
+## #119 — `/metrics` and `/manifest.json`
+
+**`/metrics` is off by default and 404s while disabled.** The issue's criteria
+do not mention a gate; the reference has one (`REMIND_ME_METRICS_ENABLED`) and
+it is implemented. A 404 rather than a 403 or an empty 200 is the point: "off"
+should be indistinguishable from "this build does not have it", so a scrape
+pointed at a metrics-disabled server fails loudly instead of silently
+recording nothing forever.
+
+**Unauthenticated, gated on the enable flag rather than a bearer token** —
+matching the reference and this crate's own `/health` posture. Prometheus
+scrape configs typically send no custom headers, so requiring one would mean
+hand-rolling a static-bearer config for a single target. The tradeoff is
+stated plainly in the handler doc rather than hand-waved: while enabled this
+reveals usage patterns — which tools are called and how often, search volume,
+memory and outbox counts — to anyone who can reach the port. It exposes no
+memory *content*.
+
+**Counters vs. gauges, kept as the reference draws the line.** Only genuine
+events-over-time are tracked in module state (tool calls, durations, search
+tiers, rate-limit rejections) because no query can reconstruct them after the
+fact. Anything already answerable by a cheap point-in-time query — total
+memories, outbox depth — is computed per scrape and passed in as a
+`GaugeSpec`, so it cannot drift from the table it describes.
+
+**Tool-call timing is wired into the MCP dispatch**, not left as a recorder
+nothing calls. Without it the three tool families would emit their headers
+forever and never a sample, which is valid exposition and a dead metric.
+Recorded for failed calls too: a tool that errors still consumed time, and
+counting only successes would make a wholly broken tool look like an unused
+one.
+
+**No Prometheus client crate.** The text exposition format is a few
+`# HELP`/`# TYPE` lines and `name{labels} value` samples. The one thing a
+client library would buy is safe concurrent counters, which a `Mutex` around
+plain maps covers — the same call this workspace made for the webhook POST,
+the HTTP client and the ICS document.
+
+**The exposition is tested by parsing it, not by substring match.** A scrape
+Prometheus rejects and one it accepts differ structurally — a `# TYPE` with no
+family, a sample whose name has no header — and substring assertions pass on
+both. The parser is deliberately strict, and every sample is asserted to have
+both a `HELP` and a `TYPE`.
+
+**Search tiers are zero-filled rather than omitted.** A server that has served
+no searches still emits all three at zero; omitted, a dashboard query returns
+no data and renders as a gap rather than a flat line.
+
+**The manifest has no `icons` key**, matching the reference. There is no icon
+asset in the repository, and pointing at one that does not exist is worse than
+omitting it — a manifest without icons is valid and the OS falls back to a
+glyph.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**
