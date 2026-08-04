@@ -51,6 +51,15 @@ pub struct BackupOutcome {
     /// Backups retained after pruning, newest first.
     pub total_backups: usize,
     pub pruned: usize,
+    /// What the optional cloud upload did. `NotConfigured` on the ordinary
+    /// path. Reported rather than swallowed, so a refused upload is visible to
+    /// whoever asked for the backup instead of only appearing in a log.
+    #[serde(skip_serializing_if = "is_not_configured")]
+    pub upload: crate::cloud_backup::UploadOutcome,
+}
+
+fn is_not_configured(outcome: &crate::cloud_backup::UploadOutcome) -> bool {
+    matches!(outcome, crate::cloud_backup::UploadOutcome::NotConfigured)
 }
 
 /// Microsecond precision, so two backups taken in the same second do not
@@ -171,9 +180,15 @@ pub fn create_backup(conn: &Connection, label: &str) -> Result<BackupOutcome> {
 
     let pruned = prune_old_backups(&dir, BACKUP_RETENTION_COUNT)?;
 
+    // Strictly after the local backup is finished and on disk. A refused,
+    // failed or unconfigured upload is reported alongside the backup, never
+    // instead of it — the local copy is the one that has to survive.
+    let upload = crate::cloud_backup::upload_backup(&dest_path);
+
     Ok(BackupOutcome {
         path: dest_path.to_string_lossy().to_string(),
         total_backups: list_backups(&dir)?.len(),
         pruned,
+        upload,
     })
 }

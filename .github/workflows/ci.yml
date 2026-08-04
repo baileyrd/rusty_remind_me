@@ -58,3 +58,10 @@ jobs:
 
       - name: cargo clippy --features pdf
         run: cargo clippy -p remind_me_core --features pdf --all-targets --locked -- -D warnings
+
+      # The AWS SDK is a large tree, so this is a build+clippy check rather
+      # than a second full test run — the plaintext gate that actually matters
+      # is a pure function of the environment and is covered unconditionally
+      # by the default-feature test run above.
+      - name: cargo clippy --features cloud-backup
+        run: cargo clippy -p remind_me_core --features cloud-backup --all-targets --locked -- -D warnings
