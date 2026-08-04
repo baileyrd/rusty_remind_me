@@ -2,6 +2,57 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Reminder delivery scheduler and webhook notifications (#117)
+
+### Added
+- **Reminder scheduler** (`remind_me_core::scheduler`) — a background loop that
+  delivers every due, not-yet-delivered reminder exactly once, every
+  `REMIND_ME_REMINDER_POLL_INTERVAL` seconds (default 60). Started with
+  `start_scheduler(db_path)`, stopped with a handle that joins.
+- **Webhook notification channel** (`remind_me_core::notifications`) — POSTs
+  `{"subject", "body", "source": "remind-me"}` to
+  `REMIND_ME_NOTIFY_WEBHOOK_URL`, timeout `REMIND_ME_NOTIFY_WEBHOOK_TIMEOUT`
+  (default 5s). The URL being set *is* the opt-in; there is no separate switch.
+- `sync::http` gained a default port 80 and unauthenticated POST, both
+  additive — `post_json`/`get` still send the bearer token unchanged.
+
+### Notes
+- **Exactly-once comes from `reminder_deliveries`, not from a past-timestamp
+  check.** A bare "`remind_at` is in the past" test cannot remember that it
+  already fired, leaving only two behaviours, both wrong: deliver forever, or
+  skip anything already past and lose it. The delivery table is what makes the
+  third possible — a reminder that came due while nothing was running fires
+  once on the next pass, then never again. Confirmed against the reference,
+  whose due query has no lower bound.
+- **A failed channel does not hold the reminder back.** The delivery row is
+  written whether or not a webhook accepted it, matching the reference. The log
+  line is the channel that cannot fail; retrying would re-log the same reminder
+  every 60 seconds for as long as the webhook stayed down. The issue's
+  acceptance criteria said "retried per the reference" — the reference does not
+  retry.
+- **With no channel configured a reminder is still logged and still recorded.**
+  Opt-in governs whether a *notification* is attempted, not whether the
+  reminder is handled.
+- The delivery row is written **after** the hook, so a hook that panics leaves
+  the reminder pending. `INSERT OR IGNORE` keeps the unique index as the real
+  guarantee, so racing pollers produce one delivery rather than an error that
+  strands the rest of the batch.
+- The scheduler reads the same overdue window `remind_me_list_reminders` shows,
+  so a reminder cannot sit visibly overdue while the loop considers it handled.
+
+### Known limitations
+- **The webhook is `http://` only.** This crate's HTTP client has no TLS, the
+  same choice `sync::http` and `embedder` already made. That is a sharper
+  constraint here: the endpoints people actually configure (Slack, Discord,
+  ntfy) are public HTTPS, so this channel needs a local relay in front to be
+  useful. Reaching them directly needs a TLS-capable client.
+- **No SMTP channel.** The reference gets it free from `smtplib`; Rust needs
+  `lettre` plus a TLS backend. Both this and TLS are dependency decisions left
+  for their own issue.
+- The loop carries reminders only. The reference also piggybacks scheduled
+  digests, watched-search polling, revision compaction and analytics capture on
+  the same thread — a follow-up.
+
 ## 2026-08-03 — Reminders: set, clear and list (#116)
 
 ### Added
