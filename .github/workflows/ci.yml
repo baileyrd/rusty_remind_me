@@ -65,3 +65,10 @@ jobs:
       # by the default-feature test run above.
       - name: cargo clippy --features cloud-backup
         run: cargo clippy -p remind_me_core --features cloud-backup --all-targets --locked -- -D warnings
+
+      # usearch builds a C++ library from source (~5 min), so this runs the
+      # tests rather than only clippy: the equivalence check — that narrowing
+      # never drops a row brute force would rank — is the whole reason the
+      # feature is safe to enable, and it has to actually run somewhere.
+      - name: cargo test --features ann
+        run: cargo test -p remind_me_core --features ann --locked
