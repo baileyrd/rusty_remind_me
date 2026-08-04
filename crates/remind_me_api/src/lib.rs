@@ -156,6 +156,21 @@ impl ApiServer {
             return http::write_response_cors(stream, status, body, cors);
         }
 
+        // Secret-path auth, before the header gate. A calendar app polls
+        // this URL from its provider's servers with no way to attach an
+        // Authorization header, so the credential has to be the path itself.
+        // This is the only route exempted, and it authenticates itself.
+        if request.method == "GET" {
+            if let Some(token) = request
+                .path
+                .strip_prefix("/api/reminders/")
+                .and_then(|rest| rest.strip_suffix(".ics"))
+            {
+                let (status, body) = routes::api_reminders_ics(&self.db.conn(), token);
+                return http::write_response_cors(stream, status, body, cors);
+            }
+        }
+
         if request.path.starts_with("/api/") {
             if let Some(response) = self.check_auth(&request) {
                 return http::write_response_cors(stream, response.0, response.1, cors);

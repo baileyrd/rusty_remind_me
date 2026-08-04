@@ -617,6 +617,11 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_reminders_ics_url",
+                                "description": "Return the subscribable ICS calendar feed URL for reminders. Paste it into a calendar app's \"subscribe by URL\" feature to see every upcoming and overdue-undelivered reminder as an event. WARNING: the URL embeds a secret token and whoever holds it can read every reminder's content — treat it exactly like a password. Rotate by deleting the token file.",
+                                "inputSchema": { "type": "object", "properties": {} }
+                            },
+                            {
                                 "name": "remind_me_set_reminder",
                                 "description": "Set a future reminder on an existing memory, or clear one already set. Pass an ISO-8601 timestamp for remind_at; omit it or pass null to clear. Naive timestamps are read as UTC. A timestamp already in the past is rejected rather than stored, because it could never fire.",
                                 "inputSchema": {
@@ -1502,6 +1507,27 @@ impl McpServer {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid reconcile_peer input: {}. node_id is required.", e) }] })
                             }
                         }
+                    }
+                    "remind_me_reminders_ics_url" => {
+                        // The path is always returned; the full URL only when
+                        // there is an HTTP surface to serve it from. A stdio-only
+                        // connection has none, and inventing a base would hand
+                        // back a URL that silently never resolves.
+                        let token = remind_me_core::ics::resolve_ics_token();
+                        let feed_path = remind_me_core::ics::feed_path(&token);
+                        let status = remind_me_core::pid::pid_file_path(&conn)
+                            .ok()
+                            .map(|path| remind_me_core::pid::dashboard_status(&path));
+                        let text = match status.filter(|s| s.running).and_then(|s| s.url) {
+                            Some(base) => format!("{}{}", base.trim_end_matches('/'), feed_path),
+                            None => format!(
+                                "No HTTP surface is currently active to serve the reminders \
+                                 calendar feed. Start the dashboard (`rusty-remind-me api`) and \
+                                 call this tool again for the full URL. Feed path once running: {}",
+                                feed_path
+                            ),
+                        };
+                        json!({ "content": [{ "type": "text", "text": text }] })
                     }
                     "remind_me_set_reminder" => {
                         match serde_json::from_value::<SetReminderInput>(args) {

@@ -12,6 +12,7 @@ pub mod expansion;
 pub mod export;
 pub mod fts;
 pub mod history;
+pub mod ics;
 pub mod import_paths;
 pub mod importer;
 pub mod mempalace_import;

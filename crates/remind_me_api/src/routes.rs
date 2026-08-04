@@ -13,6 +13,7 @@ use crate::http::{Body, Request};
 use remind_me_core::db::queries;
 use remind_me_core::entity::{entity_profile, list_entities, traverse_from_name};
 use remind_me_core::import_paths::{self, ImportPathError};
+use remind_me_core::webhook::constant_time_eq;
 use remind_me_core::wiki_fs::{pending_compile_count, Wiki};
 use remind_me_core::{
     self as core, export, importer, stats, vitality, BulkImportDirInput, BulkTagInput,
@@ -977,3 +978,52 @@ pub const ROUTES: &[Route] = &[
         handler: api_wiki_page,
     },
 ];
+
+// ---------------------------------------------------------------------------
+// The reminders calendar feed (issue #118)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/reminders/{token}.ics` — the subscribable iCalendar feed.
+///
+/// Deliberately outside [`ROUTES`] and outside the `Authorization` gate every
+/// other `/api/*` route sits behind. A calendar app's "subscribe by URL"
+/// feature polls this from the provider's own servers, on a schedule the user
+/// does not control, with no way to attach a custom header — so the credential
+/// has to live in the URL. That is the *only* reason for the exemption, and
+/// the token in the path is the whole credential.
+///
+/// A wrong token gets a bare 404, not a 401: a 401 would confirm that the
+/// route exists and that a token was checked, which tells a prober they have
+/// found the right shape and only need the secret. Matching the reference.
+///
+/// Compared with [`constant_time_eq`] rather than `==`. The token is long and
+/// guessed a byte at a time by a timing oracle otherwise — the same reason
+/// this crate already compares the API key that way.
+pub fn api_reminders_ics(conn: &Connection, token: &str) -> (u16, Body) {
+    let expected = remind_me_core::ics::resolve_ics_token();
+    if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+        // Never log the supplied token: a rejected value is still a secret
+        // somebody typed, and logs are the one place secrets outlive rotation.
+        return (404, Body::Json(json!({ "error": "Not Found" })));
+    }
+
+    // Exactly the `all` window `remind_me_list_reminders` returns — upcoming
+    // plus overdue-and-undelivered — by calling the same function rather than
+    // repeating its SQL, so the feed and the tool cannot disagree about what
+    // is on the calendar. Uncapped: a subscriber wants every reminder, not the
+    // first page of them.
+    match remind_me_core::reminders::list_reminders(
+        conn,
+        remind_me_core::models::ReminderWindow::All,
+        i64::MAX,
+    ) {
+        Ok(reminders) => (
+            200,
+            Body::Raw {
+                content_type: "text/calendar",
+                payload: remind_me_core::ics::build_ics_now(&reminders),
+            },
+        ),
+        Err(e) => internal_err(e),
+    }
+}
