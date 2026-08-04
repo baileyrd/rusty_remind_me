@@ -51,6 +51,19 @@ struct ParsedImport {
     raw_entries: usize,
     source: &'static str,
     category: String,
+    /// Per-chunk extras, positionally aligned with `chunks`. Empty for every
+    /// kind but Obsidian, which is the only one that attaches tags and entity
+    /// mentions the caller did not supply.
+    extras: Vec<ChunkExtras>,
+    /// Note-level frontmatter, merged into every chunk's metadata.
+    frontmatter: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What an Obsidian note contributes to a chunk beyond its text.
+#[derive(Debug, Clone, Default)]
+struct ChunkExtras {
+    extra_tags: Vec<String>,
+    mention_entities: Vec<String>,
 }
 
 /// Short content fingerprint used for dedup.
@@ -699,13 +712,44 @@ pub fn import_content(
         raw_entries,
         source,
         category,
+        extras,
+        frontmatter,
     } = match effective {
+        ImportKind::Obsidian => {
+            let (notes, frontmatter) = crate::obsidian_import::parse_note(raw, max_length);
+            let raw_entries = notes.len();
+            let mut chunks = Vec::with_capacity(notes.len());
+            let mut extras = Vec::with_capacity(notes.len());
+            for note in notes {
+                chunks.push((note.content, note.section));
+                extras.push(ChunkExtras {
+                    extra_tags: note.extra_tags,
+                    mention_entities: note.mention_entities,
+                });
+            }
+            ParsedImport {
+                chunks,
+                raw_entries,
+                extras,
+                frontmatter,
+                source: crate::obsidian_import::OBSIDIAN_SOURCE,
+                // Same rule as a document: the chat-shaped default gets
+                // replaced, an explicit category is respected.
+                category: if category.is_empty() || category == CHAT_SOURCE {
+                    crate::obsidian_import::OBSIDIAN_CATEGORY.to_string()
+                } else {
+                    category.to_string()
+                },
+            }
+        }
         ImportKind::Document => {
             let chunks = parse_document(raw, suffix, max_length);
             let raw_entries = chunks.len();
             ParsedImport {
                 chunks,
                 raw_entries,
+                extras: Vec::new(),
+                frontmatter: serde_json::Map::new(),
                 source: DOCUMENT_SOURCE,
                 // A document left under the chat-shaped default category gets
                 // the document one instead; an explicit category is respected.
@@ -721,6 +765,8 @@ pub fn import_content(
             ParsedImport {
                 chunks: contents.into_iter().map(|c| (c, None)).collect(),
                 raw_entries,
+                extras: Vec::new(),
+                frontmatter: serde_json::Map::new(),
                 source: CHAT_SOURCE,
                 category: category.to_string(),
             }
@@ -740,6 +786,27 @@ pub fn import_content(
         if let Some(section) = section {
             metadata["section"] = serde_json::json!(section);
         }
+        if !frontmatter.is_empty() {
+            metadata["obsidian_frontmatter"] = serde_json::Value::Object(frontmatter.clone());
+        }
+
+        // A connector's tags are merged with the caller's rather than
+        // replacing them: the caller asked for these memories to be tagged a
+        // certain way, and the note's own tags are additional information, not
+        // a correction. Deduplicated case-insensitively so `#Project` from the
+        // note and `project` from the caller do not both land.
+        let chunk_extras = extras.get(chunk_index);
+        let chunk_tags_json = match chunk_extras {
+            Some(e) if !e.extra_tags.is_empty() => {
+                let merged = crate::obsidian_import::dedupe_ci(
+                    tags.iter().cloned().chain(e.extra_tags.iter().cloned()),
+                );
+                serde_json::to_string(&merged).unwrap_or_else(|_| tags_json.clone())
+            }
+            _ => tags_json.clone(),
+        };
+
+        let memory_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
 
         // `doc_id`/`chunk_index` group every chunk of this file in source
         // order, which is what lets neighbour expansion find a hit's siblings
@@ -750,10 +817,10 @@ pub fn import_content(
                  doc_id, chunk_index)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
-                format!("mem_{}", uuid::Uuid::new_v4().simple()),
+                memory_id,
                 content,
                 category,
-                tags_json,
+                chunk_tags_json,
                 source,
                 metadata.to_string(),
                 now,
@@ -763,6 +830,25 @@ pub fn import_content(
             ],
         )?;
         created += 1;
+
+        // Each wikilink in this chunk becomes an entity the memory mentions,
+        // which is what makes the vault's own link graph traversable. Entity
+        // upsert creates the entity when it does not exist, so a link to a
+        // note that has not been imported yet needs no special handling — it
+        // resolves exactly like any other.
+        if let Some(mentions) = chunk_extras.map(|e| &e.mention_entities) {
+            for title in mentions {
+                let entity = upsert_entity(
+                    conn,
+                    &EntityInput {
+                        name: title.clone(),
+                        kind: None,
+                        aliases: Vec::new(),
+                    },
+                )?;
+                crate::entity::link_memory_entity(conn, &memory_id, &entity.id)?;
+            }
+        }
     }
 
     let mut stats = if graph_records.is_empty() {
@@ -818,6 +904,15 @@ pub fn validate_kind_and_suffix(
         return Some(ImportOutcome::Failed {
             file: filename.to_string(),
             reason: format!("unsupported format: .{}", suffix),
+        });
+    }
+    if kind == ImportKind::Obsidian && !matches!(suffix, "md" | "markdown") {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!(
+                "obsidian import does not support .{}: a vault note is Markdown",
+                suffix
+            ),
         });
     }
     if kind == ImportKind::Document && !DOCUMENT_SUFFIXES.contains(&suffix) {

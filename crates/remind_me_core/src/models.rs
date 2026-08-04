@@ -817,6 +817,10 @@ pub enum ImportKind {
     Chat,
     /// Per-section or per-paragraph chunking. `.md`/`.markdown`/`.txt` only.
     Document,
+    /// An Obsidian note: document chunking plus frontmatter, `[[wikilink]]`
+    /// and inline `#tag` extraction. Markdown only — the conventions are
+    /// Markdown conventions.
+    Obsidian,
 }
 
 /// Message extraction strategies a chat import accepts.
