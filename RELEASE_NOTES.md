@@ -2,6 +2,44 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Readwise highlight import (#150)
+
+### Added
+- **`readwise` import kind** — turns a saved Readwise export into one memory
+  per highlight. Accepts both the documented `{"count", "nextPageCursor",
+  "results"}` object and a bare top-level array of the same entries.
+- Both new import kinds are now advertised in the tool schema's `kind` enum
+  (`auto`, `chat`, `document`, `obsidian`, `readwise`), with a test asserting
+  every advertised string actually deserializes — the advertised-but-
+  unreachable failure the tool cross-check exists to catch.
+
+### Notes
+- **This is a file import, not an API client.** My issue described an endpoint,
+  auth header, pagination and `updated__gt`; the reference makes **no live call
+  against Readwise at all**. The user exports once and hands over the file,
+  which keeps an access token out of this crate entirely. Corrected on the
+  issue before implementing.
+- **One memory per highlight, not per book.** A highlight is Readwise's own
+  atomic unit of meaning. Grouped, every search hit for one highlight would
+  compete for ranking and embedding budget against every other highlight in the
+  same book — diluting exactly the retrieval precision the store exists for.
+  The book is not lost, only demoted: title, author, category, source URL and
+  id ride as metadata on every highlight it produced.
+- **A note is appended to content**, as `"{text}\n\nNote: {note}"`, never
+  metadata-only. It is often *why* the highlight was made, and FTS indexes
+  `content`, not `metadata`.
+- **Deliberately excluded from `auto`.** A Readwise export and a chat export
+  are both an unadorned `.json`. Sniffing for a `highlights` key would misroute
+  a chat export that merely discusses Readwise — silently corrupting working
+  chat-import behaviour, which is strictly worse than requiring one keyword.
+- **Malformed parts are skipped; a malformed whole is refused.** A bad entry or
+  highlight is dropped, matching the tolerance the chat connector shows a bad
+  JSONL line. A file that is not a Readwise export fails the import outright
+  rather than succeeding with zero memories — the silent-success mode #147
+  fixed.
+- Metadata is sparse: only keys actually present, so a reader can tell
+  "Readwise did not have this" from "this is empty".
+
 ## 2026-08-04 — Obsidian vault import (#149)
 
 ### Added

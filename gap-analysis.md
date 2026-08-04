@@ -215,7 +215,23 @@ the reference exposes, plus the target-only `remind_me_wiki_import`.
 #121 (E2) as PR #146.
 #122 (E3) as PR #147.
 
-**All 23 issues are worked. The gap list is empty.**
+**All 23 issues are worked. Parity on the declared surface is closed** — MCP
+tools 61/61 (plus the target-only `remind_me_wiki_import`), HTTP routes 25/25,
+peer routes 7/7, schema at v27.
+
+**Wave 8 is now in progress**, after the deferrals below were lifted by
+explicit user decision: all three groups — I4, the dependency-needing
+importers, and E4–E8 — were authorised.
+
+Re-fetching the reference past its pinned `935eb98` first turned up two defects
+this port shared, filed as #147/#148 and merged as PR #157. Neither was in the
+gap table below, because neither existed when it was written — **re-checking
+the pin is now part of closing the loop, not just opening it.** (Note that
+those issue numbers collide with the PR numbers cited just above for #121/#122;
+the entries above name PRs, these name issues.)
+
+Then #149 (I4, Obsidian) as PR #158, and #150 (I5, Readwise). Remaining:
+#151 (E4), #152 (E5), #153 (I1), #154 (E6), #155 (E8), #156 (I2/I3).
 
 *Correction:* the #118 entry claimed 61 of 61 tools. That counted the
 target-only `remind_me_wiki_import` toward the reference's 61; the real figure

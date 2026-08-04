@@ -24,6 +24,7 @@ pub mod notifications;
 pub mod obsidian_import;
 pub mod pid;
 pub mod rate_limit;
+pub mod readwise_import;
 pub mod recalibrate;
 pub mod reminders;
 pub mod remote;

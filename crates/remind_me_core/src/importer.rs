@@ -64,6 +64,8 @@ struct ParsedImport {
 struct ChunkExtras {
     extra_tags: Vec<String>,
     mention_entities: Vec<String>,
+    /// Connector-supplied metadata merged into the chunk's own.
+    metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Short content fingerprint used for dedup.
@@ -694,6 +696,9 @@ pub fn import_content(
     // `.json`/`.jsonl` are always chat exports; markdown and text are sniffed
     // in auto mode, so chat-shaped markdown keeps importing as chat.
     let effective = match (suffix, kind) {
+        // An explicit Readwise request wins over the "json is always chat"
+        // rule; `Auto` never reaches it, which is the whole point.
+        (_, ImportKind::Readwise) => ImportKind::Readwise,
         ("json" | "jsonl", _) => ImportKind::Chat,
         (_, ImportKind::Auto) => {
             if looks_like_chat_markdown(raw) {
@@ -715,6 +720,43 @@ pub fn import_content(
         extras,
         frontmatter,
     } = match effective {
+        ImportKind::Readwise => {
+            let (highlights, raw_entries) =
+                match crate::readwise_import::parse_export(raw, max_length) {
+                    Ok(parsed) => parsed,
+                    // A file that is not a Readwise export at all is refused
+                    // outright rather than imported as zero memories — the
+                    // silent-success failure mode #147 fixed elsewhere.
+                    Err(reason) => {
+                        return Ok(ImportOutcome::Failed {
+                            file: filename.to_string(),
+                            reason,
+                        })
+                    }
+                };
+            let mut chunks = Vec::with_capacity(highlights.len());
+            let mut extras = Vec::with_capacity(highlights.len());
+            for highlight in highlights {
+                chunks.push((highlight.content, None));
+                extras.push(ChunkExtras {
+                    extra_tags: Vec::new(),
+                    mention_entities: Vec::new(),
+                    metadata: highlight.metadata,
+                });
+            }
+            ParsedImport {
+                chunks,
+                raw_entries,
+                extras,
+                frontmatter: serde_json::Map::new(),
+                source: crate::readwise_import::READWISE_SOURCE,
+                category: if category.is_empty() || category == CHAT_SOURCE {
+                    crate::readwise_import::READWISE_CATEGORY.to_string()
+                } else {
+                    category.to_string()
+                },
+            }
+        }
         ImportKind::Obsidian => {
             let (notes, frontmatter) = crate::obsidian_import::parse_note(raw, max_length);
             let raw_entries = notes.len();
@@ -725,6 +767,7 @@ pub fn import_content(
                 extras.push(ChunkExtras {
                     extra_tags: note.extra_tags,
                     mention_entities: note.mention_entities,
+                    metadata: serde_json::Map::new(),
                 });
             }
             ParsedImport {
@@ -788,6 +831,11 @@ pub fn import_content(
         }
         if !frontmatter.is_empty() {
             metadata["obsidian_frontmatter"] = serde_json::Value::Object(frontmatter.clone());
+        }
+        if let Some(extra) = extras.get(chunk_index) {
+            for (key, value) in &extra.metadata {
+                metadata[key] = value.clone();
+            }
         }
 
         // A connector's tags are merged with the caller's rather than
@@ -904,6 +952,15 @@ pub fn validate_kind_and_suffix(
         return Some(ImportOutcome::Failed {
             file: filename.to_string(),
             reason: format!("unsupported format: .{}", suffix),
+        });
+    }
+    if kind == ImportKind::Readwise && suffix != "json" {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!(
+                "readwise import does not support .{}: a Readwise export is .json",
+                suffix
+            ),
         });
     }
     if kind == ImportKind::Obsidian && !matches!(suffix, "md" | "markdown") {
