@@ -113,25 +113,46 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// Flatten a message `content` field to plain text.
+///
+/// A content field is either a bare string or a list of blocks. Text blocks
+/// contribute their text; `tool_use`, `tool_result`, `thinking` and image
+/// blocks contribute nothing — they are machine chatter rather than
+/// conversation, and storing them would bury recallable facts under transcript
+/// noise.
+///
+/// A block with **no `type` at all but a `text` key** is kept: older exports
+/// omit the discriminator, and dropping those would silently lose real
+/// conversation to a format detail.
+///
+/// Empty parts are filtered before joining, so a message that is half tool
+/// calls does not arrive padded with blank lines.
 fn text_of(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::String(s) => s.clone(),
-        // Claude exports carry content as a list of `{type, text}` blocks.
+        serde_json::Value::String(s) => s.trim().to_string(),
         serde_json::Value::Array(blocks) => blocks
             .iter()
-            .map(|b| match b {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Object(o) => o
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                other => other.to_string(),
+            .filter_map(|b| match b {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Object(o) => {
+                    let kind = o.get("type").and_then(|t| t.as_str());
+                    let keep = kind == Some("text") || (kind.is_none() && o.contains_key("text"));
+                    keep.then(|| {
+                        o.get("text")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                }
+                _ => None,
             })
+            .filter(|p| !p.is_empty())
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            .trim()
+            .to_string(),
         serde_json::Value::Null => String::new(),
-        other => other.to_string(),
+        other => other.to_string().trim().to_string(),
     }
 }
 
@@ -147,8 +168,9 @@ fn push_message(out: &mut Vec<ChatMessage>, role: &str, content: String) {
 /// Pull messages out of whatever JSON shape the export uses.
 ///
 /// Handles a bare `{role, content}`, a list of them, a `{messages: [...]}`
-/// wrapper, Claude's `chat_messages` with block content, and a list of
-/// conversations containing either.
+/// wrapper, Claude's `chat_messages` with block content, Claude Code session
+/// transcripts (one `{"type": …, "message": {…}}` envelope per JSONL line),
+/// and a list of conversations containing either.
 ///
 /// Records carrying a `record_type` are **entity-graph records from an
 /// export**, not messages, and are skipped here — they are restored
@@ -175,6 +197,35 @@ pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
                 push_message(&mut messages, role, content);
             }
             return messages;
+        }
+        // Claude Code session transcript: one envelope per JSONL line, with
+        // the real message under `message`. Without this branch the envelope
+        // matches nothing below and the whole transcript imports as zero
+        // memories — recorded as a success, so the only symptom is a count of
+        // 0 that looks exactly like an empty file.
+        //
+        // Placed after `chat_messages` and before the bare `{role, content}`
+        // branch, and guarded on the inner object actually carrying a role, so
+        // any other shape that happens to have a `message` key still falls
+        // through unchanged.
+        if let Some(inner) = object.get("message").and_then(|m| m.as_object()) {
+            if inner.contains_key("role") || inner.contains_key("sender") {
+                let role = inner
+                    .get("role")
+                    .or_else(|| inner.get("sender"))
+                    .and_then(|v| v.as_str())
+                    // The envelope's own `type` names the speaker when the
+                    // inner message omits the role.
+                    .or_else(|| object.get("type").and_then(|v| v.as_str()))
+                    .unwrap_or("unknown");
+                let content = inner
+                    .get("content")
+                    .or_else(|| inner.get("text"))
+                    .map(text_of)
+                    .unwrap_or_default();
+                push_message(&mut messages, role, content);
+                return messages;
+            }
         }
         if let Some(inner) = object.get("messages") {
             return extract_messages(inner);

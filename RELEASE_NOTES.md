@@ -2,6 +2,45 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Two defects found by reference movement (#147, #148)
+
+Both come from `remind_me` commits landed past the pinned `935eb98`, and both
+were present here as well.
+
+### Fixed
+- **Importing a Claude Code `.jsonl` session transcript created zero
+  memories** (#147). Claude Code wraps each line in an envelope
+  (`{"type": …, "message": {"role": …, "content": […]}}`), which matched none
+  of `extract_messages`' branches, so extraction returned nothing. The import
+  was still recorded as a **success** with zero memories created — nothing
+  errored and nothing warned, so a whole session import looked exactly like
+  importing an empty file.
+- **Content blocks were flattened type-blind.** `text_of` took `block["text"]`
+  from every object block regardless of `type`, so a `tool_use` block carrying
+  a `text` field inside its input was imported as conversation, and blocks
+  without a `text` key contributed blank lines. Now only `text` blocks are
+  kept — plus blocks with **no `type` but a `text` key**, which older exports
+  produce and which would otherwise be silently dropped.
+- **`remind_me_server_status` kept reporting a sync error after sync had
+  recovered** (#148). `SyncWorkerStatus.last_error` is one process's memory
+  while the `sync_log` watermarks are shared, and the normal deployment runs
+  one MCP server process per connected client against the same database. A
+  process that failed while the hub was unreachable reported that error
+  indefinitely, even as the same report showed the watermarks advancing.
+
+### Notes
+- The error is now compared against the watermarks, which only ever advance on
+  success. A superseded error moves to `superseded_error` rather than being
+  discarded — the evidence of what happened is worth keeping, the same reason
+  `sync_repair` resets only the cursors.
+- **Every** remote must have succeeded since the failed cycle, not just one.
+  The error is cycle-level, so the remote that produced it is not identifiable
+  from the message; requiring all of them is the only reading that cannot
+  quietly declare a still-stuck remote healthy.
+- Reporting fails **closed** in every ambiguous case — unparseable timestamp,
+  missing timestamp, no remotes, or a remote still at the epoch default.
+  Failing open would hide a real outage behind a formatting problem.
+
 ## 2026-08-04 — Tool profiles (#122)
 
 ### Added

@@ -1401,7 +1401,12 @@ impl McpServer {
                             report["sync"] = serde_json::to_value(
                                 self.sync_worker
                                     .as_ref()
-                                    .map(|w| w.status())
+                                    // `status_against` rather than `status`:
+                                    // a failure this process saw may already
+                                    // have been retried successfully by a
+                                    // sibling process sharing this database,
+                                    // and only the shared watermarks can say.
+                                    .map(|w| w.status_against(&conn))
                                     .unwrap_or_else(
                                         remind_me_core::sync::sync_worker_disabled_status,
                                     ),

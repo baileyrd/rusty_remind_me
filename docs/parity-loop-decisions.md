@@ -705,6 +705,46 @@ a consistency check that only compares the two tiers against each other.
 
 ---
 
+## #147, #148 — defects found by re-checking the reference
+
+**The gap analysis pinned the reference at `935eb98`, and the reference moved.**
+Re-fetching before declaring parity turned up five commits, two of which were
+real fixes to defects this port shares. Neither was in any filed issue, because
+neither existed when the analysis ran. Re-checking the pin is now part of
+closing the loop, not part of opening it.
+
+**#147 — the envelope branch is guarded narrowly on purpose.** It fires only
+when `chat_messages` is absent, `message` is an object, and that object carries
+`role`/`sender`. A broader test would capture any export that happens to use a
+`message` field for something else and change its behaviour silently. There is
+a test for exactly that shape falling through unchanged.
+
+**Block filtering keeps typeless blocks that carry `text`.** Two opposite
+mistakes are possible here and both are silent: importing `tool_use` payloads
+as conversation, and dropping real conversation from older exports that omit
+the `type` discriminator. Keeping `type == "text"` *or* (no type and a `text`
+key) is the rule that avoids both.
+
+**#148 — a superseded error is demoted, not deleted.** It moves to
+`superseded_error` rather than being cleared, for the same reason `sync_repair`
+resets only the cursors and leaves the contact timestamps: the record of what
+actually happened is what you read when deciding whether to act, and destroying
+it to make a status line green is the wrong trade.
+
+**Supersession requires *every* remote to have moved.** rusty's `last_error` is
+cycle-level — the first failure across all remotes — so the remote that
+produced it cannot be identified from the message. The reference compares
+per-remote because its status is per-remote. Requiring all of them here is the
+conservative translation: it can leave a stale error reported, but it cannot
+declare a still-stuck remote healthy.
+
+**The check fails closed in every ambiguous case** — unparseable timestamp,
+missing timestamp, empty `sync_log`, or a remote still at the epoch default.
+"Never succeeded" is not "succeeded a long time ago", and failing open would
+hide a real outage behind a formatting problem.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**
