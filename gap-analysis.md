@@ -213,7 +213,9 @@ as PR #135, #111 (T5) as PR #136, #112 (A1) as PR #137.
 routes reach **25 of 25** and tool coverage reaches **61 of 61** — every tool
 the reference exposes, plus the target-only `remind_me_wiki_import`.
 #121 (E2) as PR #146.
-Remaining: #122 (tool profiles).
+#122 (E3) as PR #147.
+
+**All 23 issues are worked. The gap list is empty.**
 
 *Correction:* the #118 entry claimed 61 of 61 tools. That counted the
 target-only `remind_me_wiki_import` toward the reference's 61; the real figure

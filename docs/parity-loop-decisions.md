@@ -662,6 +662,49 @@ The boundary is pinned in both directions.
 
 ---
 
+## #122 — tool profiles
+
+**Tier membership is copied from the reference exactly**, including
+`remind_me_server_status` sitting in `CORE` despite otherwise being an ops
+tool. It is what reports which profile is active, and a profile you cannot
+diagnose from inside a session is a trap.
+
+**An unlisted tool defaults to the most restricted tier.** Anything outside
+`CORE` and `MAINTENANCE` is treated as admin/ops, so a tool added later starts
+hidden under a narrowed profile rather than smuggling itself onto a surface
+someone deliberately trimmed. The default matters more than any individual
+assignment, because the list will keep growing.
+
+**An unknown profile falls back to `full`, not to an error and not to empty.**
+Refusing to start over a misspelled optimisation would be worse than the
+misspelling, and an empty surface would look like a broken server.
+
+**Hidden means gone**: absent from `tools/list` *and* refused on `tools/call`.
+Merely undocumented would be worse than having no profiles — a model that
+guessed the name would still reach it, and the caller would never learn their
+trimmed surface was porous. The refusal also names the way out, so someone who
+trimmed too far is not left guessing why a documented tool vanished.
+
+**Pruning happens once, after the whole surface is declared**, rather than by
+guarding each entry. Per-entry guards would put the tier decision in 62 places
+and let the next tool forget it.
+
+**Prompt pruning is wired although it is a no-op today.** This crate offers no
+maintenance prompts yet, so nothing is currently hidden by it — but a prompt
+added later is hidden with the tier it drives, rather than sequencing the model
+into calls that will be refused.
+
+**Two tests exist because of a mistake made writing them.** The first version
+of the hiding test named `remind_me_import`, which this crate does not
+advertise — it advertises `remind_me_import_chat`. The test passed anyway,
+because anything unlisted is hidden by default, so it was asserting nothing.
+There is now a check that every tiered name *and* every ops name the tests
+sample is actually advertised. A tier or a test naming a tool that does not
+exist is invisible otherwise: not to the table, not to the server, and not to
+a consistency check that only compares the two tiers against each other.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

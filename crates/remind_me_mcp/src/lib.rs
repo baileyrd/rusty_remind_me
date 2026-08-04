@@ -312,7 +312,7 @@ impl McpServer {
             }
             "tools/list" => {
                 let req_id = id.unwrap_or(json!(1));
-                Some(json!({
+                let mut listed = json!({
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
@@ -995,7 +995,20 @@ impl McpServer {
                             }
                         ]
                     }
-                }))
+                });
+                // Pruned once, here, after the whole surface is declared —
+                // rather than by guarding each entry, which would put the
+                // tier decision in 62 places and let the next tool forget it.
+                let profile = remind_me_core::tool_profiles::configured_profile();
+                if let Some(tools) = listed["result"]["tools"].as_array_mut() {
+                    tools.retain(|tool| {
+                        tool.get("name")
+                            .and_then(Value::as_str)
+                            .map(|name| remind_me_core::tool_profiles::tool_allowed(&profile, name))
+                            .unwrap_or(true)
+                    });
+                }
+                Some(listed)
             }
             "resources/list" => {
                 let req_id = id.unwrap_or(json!(1));
@@ -1039,7 +1052,7 @@ impl McpServer {
             }
             "prompts/list" => {
                 let req_id = id.unwrap_or(json!(1));
-                Some(json!({
+                let mut listed = json!({
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
@@ -1053,7 +1066,24 @@ impl McpServer {
                             }
                         ]
                     }
-                }))
+                });
+                // A no-op today — this crate offers no maintenance prompts yet
+                // — but wired now so one added later is hidden with the tier
+                // it drives. A prompt sequencing invisible tools walks the
+                // model into calls that will be refused.
+                let profile = remind_me_core::tool_profiles::configured_profile();
+                if let Some(prompts) = listed["result"]["prompts"].as_array_mut() {
+                    prompts.retain(|prompt| {
+                        prompt
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(|name| {
+                                remind_me_core::tool_profiles::prompt_allowed(&profile, name)
+                            })
+                            .unwrap_or(true)
+                    });
+                }
+                Some(listed)
             }
             "tools/call" => {
                 let req_id = id.unwrap_or(json!(1));
@@ -1061,6 +1091,30 @@ impl McpServer {
                 let tool_name = params.get("name")?.as_str()?;
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 let conn = self.db.conn();
+                // Hidden means gone, not merely undocumented: a model that
+                // guessed the name would otherwise still reach it, and a
+                // caller who trimmed their surface would never know it was
+                // porous.
+                let profile = remind_me_core::tool_profiles::configured_profile();
+                if !remind_me_core::tool_profiles::tool_allowed(&profile, tool_name) {
+                    return Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "isError": true,
+                            "content": [{
+                                "type": "text",
+                                "text": format!(
+                                    "Tool '{}' is not available under the '{}' tool profile. \
+                                     Set {}=full to expose the whole surface.",
+                                    tool_name,
+                                    profile,
+                                    remind_me_core::tool_profiles::TOOL_PROFILE_ENV
+                                )
+                            }]
+                        }
+                    }));
+                }
                 let mut span = remind_me_core::telemetry::maybe_span(&format!("tool.{tool_name}"));
                 // Started unconditionally: `record_tool_call` decides for
                 // itself whether metrics are on, the same way `maybe_span`

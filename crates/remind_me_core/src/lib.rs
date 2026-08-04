@@ -33,6 +33,7 @@ pub mod stats;
 pub mod status;
 pub mod sync;
 pub mod telemetry;
+pub mod tool_profiles;
 pub mod undo_import;
 pub mod updater;
 pub mod vectors;

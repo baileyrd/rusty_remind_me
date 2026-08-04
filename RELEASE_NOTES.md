@@ -2,6 +2,30 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Tool profiles (#122)
+
+### Added
+- **`REMIND_ME_TOOL_PROFILE`** — `full` (default), `standard`, or `core`,
+  narrowing which tools the MCP server advertises.
+- `full` changes nothing, so upgrading is a no-op for existing installs.
+  `standard` drops the admin/ops tier. `core` keeps only the conversational
+  surface and hides the maintenance prompts with it.
+
+### Notes
+- **This buys context, nothing else.** It is not a fix for tool-selection
+  accuracy: the tools that genuinely compete — `search`, `list`, `get`,
+  `entity`, all of which read as "find things" — are every one of them in
+  `core`, so no profile separates them.
+- **Hidden means gone**: absent from `tools/list` *and* refused on
+  `tools/call`, with the refusal naming the env var that restores it.
+- **An unlisted tool defaults to admin/ops**, so a tool added later starts
+  hidden under a narrowed profile rather than smuggling itself onto a trimmed
+  surface.
+- An unknown profile falls back to `full` — refusing to start over a
+  misspelled optimisation would be worse than the misspelling.
+- `remind_me_server_status` stays visible in every profile: it is what reports
+  which profile is active.
+
 ## 2026-08-04 — Rate limiting on the webhook and remote MCP endpoints (#121)
 
 ### Added
