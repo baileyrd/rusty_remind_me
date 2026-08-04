@@ -557,6 +557,59 @@ glyph.
 
 ---
 
+## #120 — named, scope-limited API keys
+
+**Unknown scopes fail closed.** A scope this build does not recognise — hand
+edited, or written by a future version — is treated as read-only rather than
+read-write. The alternative grants write access on a typo, which is exactly
+the failure the issue warns about: a key handed out on the understanding that
+it is safe.
+
+**A corrupt or unreadable store authorises nothing.** It is reported and
+treated as empty, so a damaged file locks the door rather than opening it.
+
+**The store is re-read on every request rather than cached.** A cached store
+keeps honouring a key revoked seconds ago in another terminal, and "revocation
+that takes effect at the next restart" is not revocation.
+
+**Permissions are tightened before the rename, not after.** Between a
+world-readable create and a later chmod there is a window in which every hash
+is readable by any local account.
+
+**401 and 403 are kept distinct.** 401 means "I do not know this credential";
+403 means "I know it and it is not allowed to do that". Collapsing them sends
+a read-key holder hunting for an auth problem they do not have. The reference
+draws the same line.
+
+**The flat `REMIND_ME_API_KEY` stays implicitly read-write.** It was
+unscoped-and-full-access before this feature existed, so scoping it now would
+silently break a deployment that already depends on it. It is also reserved by
+name and not revocable through the store, because it is config-managed and was
+never stored there.
+
+**Scope enforcement is tested route by route, not on one representative.** The
+failure mode is a single mutating handler reachable by a path the gate does
+not cover, and a spot check sails straight past it.
+
+**`verify` checks every key even after a match**, so the work does not depend
+on a key's position in the file. Comparison is over fixed-length hex digests
+via `constant_time_eq`.
+
+---
+
+## Correction: the tool-count claim at #118
+
+The #118 release note and PR said tool coverage reached "61 of 61 — full
+parity". That was wrong: it counted the target-only `remind_me_wiki_import`
+toward the reference's 61. The real figure was **60 of 61**, with
+`remind_me_api_key` outstanding — which is what #120 adds. Verified by diffing
+the two tool-name sets rather than comparing totals, which is what should have
+been done the first time; comparing counts cannot notice that one set has an
+extra member and is missing a different one. Corrected in `RELEASE_NOTES.md`
+and `gap-analysis.md` rather than quietly restated.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

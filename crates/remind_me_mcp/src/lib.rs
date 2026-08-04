@@ -617,6 +617,18 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_api_key",
+                                "description": "Issue, list, or revoke named dashboard API keys with a read or read-write scope. A read-scoped key is refused on every mutating HTTP route. The plaintext key is shown exactly once, at issuance — only its hash is stored, so it can be revoked and replaced but never recovered. Not multi-tenancy: every key reads and writes the same vault, only the permitted methods differ.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "action": { "type": "string", "enum": ["issue", "list", "revoke"], "default": "list" },
+                                        "name": { "type": "string", "description": "Key name; required for issue and revoke" },
+                                        "scope": { "type": "string", "enum": ["read", "read-write"], "default": "read", "description": "issue only" }
+                                    }
+                                }
+                            },
+                            {
                                 "name": "remind_me_reminders_ics_url",
                                 "description": "Return the subscribable ICS calendar feed URL for reminders. Paste it into a calendar app's \"subscribe by URL\" feature to see every upcoming and overdue-undelivered reminder as an event. WARNING: the URL embeds a secret token and whoever holds it can read every reminder's content — treat it exactly like a password. Rotate by deleting the token file.",
                                 "inputSchema": { "type": "object", "properties": {} }
@@ -1509,6 +1521,62 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid reconcile_peer input: {}. node_id is required.", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_api_key" => {
+                        use remind_me_core::api_keys;
+                        let action = args
+                            .get("action")
+                            .and_then(Value::as_str)
+                            .unwrap_or("list")
+                            .to_string();
+                        let name = args
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        match action.as_str() {
+                            "list" => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&api_keys::list_keys()).unwrap() }] })
+                            }
+                            "issue" => {
+                                let scope = args
+                                    .get("scope")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(api_keys::SCOPE_READ);
+                                match api_keys::create_key(&name, scope) {
+                                    // The only time the plaintext exists in
+                                    // readable form anywhere. Said plainly,
+                                    // because a caller who does not copy it
+                                    // now cannot recover it later.
+                                    Ok(plaintext) => {
+                                        json!({ "content": [{ "type": "text", "text": format!(
+                                        "Issued API key '{}' (scope={}).\n\n{}\n\nThis is the only time this key is shown — only its hash is stored. Copy it now; if lost, revoke it and issue another.",
+                                        name, scope, plaintext
+                                    ) }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Could not issue key: {}", e) }] })
+                                    }
+                                }
+                            }
+                            "revoke" => match api_keys::revoke_key(&name) {
+                                Ok(true) => {
+                                    json!({ "content": [{ "type": "text", "text": format!("Revoked API key '{}'.", name) }] })
+                                }
+                                // Distinct from success: reporting a revoke
+                                // that did nothing would leave the caller
+                                // believing a key they cannot see is gone.
+                                Ok(false) => {
+                                    json!({ "content": [{ "type": "text", "text": format!("No API key named '{}'. Nothing was revoked.", name) }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Could not revoke key: {}", e) }] })
+                                }
+                            },
+                            other => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Unknown action '{}'; expected issue, list, or revoke.", other) }] })
                             }
                         }
                     }
