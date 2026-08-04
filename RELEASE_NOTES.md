@@ -2,6 +2,45 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — Reminders calendar feed (#118)
+
+### Added
+- **`GET /api/reminders/{token}.ics`** — a subscribable RFC 5545 calendar feed
+  carrying the same `all` window `remind_me_list_reminders` returns.
+- **`remind_me_reminders_ics_url`** — hands back the subscribe URL, or the feed
+  path plus how to start the dashboard when there is no HTTP surface yet.
+- `remind_me_core::ics` — dependency-free ICS generation with RFC 5545 line
+  folding (§3.1) and TEXT escaping (§3.3.11), plus the feed token's
+  resolution, `0600` persistence, and rotation.
+
+### Notes
+- **The token in the path is the whole credential.** The route is exempt from
+  the `Authorization` gate every other `/api/*` route sits behind, because a
+  calendar app polls this URL from its provider's servers with no way to
+  attach a header. Nothing else is exempt, and the near-misses are tested.
+- A wrong token gets a **bare 404**, not a 401 — a 401 confirms the route
+  exists and a token was checked. Compared with `constant_time_eq`. Never
+  logged.
+- **No "disabled" opt-out**, unlike the API key: the token *is* the path, so
+  falling open would publish every reminder. An unwritable token file yields
+  an ephemeral per-process token rather than none.
+- **UIDs are deterministic** (`{memory_id}-{remind_at}@remind-me`). A
+  subscribing calendar re-fetches on its own schedule, and a random UID would
+  create a duplicate event on every poll. Rescheduling mints a new UID,
+  because that is a different occurrence.
+- Folding splits on UTF-8 character boundaries, so non-ASCII reminders survive
+  the round trip. Escaping matters more than it looks: an unescaped comma
+  corrupts every VEVENT *after* the one containing it.
+- **Tool coverage: 60 → 61 of 61.** HTTP routes 22 → 23 of 25.
+
+### Known limitations
+- **Rotation, not revocation** — matching the reference. Deleting the token
+  file mints a fresh token and invalidates every existing subscription at
+  once; there is no way to revoke one calendar's access alone.
+- **No all-day events.** The reference emits only timed `DTSTART` values in
+  UTC and `remind_at` is a timestamp, so an all-day reminder is not
+  representable upstream either.
+
 ## 2026-08-04 — Reminder delivery scheduler and webhook notifications (#117)
 
 ### Added

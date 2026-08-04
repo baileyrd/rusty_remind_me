@@ -207,8 +207,9 @@ as PR #135, #111 (T5) as PR #136, #112 (A1) as PR #137.
 **Wave 5 is complete**: #113 (A5) as PR #138, #114 (T2a) as PR #139, #115
 (T2b) as PR #140.
 
-**Wave 6 is in progress**: #116 (T1a) as PR #141, #117 (T1b) as PR #142.
-Remaining: #118 (ICS feed), #119-#122 (ops surface).
+**Wave 6 is complete**: #116 (T1a) as PR #141, #117 (T1b) as PR #142, #118
+(T1c, A2) as PR #143. Tool coverage reaches **61 of 61**.
+Remaining: wave 7 — #119-#122 (ops surface).
 
 | Wave | Gap IDs | Issue |
 | --- | --- | --- |

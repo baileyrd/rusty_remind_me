@@ -446,6 +446,62 @@ outright when they would have accepted no header at all. Both are additive —
 
 ---
 
+## #118 — the ICS calendar feed
+
+**Revocation, as the issue asked me to confirm: the reference has none.**
+Rotation is deleting the token file, which mints a fresh token on next
+resolution and silently invalidates every existing subscription. There is no
+revocation list, no second valid token, and no way to revoke one calendar's
+access without re-pointing all of them. Mirrored exactly rather than improved
+on — a bespoke revocation scheme here would be a security mechanism invented
+mid-port, which is worse than a documented limitation.
+
+**A wrong token gets a bare 404, not a 401.** A 401 confirms the route exists
+and that a token was checked, which tells a prober they have the right shape
+and need only the secret. Matching the reference. The rejected token is also
+never logged: a wrong value is still a secret somebody typed, and logs outlive
+rotation.
+
+**The token is compared with `constant_time_eq`**, the same helper the API key
+already uses. A long secret compared with `==` is guessable a byte at a time
+through a timing oracle.
+
+**There is deliberately no "disabled" opt-out**, unlike `REMIND_ME_API_KEY`.
+The token *is* the URL path, so falling open would publish every reminder to
+anyone who guessed the route. When the token file can be neither read nor
+written, an ephemeral per-process token is generated — a feed nobody can
+subscribe to beats a feed anybody can read.
+
+**The route is exempt from the `Authorization` gate, and nothing else is.** A
+calendar app's "subscribe by URL" polls from the provider's own servers on a
+schedule the user does not control, with no way to attach a header. The
+exemption is matched on an exact prefix and suffix and tested against the
+near-misses that would inherit it.
+
+**"Timezone handling correct for all-day and timed reminders" — the reference
+has no all-day events.** Every VEVENT is a timed `DTSTART` in UTC with a `Z`
+suffix; there is no `VALUE=DATE` handling anywhere in `ics_export.py`, and
+`remind_at` is a timestamp rather than a date, so an all-day reminder is not
+representable upstream either. Followed the reference. What *is* asserted is
+that a non-UTC offset is converted rather than having its wall-clock digits
+copied and a `Z` appended, which is the actual timezone bug available here.
+Ninth issue whose acceptance criteria diverge from the reference.
+
+**No iCalendar crate.** The read-only subset needed is one VCALENDAR of
+VEVENTs, small enough to write directly and test exhaustively, which is the
+call this workspace has made consistently. Folding and escaping each have
+their own tests because both produce output that reads fine and fails in a
+real client — and an unescaped comma corrupts every VEVENT *after* the one
+containing it, not just its own.
+
+**The feed calls `reminders::list_reminders` rather than repeating its SQL.**
+The reference re-derives the window inline in `api.py`; here the feed and the
+tool share one definition so a calendar cannot disagree with
+`remind_me_list_reminders` about what is on it. Uncapped, because a subscriber
+wants every reminder rather than the first page.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**
