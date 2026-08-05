@@ -19,6 +19,15 @@ fn days_ago(days: i64) -> String {
     (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339()
 }
 
+/// A timestamp `seconds` in the past.
+///
+/// Used where a test needs a margin around the stale window that is smaller
+/// than a day — see `the_stale_window_is_bracketed_on_both_sides` for why
+/// day-granularity is too coarse to express the boundary safely.
+fn seconds_ago(seconds: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339()
+}
+
 /// Insert a memory with full control over the three fields the heuristic reads.
 ///
 /// `accessed_at` is `None` for a memory never retrieved, which the predicate
@@ -177,22 +186,49 @@ fn a_deleted_or_superseded_memory_is_not_a_candidate() {
     assert_eq!(ids(&result), vec!["mem_live"]);
 }
 
+/// The stale window is pinned from both sides, with a margin.
+///
+/// # Why not plant exactly at the threshold
+///
+/// An earlier version of this test planted `days_ago(RECALIBRATION_STALE_DAYS)`
+/// exactly, reasoning that only an exact-boundary stamp distinguishes the
+/// predicate's `>=` from a `>`. That is true, and it is also **not reachable**:
+/// the predicate compares against `julianday('now')`, which SQLite evaluates at
+/// coarser precision than the sub-second stamp `days_ago` produces. The
+/// difference therefore lands just *below* the threshold about half the time.
+///
+/// Measured over 2000 samples of the exact arithmetic: `diff < 90` in 993 of
+/// them, typical shortfall `-1.16e-08` days. So that version was a ~50%
+/// coin flip that failed on unrelated PRs (issue #180) while catching nothing
+/// reliably — a `>=` → `>` regression would have flipped it from "fails half
+/// the time" to "fails half the time".
+///
+/// Bracketing instead pins the threshold to within an hour and never races.
+/// Two seconds is far larger than any plausible clock or precision skew and far
+/// smaller than the day-granularity the window is expressed in.
 #[test]
-fn the_boundary_day_qualifies() {
+fn the_stale_window_is_bracketed_on_both_sides() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
-    // The predicate is `>=` on the stale window. Planting exactly at the
-    // threshold pins which side of it the boundary falls on, so a later
-    // `>` would fail here rather than silently shifting the queue by a day.
+
+    // Just past the window: must qualify.
     plant(
         &conn,
-        "mem_boundary",
+        "mem_stale",
         "fact",
         1.3,
-        Some(&days_ago(RECALIBRATION_STALE_DAYS)),
+        Some(&seconds_ago(RECALIBRATION_STALE_DAYS * 86_400 + 2)),
+    );
+    // Just inside it: must not.
+    plant(
+        &conn,
+        "mem_fresh",
+        "fact",
+        1.3,
+        Some(&seconds_ago(RECALIBRATION_STALE_DAYS * 86_400 - 3_600)),
     );
 
-    assert_eq!(ids(&run(&conn, 20)), vec!["mem_boundary"]);
+    assert_eq!(ids(&run(&conn, 20)), vec!["mem_stale"]);
 }
 
 #[test]
