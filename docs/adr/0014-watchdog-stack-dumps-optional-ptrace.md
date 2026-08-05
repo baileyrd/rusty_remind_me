@@ -90,6 +90,15 @@ or appearing in `--help` is a cost this diagnostic has no business imposing.
   CI installs it in the `stack-dumps` step specifically, not globally, so the
   expense lands on the job that needs it and its absence keeps breaking any
   future step that forgets it.
+- **And so does `liblzma`, which was not obvious.** `libunwind-ptrace.so`
+  carries undefined `lzma_*` references. Whether they resolve depends on
+  whether the local `libunwind.so` happens to declare `DT_NEEDED` on
+  `liblzma.so.5` — some builds do, some do not. This first shipped green on a
+  machine where they did and failed on a CI runner where they did not.
+  `build.rs` now asks for `-llzma` explicitly, so the link never rests on that
+  accident. `--allow-shlib-undefined` was the tempting alternative and is
+  worse: it converts a build error into a crash the first time a dump reads a
+  compressed debug section.
 - **`libc` arrives transitively**, through `rstack-self`. ADR-0012 refused a
   *direct* `libc` dependency for a `kill(0)` probe that had a pure-`std`
   alternative. That reasoning is untouched: this has no `std` alternative, and

@@ -105,8 +105,14 @@ jobs:
       # It is installed in this step rather than a global one so the expense
       # lands on the job that actually needs it, and so its absence keeps
       # breaking any future step that forgets it.
-      - name: Install libunwind (stack-dumps needs libunwind-ptrace)
-        run: sudo apt-get update && sudo apt-get install -y libunwind-dev
+      # liblzma-dev is not optional here, and its absence is not obvious.
+      # libunwind-ptrace.so carries undefined lzma_* references; whether they
+      # resolve depends on whether the local libunwind.so happens to declare
+      # DT_NEEDED on liblzma, which differs between builds. remind_me_core's
+      # build.rs asks for -llzma explicitly so it never depends on that
+      # accident -- which means the dev package has to be here.
+      - name: Install libunwind and liblzma (stack-dumps needs both)
+        run: sudo apt-get update && sudo apt-get install -y libunwind-dev liblzma-dev
 
       - name: cargo test --features stack-dumps
         run: cargo test -p remind_me_core --features stack-dumps --locked

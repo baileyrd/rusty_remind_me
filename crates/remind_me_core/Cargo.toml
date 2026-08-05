@@ -73,8 +73,9 @@ audio = ["dep:whisper-rs", "dep:symphonia"]
 rerank = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
 # Dump every thread's stack when a tool call hangs, matching the reference's
 # `faulthandler.dump_traceback_later`. Optional and Linux-only, and unlike
-# every other feature here it needs a *system* library (`libunwind-ptrace`,
-# e.g. `libunwind-dev`) plus permission to `ptrace`. That is a real departure
+# every other feature here it needs *system* libraries (`libunwind-dev` and
+# `liblzma-dev` -- see `build.rs` for why the second is not optional) plus
+# permission to `ptrace`. That is a real departure
 # from this list's "no system binary" rule, which is why it is off by default
 # and why `docs/adr/0014` exists. Feature-off, the watchdog reports the stuck
 # call's identity and duration exactly as it does today.
