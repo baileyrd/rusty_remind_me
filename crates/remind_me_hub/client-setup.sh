@@ -20,12 +20,16 @@
 #   --apply-code        Merge the MCP server entry into ~/.claude.json
 #                       (Claude Code). A timestamped backup is written first.
 #
-# What this does NOT do, deliberately: register the MCP server with every
-# client application. `rusty-remind-me configure` already does that for Claude
-# Desktop, Cursor, Antigravity and generic MCP clients — but it writes a plain
-# entry with no sync environment, which is exactly the half this script adds.
-# Run `rusty-remind-me configure` first if you want the other clients, then
-# this to layer sync on.
+# This script owns the parts that are genuinely a shell's job: prompting for
+# the secret without echoing it, the SSH tunnel, and Claude Code's
+# ~/.claude.json (which holds a lot of unrelated state, so it is merged with a
+# backup rather than rewritten).
+#
+# Everything else is delegated to `rusty-remind-me configure`, which writes
+# the entry — sync environment included — for Claude Desktop, Cursor,
+# Antigravity and generic MCP clients. The entry is built in exactly one
+# place; this script reads back what configure wrote rather than constructing
+# a second copy that could drift from it.
 
 set -euo pipefail
 
@@ -36,6 +40,7 @@ PEER_PORT="8766"
 DB_PATH="$HOME/.remind_me/remind_me.db"
 TUNNEL=""
 APPLY_CODE=0
+SECRET_FROM_ARGV=0
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -44,7 +49,7 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 while (( $# )); do
     case "$1" in
         --node-id)    NODE_ID="${2:-}"; shift 2 ;;
-        --secret)     SECRET="${2:-}"; shift 2 ;;
+        --secret)     SECRET="${2:-}"; SECRET_FROM_ARGV=1; shift 2 ;;
         --hub-url)    HUB_URL="${2:-}"; shift 2 ;;
         --peer-port)  PEER_PORT="${2:-}"; shift 2 ;;
         --db-path)    DB_PATH="${2:-}"; shift 2 ;;
@@ -65,6 +70,13 @@ if [[ -z "$SECRET" ]]; then
     printf '\n'
 fi
 [[ -n "$SECRET" ]] || die "a sync secret is required"
+if (( SECRET_FROM_ARGV )); then
+    # Kept because it is the documented interface, but the same argument that
+    # made `configure` refuse a --secret flag applies here: argv is readable
+    # through /proc and lands in shell history. Prompting or
+    # REMIND_ME_SYNC_SECRET avoids both.
+    warn "--secret puts the token in argv and shell history; prefer REMIND_ME_SYNC_SECRET or the prompt"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. The binary
@@ -170,43 +182,55 @@ fi
 # 4. MCP config
 # ---------------------------------------------------------------------------
 
-CODE_ENTRY=$(cat <<EOF
-{
-  "type": "stdio",
-  "command": "$BIN",
-  "args": ["server"],
-  "env": {
-    "REMIND_ME_DB_PATH": "$DB_PATH",
-    "REMIND_ME_NODE_ID": "$NODE_ID",
-    "REMIND_ME_CLIENT": "claude-code",
-    "REMIND_ME_HUB_URL": "$HUB_URL",
-    "REMIND_ME_SYNC_SECRET": "$SECRET",
-    "REMIND_ME_PEER_PORT": "$PEER_PORT",
-    "REMIND_ME_SYNC_INTERVAL": "60",
-    "REMIND_ME_STATIC_PEERS": "[]"
-  }
-}
-EOF
-)
+log "Writing MCP entries via rusty-remind-me configure"
+CONFIGURE_ARGS=(--node-id "$NODE_ID" --hub-url "$HUB_URL" --peer-port "$PEER_PORT" --db-path "$DB_PATH")
+# The secret goes through the environment, never argv: `configure` refuses a
+# --secret flag precisely because argv is world-readable through /proc.
+REMIND_ME_SYNC_SECRET="$SECRET" "$BIN" configure "${CONFIGURE_ARGS[@]}"
 
-echo
-log "Claude Code — entry for ~/.claude.json under \"mcpServers\" -> \"remind-me\":"
-printf '%s\n' "$CODE_ENTRY"
+# Claude Code is not one of configure's targets: ~/.claude.json carries a great
+# deal of unrelated state, so it is merged in place with a backup rather than
+# written. The entry itself is READ BACK from what configure just wrote, so
+# there is one definition of the sync environment rather than two that can
+# drift -- only REMIND_ME_CLIENT differs, since this is a different client.
+GENERIC_CONFIG="$HOME/.mcp/config.json"
+[[ -f "$GENERIC_CONFIG" ]] || die "configure did not write $GENERIC_CONFIG; cannot derive the Claude Code entry"
 
-if (( APPLY_CODE )); then
-    log "Merging into ~/.claude.json"
-    python3 - "$CODE_ENTRY" <<'PYEOF'
+if (( ! APPLY_CODE )); then
+    echo
+    log "Claude Code — entry for ~/.claude.json under \"mcpServers\" -> \"rusty-remind-me\":"
+    python3 - "$GENERIC_CONFIG" <<'PYEOF'
+import json, sys
+entry = json.load(open(sys.argv[1]))["mcpServers"]["rusty-remind-me"]
+entry.setdefault("env", {})["REMIND_ME_CLIENT"] = "claude-code"
+# Shown with the secret redacted: this goes to a terminal, and the point here
+# is the shape of the entry, not the credential the operator already has.
+shown = json.loads(json.dumps(entry))
+if shown["env"].get("REMIND_ME_SYNC_SECRET"):
+    shown["env"]["REMIND_ME_SYNC_SECRET"] = "<REMIND_ME_SYNC_SECRET>"
+print(json.dumps(shown, indent=2))
+PYEOF
+    printf '\n    Re-run with --apply-code to merge it in automatically.\n'
+else
+
+log "Merging the same entry into ~/.claude.json (Claude Code)"
+python3 - "$GENERIC_CONFIG" <<'PYEOF'
 import json, os, shutil, sys, time
 
+source = sys.argv[1]
+with open(source) as f:
+    entry = json.load(f)["mcpServers"]["rusty-remind-me"]
+# The one field that is genuinely per-client.
+entry.setdefault("env", {})["REMIND_ME_CLIENT"] = "claude-code"
+
 path = os.path.expanduser("~/.claude.json")
-entry = json.loads(sys.argv[1])
 cfg = {}
 if os.path.exists(path):
-    # Backup before touching a file the user did not ask us to rewrite.
+    # Backup before touching a file we did not write and do not own.
     shutil.copy2(path, f"{path}.bak.{int(time.time())}")
     with open(path) as f:
         cfg = json.load(f)
-cfg.setdefault("mcpServers", {})["remind-me"] = entry
+cfg.setdefault("mcpServers", {})["rusty-remind-me"] = entry
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")

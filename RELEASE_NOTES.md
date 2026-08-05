@@ -2,6 +2,42 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — `configure` writes the sync environment
+
+### Added
+- **`rusty-remind-me configure --node-id ID --hub-url URL`** now writes the
+  full sync environment into every client config it manages, not just the
+  database path. `--peer-port`, `--sync-interval` and `--db-path` too.
+- **`REMIND_ME_CLIENT` is now set per client** — `claude-desktop`, `cursor`,
+  `antigravity`, `mcp`, `claude-code`. It was never set at all, so the hub
+  recorded every memory as written by `unknown`; `/stats` can now answer which
+  app a memory was typed into.
+
+### Changed
+- **`client-setup.sh` delegates to `configure`** instead of building its own
+  entry. It keeps only what genuinely needs a shell — prompting for the secret
+  without echo, the SSH tunnel, and Claude Code's `~/.claude.json` (merged with
+  a backup, since it holds unrelated state). The Claude Code entry is **read
+  back** from what `configure` wrote rather than constructed a second time, so
+  the two cannot drift; only `REMIND_ME_CLIENT` differs.
+
+### Security
+- **There is deliberately no `--secret` flag.** The secret comes from
+  `REMIND_ME_SYNC_SECRET` in the environment, because argv is world-readable
+  through `/proc` and is kept in shell history. Passing `--secret` produces an
+  error that explains this rather than an "unknown flag". `client-setup.sh`
+  keeps its documented `--secret` for compatibility but warns when it is used.
+- Without `--apply-code`, the printed Claude Code entry has the secret
+  **redacted** — the written files need it, a terminal scrollback does not.
+
+### Notes
+- A partial sync triple is now an **error**, not a config that looks written
+  and never syncs. That includes a lone `REMIND_ME_SYNC_SECRET` in the
+  environment, and a whitespace-only secret.
+- Verified by differential rather than inspection: a node started with exactly
+  the environment `configure` wrote reports `sync_enabled: true`, and the same
+  binary without it reports `false`.
+
 ## 2026-08-05 — Hub deployment packaging
 
 ### Added
