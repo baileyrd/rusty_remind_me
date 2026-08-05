@@ -645,7 +645,26 @@ fn pull_remote_applies_the_hubs_changes_and_persists_the_cursor() {
     let hub = TestHub::start("hub-node");
     {
         let hub_conn = hub.db.conn();
-        add(&hub_conn, "hub content");
+        let id = add(&hub_conn, "hub content");
+        // Pin the origin rather than inheriting it from the ambient
+        // environment. `add` stamps `node_id` from `REMIND_ME_NODE_ID`, which
+        // is process-global and which several tests in this file set to
+        // "local-node" via `enable_sync`. When one of those runs concurrently
+        // with this one, the hub's record is stamped "local-node" and the pull
+        // below correctly discards it as self-originated -- `applied: 0`
+        // instead of 1, with nothing in the failure pointing at the cause.
+        //
+        // This is the mirror of `pull_remote_excludes_records_this_node_
+        // originated`, which sets the same column to force the *opposite*
+        // outcome. Setting it explicitly here makes both tests say what they
+        // mean instead of one of them depending on which tests happen to be
+        // running alongside it.
+        hub_conn
+            .execute(
+                "UPDATE memories SET node_id = 'hub-node' WHERE id = ?",
+                [&id],
+            )
+            .unwrap();
     }
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();

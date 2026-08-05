@@ -176,8 +176,29 @@ fn the_tag_filter_is_all_of_not_any_of() {
     assert_eq!(records(&result)[0]["content"], "both tags");
 }
 
+/// Superseded and deleted memories are excluded by default, and available on
+/// request (issue #175).
+///
+/// # This reverses an earlier deliberate position, and is worth reading
+///
+/// The previous version of this test asserted the opposite — that an export
+/// always carries them — arguing: *"Search filters these; a backup must not.
+/// Losing superseded history on export would make the backup lossy in a way
+/// nothing announces."*
+///
+/// That concern is real and is **still satisfied**, by `include_deleted: true`
+/// rather than by the default. What the old default got wrong is the other
+/// half: every exported record is stamped `role: "assistant"` so the importer
+/// reads it back as live content, so an export → import round-trip resurrected
+/// everything the user had deleted or superseded. A backup that cannot be
+/// restored without corrupting the vault is lossy in a louder way than one
+/// that omits tombstones.
+///
+/// The reference splits it exactly here (`exporter.py:163`, `models.py:799`):
+/// off by default for moving memories between machines, on for a genuine
+/// full-backup or audit export.
 #[test]
-fn superseded_and_deleted_memories_are_still_exported() {
+fn superseded_and_deleted_memories_are_excluded_by_default_and_available_on_request() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     let live = add(&conn, "live", "fact", &[], &[]);
@@ -188,11 +209,23 @@ fn superseded_and_deleted_memories_are_still_exported() {
     )
     .unwrap();
 
-    let result = export(&conn, |i| i.include_graph = false);
+    let default = export(&conn, |i| i.include_graph = false);
+    assert_eq!(
+        default.exported, 1,
+        "the superseded memory must not ride along by default -- re-importing \
+         it would resurrect it as live content"
+    );
 
-    // Search filters these; a backup must not. Losing superseded history on
-    // export would make the backup lossy in a way nothing announces.
-    assert_eq!(result.exported, 2);
+    // The completeness the old assertion wanted, now opt-in rather than
+    // unavoidable.
+    let full = export(&conn, |i| {
+        i.include_graph = false;
+        i.include_deleted = true;
+    });
+    assert_eq!(
+        full.exported, 2,
+        "include_deleted must still produce the complete, audit-grade export"
+    );
 }
 
 #[test]

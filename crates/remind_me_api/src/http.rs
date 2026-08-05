@@ -79,6 +79,19 @@ impl Request {
             Some(raw) => !matches!(raw.to_ascii_lowercase().as_str(), "false" | "0" | "no"),
         }
     }
+
+    /// A flag that is off unless explicitly asked for.
+    ///
+    /// The mirror of [`Self::query_bool_default_true`], and deliberately not
+    /// its negation: a bare `?flag` with no value reads as *on* here, which is
+    /// how a query-string flag is normally written.
+    pub fn query_bool_default_false(&self, name: &str) -> bool {
+        match self.query_str(name) {
+            None => false,
+            Some("") => true,
+            Some(raw) => matches!(raw.to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+        }
+    }
 }
 
 /// Percent-decode a query string component, and turn `+` into a space —
