@@ -120,6 +120,7 @@ fn tag_filtering_tracks_edits_to_a_memory_s_tags() {
             category: None,
             tags: Some(vec!["after".into()]),
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
@@ -259,6 +260,7 @@ fn update_changes_only_the_supplied_fields() {
             category: None,
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
@@ -290,6 +292,7 @@ fn update_leaves_decay_and_retrieval_history_alone() {
             category: Some("decision".into()),
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
@@ -328,6 +331,7 @@ fn update_reports_not_found_and_no_fields_distinctly() {
             category: None,
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
@@ -342,6 +346,7 @@ fn update_reports_not_found_and_no_fields_distinctly() {
             category: None,
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
@@ -370,6 +375,7 @@ fn update_keeps_the_fts_index_consistent() {
             category: None,
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();

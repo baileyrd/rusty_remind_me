@@ -124,6 +124,7 @@ fn each_mutation_kind_emits_its_own_event() {
         &conn,
         &remind_me_core::models::MemoryUpdateInput {
             memory_id: id.clone(),
+            clear_superseded: false,
             content: Some("something else".into()),
             category: None,
             tags: None,

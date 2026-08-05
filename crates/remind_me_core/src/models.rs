@@ -249,6 +249,21 @@ pub struct MemoryUpdateInput {
     /// a memory marked sensitive at creation can never be unmarked.
     #[serde(default)]
     pub sensitive: Option<bool>,
+    /// Clear this memory's `superseded_by` pointer, un-hiding it from search,
+    /// entity and subject/predicate lookups.
+    ///
+    /// The recovery path for a false-positive contradiction-supersession — a
+    /// reused generic `(subject, predicate)` pair that wrongly superseded an
+    /// unrelated memory. Does *not* touch the memory that did the superseding,
+    /// matching `crud.py:410`.
+    ///
+    /// A plain `bool`, not `Option<bool>`, because unlike [`Self::sensitive`]
+    /// there is no "set it back on" direction to express: re-superseding is
+    /// something `remind_me_add` does by detecting a contradiction, never
+    /// something an update asserts directly. The reference types it the same
+    /// way (`models.py:391`, `default=False`).
+    #[serde(default)]
+    pub clear_superseded: bool,
 }
 
 /// Outcome of an update attempt.
