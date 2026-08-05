@@ -2,6 +2,42 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — `response_format` on `remind_me_history` and `remind_me_stats` (#176)
+
+### Added
+- **`response_format` on both tools**, defaulting to **markdown** — the
+  reference's default for `RevisionHistoryInput` (`models.py:510`) and
+  `MemoryStatsInput` (`models.py:754`).
+- `history::render_revisions_markdown` and `stats::render_markdown`, kept
+  byte-compatible with the reference's `_fmt_revisions` and the markdown
+  branch of its `remind_me_stats` — including the empty-history sentence
+  (`_No revision history for memory ..._`) and the 200-character revision
+  preview.
+
+### Notes
+- **This changes what both tools return by default.** They emitted JSON
+  unconditionally; they now emit markdown unless asked for JSON. Deliberate:
+  the point of the field is that the same call gets the same answer from
+  either implementation, and defaulting to JSON here would have kept the
+  divergence while merely adding a knob.
+- **`remind_me_history`'s JSON branch is now an envelope**, matching the
+  reference: `{memory_id, count, revisions}` rather than the bare array it
+  returned before. `count` saves a caller re-deriving what the producer
+  already knew.
+- **This is not the case the decision log already covers.** It records
+  refusing `response_format` twice — for `remind_me_recalibrate_candidates`
+  (#102) and the four saved-search tools (#117) — both times because the
+  *reference's* models lack the field, so adding it would diverge in the
+  direction that breaks drop-in interoperability quietly. These two are the
+  opposite: the reference has it, and its absence here was the divergence.
+- The revision preview truncates by characters, not bytes — slicing a
+  multi-byte codepoint would panic on arbitrary user content.
+- **Neither tool had any MCP-level test coverage**, which is why changing
+  their default output broke nothing. Four tests now cover both formats for
+  both tools, the empty-history sentence, and the declared defaults.
+- Found while here and filed separately rather than folded in: `limit`
+  defaults to 20 on `remind_me_history` where the reference uses 10 (#183).
+
 ## 2026-08-05 — `remind_me_entity` is read-only, matching the reference (#177)
 
 ### Changed

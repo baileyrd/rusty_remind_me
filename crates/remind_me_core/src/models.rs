@@ -1375,10 +1375,25 @@ pub struct HistoryInput {
     pub memory_id: String,
     #[serde(default = "default_history_limit")]
     pub limit: usize,
+    /// Markdown or JSON, defaulting to markdown as the reference does
+    /// (`RevisionHistoryInput.response_format`, `models.py:510`).
+    #[serde(default)]
+    pub response_format: ResponseFormat,
 }
 
 fn default_history_limit() -> usize {
     20
+}
+
+/// Input for `remind_me_stats`.
+///
+/// Only a response format — the reference's `MemoryStatsInput`
+/// (`models.py:750`) carries nothing else, and its models are `extra="forbid"`,
+/// so anything more would be rejected there while being accepted here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryStatsInput {
+    #[serde(default)]
+    pub response_format: ResponseFormat,
 }
 
 pub const HISTORY_LIMIT_MIN: usize = 1;

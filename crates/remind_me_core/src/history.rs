@@ -258,3 +258,53 @@ pub fn revert(
 
     Ok(RevertOutcome::Reverted { revision_id })
 }
+
+/// How much of a revision's content the markdown preview shows.
+///
+/// Matches the reference's `_REVISION_PREVIEW_CHARS` (`formatting.py:91`).
+const REVISION_PREVIEW_CHARS: usize = 200;
+
+/// Render one revision as the reference's `_fmt_revision_md` does.
+fn render_revision_markdown(revision: &MemoryRevision) -> String {
+    // Truncate by *characters*, not bytes: slicing a multi-byte codepoint
+    // would panic, and a revision is arbitrary user content.
+    let mut preview: String = revision
+        .content
+        .chars()
+        .take(REVISION_PREVIEW_CHARS)
+        .collect();
+    if revision.content.chars().count() > REVISION_PREVIEW_CHARS {
+        preview.push('…');
+    }
+    let mut line = format!(
+        "- **Revision `{}`** ({}) — category: {} — {}",
+        revision.id, revision.edited_at, revision.category, preview
+    );
+    if let Some(reason) = revision
+        .revision_reason
+        .as_ref()
+        .filter(|r| !r.trim().is_empty())
+    {
+        line.push_str(&format!("  _{}_", reason));
+    }
+    line
+}
+
+/// Render a memory's revision history the way the reference's `_fmt_revisions`
+/// does (`formatting.py:114`), including the empty-history sentence.
+///
+/// Kept byte-compatible with the reference for the same reason
+/// `reminders::render_memories_markdown` is: this text is what a model reads
+/// back, and a different shape is a different prompt.
+pub fn render_revisions_markdown(memory_id: &str, revisions: &[MemoryRevision]) -> String {
+    if revisions.is_empty() {
+        return format!("_No revision history for memory `{}`._", memory_id);
+    }
+    let mut lines = vec![format!(
+        "**{} revision(s) for memory `{}`, newest first:**\n",
+        revisions.len(),
+        memory_id
+    )];
+    lines.extend(revisions.iter().map(render_revision_markdown));
+    lines.join("\n")
+}
