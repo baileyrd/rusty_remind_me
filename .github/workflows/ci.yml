@@ -94,3 +94,22 @@ jobs:
       # tokenizers are pure Rust and the tests need no model.
       - name: cargo test --features rerank
         run: cargo test -p remind_me_core --features rerank --locked
+
+      # Like `rerank` above, this runs the tests rather than only clippy, and
+      # for a stronger reason: the feature's entire claim is that a thread
+      # wedged in CPU-bound code still gets dumped. Only running it can show
+      # that. A compile check would pass against a build that dumps nothing.
+      #
+      # The `apt-get` is the cost this feature carries and no other one here
+      # does -- `rstack-self` links libunwind's ptrace API, a *system* library.
+      # It is installed in this step rather than a global one so the expense
+      # lands on the job that actually needs it, and so its absence keeps
+      # breaking any future step that forgets it.
+      - name: Install libunwind (stack-dumps needs libunwind-ptrace)
+        run: sudo apt-get update && sudo apt-get install -y libunwind-dev
+
+      - name: cargo test --features stack-dumps
+        run: cargo test -p remind_me_core --features stack-dumps --locked
+
+      - name: cargo clippy --features stack-dumps
+        run: cargo clippy -p remind_me_core --features stack-dumps --all-targets --locked -- -D warnings

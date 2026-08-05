@@ -101,6 +101,14 @@ equivalent.** A faithful port needs a stack-unwinding crate — a new
 third-party dependency for a diagnostic. The implementation reports identity
 and duration instead, and says so in its own module docs.
 
+**Closed behind a feature.** `stack-dumps` (Linux-only, off by default) now
+dumps every thread's stack exactly as the reference does, by `ptrace`-ing this
+process from a short-lived child. Feature-off behaviour is unchanged, so the
+paragraph above still describes the default build. The estimate in it was
+optimistic in one respect worth correcting: the cost is a *system* library
+(`libunwind-ptrace`) and permission to `ptrace`, not merely a crate. See
+`docs/adr/0014`.
+
 ### E5 — sidecar processes
 
 No counterpart existed: `Command::new` appeared only in `updater.rs` for
@@ -162,10 +170,17 @@ Under the parity-loop skill's rules these are never auto-implemented:
    has deliberately had no FFI dependency at all (`docs/adr/0012` took the
    same decision against `libc`). Recorded in `docs/adr/0013` with the
    revisit path, rather than taken silently.
-3. **A stack-dumping crate for D1** — same shape: a new dependency would be
-   needed to match the reference's `faulthandler` behavior faithfully.
+3. ~~**A stack-dumping crate for D1**~~ — **asked, answered, and done.**
+   The framing above was too generous to itself: there is no pure-Rust way to
+   dump another thread's stack, so the real cost was a *system* library
+   (`libunwind-ptrace`) plus permission to `ptrace`, not just a crate. Taken
+   behind an off-by-default, Linux-only `stack-dumps` feature; the in-process
+   signal-handler alternative was rejected because capturing a backtrace is not
+   async-signal-safe and would deadlock precisely when the diagnostic fires.
+   `docs/adr/0014` records it.
 
-None of the three was taken unattended.
+None of the three was taken unattended. Items 2 and 3 have since been
+taken, each with an explicit yes.
 
 ---
 
