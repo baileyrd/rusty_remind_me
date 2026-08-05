@@ -712,6 +712,10 @@ pub fn api_export(conn: &Connection, _wiki: &Wiki, req: &Request, _params: &Para
     let tags = req.query_list("tags");
     let file_path = req.query_str("file_path").map(str::to_string);
     let include_graph = req.query_bool_default_true("include_graph");
+    // Unlike `clear_superseded` on the update route, the reference *does*
+    // expose this one over HTTP (`api.py:1383`, "default false —
+    // soft-deleted/superseded"), so it is a query parameter here too.
+    let include_deleted = req.query_bool_default_false("include_deleted");
 
     let input = ExportInput {
         format,
@@ -719,6 +723,7 @@ pub fn api_export(conn: &Connection, _wiki: &Wiki, req: &Request, _params: &Para
         tags,
         file_path: file_path.clone(),
         include_graph,
+        include_deleted,
     };
 
     if file_path.is_some() {

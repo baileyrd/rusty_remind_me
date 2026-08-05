@@ -2,6 +2,41 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — Export no longer resurrects deleted and superseded memories (#175)
+
+### Fixed
+- **`remind_me_export_memories` was exporting soft-deleted and superseded
+  memories, with no way to exclude them.** `export::filters` had neither a
+  `deleted_at IS NULL` nor a `superseded_by IS NULL` condition, so it behaved
+  as a permanent `include_deleted=true`. Since every exported record is
+  stamped `role: "assistant"` so the importer reads it as live content, an
+  export → import round-trip **brought back everything the user had deleted or
+  superseded, as fresh live memories.**
+
+### Added
+- **`ExportInput.include_deleted`**, defaulting to `false` and gating both
+  conditions together, matching `exporter.py:163`. The escape hatch for a
+  genuine full-backup or audit export.
+- The same flag as an `include_deleted` query parameter on `GET /api/export`,
+  because the reference exposes it over HTTP too (`api.py:1383`) — unlike
+  `clear_superseded` (#174), which is MCP-only upstream and stayed that way.
+
+### Notes
+- **This changes what an export returns by default.** Anyone relying on the
+  current output gets a smaller file. That is deliberate: defaulting to `true`
+  to preserve today's behaviour would keep both the interoperability gap and
+  the data-resurrection path open, and the reference is unambiguous about
+  which default is correct.
+- **Superseded memories leaked regardless of sync; tombstones only with sync
+  on.** `delete_memory` hard-deletes when sync is disabled and tombstones when
+  it is enabled, so a synced vault — the deployment this crate is built for —
+  accumulated tombstones the export then carried.
+- The tool description previously claimed "a complete logical backup"; it now
+  says what the default actually does and points at the flag for the rest.
+- `Request::query_bool_default_false` is deliberately not the negation of
+  `query_bool_default_true`: a bare `?include_deleted` with no value reads as
+  *on*, which is how a query-string flag is normally written.
+
 ## 2026-08-05 — A stuck-call watchdog (#168)
 
 ### Added

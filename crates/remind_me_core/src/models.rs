@@ -785,6 +785,19 @@ pub struct ExportInput {
     /// true — a backup should be complete.
     #[serde(default = "default_include_graph")]
     pub include_graph: bool,
+    /// Include soft-deleted and superseded memories.
+    ///
+    /// **Off by default, and that default is load-bearing.** Export records
+    /// are stamped `role: "assistant"` so the importer reads them as live
+    /// content, which means a round-trip of an export that carried tombstones
+    /// and superseded facts would resurrect them as fresh live memories. The
+    /// reference makes the same argument in this field's own docstring
+    /// (`models.py:799`) and gates both conditions on it (`exporter.py:163`).
+    ///
+    /// Set it only for a genuine full-backup or audit export — not for moving
+    /// memories between machines.
+    #[serde(default)]
+    pub include_deleted: bool,
 }
 
 fn default_include_graph() -> bool {

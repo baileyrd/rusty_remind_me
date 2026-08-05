@@ -199,6 +199,15 @@ fn filters(input: &ExportInput) -> (String, Vec<Value>) {
     let mut conditions: Vec<String> = Vec::new();
     let mut bindings: Vec<Value> = Vec::new();
 
+    // Both conditions, not just `deleted_at` -- the reference gates the pair
+    // on this one flag (`exporter.py:163`), and a superseded memory is just as
+    // resurrectable as a tombstoned one: every exported record carries
+    // `role: "assistant"`, so the importer reads it back as live content.
+    if !input.include_deleted {
+        conditions.push("m.deleted_at IS NULL".to_string());
+        conditions.push("m.superseded_by IS NULL".to_string());
+    }
+
     if let Some(category) = input.category.as_ref().filter(|c| !c.is_empty()) {
         conditions.push("m.category = ?".to_string());
         bindings.push(Value::Text(category.clone()));

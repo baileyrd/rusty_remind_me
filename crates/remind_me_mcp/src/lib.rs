@@ -535,7 +535,7 @@ impl McpServer {
                             },
                             {
                                 "name": "remind_me_export_memories",
-                                "description": "Export memories to JSON or JSONL as a complete logical backup — every column, plus the entity graph. Embedding vectors are excluded as derived data. Writes to file_path when given (must be inside the allowed export roots), otherwise returns the payload inline.",
+                                "description": "Export live memories to JSON or JSONL — every column, plus the entity graph. Deleted and superseded memories are excluded unless include_deleted is set, so an export is safe to re-import. Embedding vectors are excluded as derived data. Writes to file_path when given (must be inside the allowed export roots), otherwise returns the payload inline.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -543,7 +543,8 @@ impl McpServer {
                                         "category": { "type": "string", "description": "Filter: only export memories with this category" },
                                         "tags": { "type": "array", "items": { "type": "string" }, "description": "Filter: memory must have ALL of these tags" },
                                         "file_path": { "type": "string", "description": "Destination file, inside the allowed export roots. Omit to return inline." },
-                                        "include_graph": { "type": "boolean", "default": true, "description": "Append entities, links and relations as record_type-tagged records" }
+                                        "include_graph": { "type": "boolean", "default": true, "description": "Append entities, links and relations as record_type-tagged records" },
+                                        "include_deleted": { "type": "boolean", "default": false, "description": "Include soft-deleted and superseded memories. Off by default: exported records are read back as live content, so re-importing an export that carried them would resurrect deleted and stale memories. Set only for a genuine full-backup or audit export, not for moving memories between machines." }
                                     }
                                 }
                             },
