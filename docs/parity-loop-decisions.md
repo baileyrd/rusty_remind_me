@@ -1181,3 +1181,51 @@ noticed.
 **CI state is read with `actions_get` / `get_workflow_job`, not
 `pull_request_read` / `get_check_runs`.** The latter lags, reporting
 `in_progress` for minutes after a job has finished.
+
+---
+
+## #177 — `remind_me_entity` made read-only
+
+**Not an autonomous decision — the user chose this explicitly.** Recorded here
+because it changes an existing public tool, which this log exists to make
+visible.
+
+The reference's `remind_me_entity` is a lookup: `readOnlyHint: True`,
+`EntityLookupInput{name, limit}`, `extra="forbid"`, and `found=false` on an
+unknown name. This crate's was an *upsert* taking `{name, kind}`. Same tool
+name, opposite effect — a mistyped name returned `found=false` from
+`remind_me` while silently creating a junk entity here, which is the kind of
+divergence that surfaces as data drift rather than as an error.
+
+Three options were put to the user; they picked (1), match the reference
+exactly and move the write elsewhere.
+
+**What changed:**
+
+- `remind_me_entity` now takes `{name, limit}`, calls `entity::entity_profile`
+  — already shared with `GET /api/entity`, so the dashboard and an LLM client
+  see the same payload — and returns `{found: true, ...profile}` or
+  `{found: false, query, message}`.
+- The write moved to **`remind_me_entity_upsert`**, a target-only tool. The
+  capability is kept, just no longer reachable by a call that meant to read.
+- `remind_me_entity_upsert` is in the `core` profile. `remind_me_entity` was
+  already there *and could write*, so leaving the upsert out would have cost a
+  trimmed profile the ability to create an entity at all — a regression this
+  change has no business making.
+
+**`found` is spread alongside the profile's fields, not wrapped around them,**
+matching the reference's `{"found": True, **profile}`. A caller written
+against one must not have to unwrap the other.
+
+**A miss is not `isError`.** An unknown name is a valid answer to a lookup;
+flagging it would make clients retry a question that was already answered.
+
+**The CLI's `entity` subcommand still upserts.** It calls
+`entity::upsert_entity` directly rather than going through the tool, and the
+reference's CLI has no `entity` subcommand at all, so there is no parity
+constraint pulling either way. Left alone deliberately rather than
+overlooked.
+
+Revisit if: the reference adds a write path to `remind_me_entity`, or drops
+`extra="forbid"` such that the two could converge on a superset instead.
+

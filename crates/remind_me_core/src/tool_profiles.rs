@@ -37,7 +37,7 @@ pub const VALID_PROFILES: [&str; 3] = ["full", "standard", "core"];
 /// `remind_me_server_status` is here deliberately despite otherwise being an
 /// ops tool — it is what *reports which profile is active*, and a profile you
 /// cannot diagnose from inside a session is a trap.
-pub const CORE: [&str; 17] = [
+pub const CORE: [&str; 18] = [
     "remind_me_search",
     "remind_me_add",
     "remind_me_get",
@@ -45,6 +45,10 @@ pub const CORE: [&str; 17] = [
     "remind_me_update",
     "remind_me_delete",
     "remind_me_entity",
+    // Target-only. In `core` because `remind_me_entity` used to write and
+    // was already here -- splitting read from write must not quietly cost a
+    // trimmed profile the ability to create an entity at all.
+    "remind_me_entity_upsert",
     "remind_me_entity_traverse",
     "remind_me_feedback",
     "remind_me_auto_capture",

@@ -2,6 +2,41 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — `remind_me_entity` is read-only, matching the reference (#177)
+
+### Changed
+- **`remind_me_entity` no longer writes.** It was an upsert taking
+  `{name, kind}`; the reference's is a lookup taking `{name, limit}` with
+  `readOnlyHint: True`. Same tool name, opposite effect — a mistyped name
+  returned `found=false` from `remind_me` while silently *creating* a junk
+  entity here. It now returns `{found: true, ...profile}` or
+  `{found: false, query, message}`.
+
+### Added
+- **`remind_me_entity_upsert`** — target-only, and where the old write
+  behaviour lives. The capability is kept; it is just no longer reachable by a
+  call that meant to read.
+
+### Notes
+- **Breaking for callers that relied on `remind_me_entity` to create.** They
+  move to `remind_me_entity_upsert`. This was chosen deliberately over keeping
+  the superset: a silent write on a read-shaped tool is the kind of divergence
+  that shows up as data drift rather than an error.
+- The lookup reuses `entity::entity_profile`, already shared with
+  `GET /api/entity`, so a dashboard and an LLM client see identical data.
+- `found` is spread alongside the profile's fields rather than wrapping them,
+  matching the reference's `{"found": True, **profile}`.
+- A miss is **not** `isError` — an unknown name is a valid answer, and
+  flagging it would make clients retry a question already answered.
+- `remind_me_entity_upsert` is in the `core` tool profile. `remind_me_entity`
+  was already there and could write, so omitting it would have cost a trimmed
+  profile the ability to create an entity at all.
+- The CLI's `entity` subcommand still upserts — it calls
+  `entity::upsert_entity` directly, and the reference's CLI has no `entity`
+  subcommand, so nothing pulls either way. Left as-is deliberately.
+- The old tool had **no test coverage at all**, which is why nothing broke
+  when its behaviour was replaced. Five tests now cover both halves.
+
 ## 2026-08-05 — Export no longer resurrects deleted and superseded memories (#175)
 
 ### Fixed
