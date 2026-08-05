@@ -77,7 +77,7 @@ source.
 | **C1** | `cli list` | CLI subcommand | spec | both | `cli.py:74` — `SUBCOMMANDS = {"add","search","list"}` | no | S | [#167](https://github.com/baileyrd/rusty_remind_me/issues/167) |
 | **D1** | `watchdog` | module | spec | both | `watchdog.py` (ref issue #128) | no | S | [#168](https://github.com/baileyrd/rusty_remind_me/issues/168) |
 | **E5** | `sidecars` | module | spec | both | `sidecars.py` | no | M | [#169](https://github.com/baileyrd/rusty_remind_me/issues/169) |
-| **E1** | the hub | deployable | spec | — | `hub/` — 1,341 LOC, 10 routes | — | XL | **not filed — scope decision** |
+| **E1** | the hub | deployable | spec | — | `hub/` — 1,341 LOC, 10 routes | — | XL | **not filed — scope decision; now ported, ADR-0015** |
 
 All three filed gaps are pure additions. None touches an existing public
 signature, so none is `breaking-change`-labelled.
@@ -144,6 +144,18 @@ ships its own hub, or keeps syncing against the existing Python one, is a
 scope decision that belongs to a human. Filing it as a `parity-gap` issue
 would imply the loop should work it unattended, which it should not.
 
+**Asked, answered, and ported.** All ten routes now exist as `remind_me_hub` /
+`rusty-remind-me-hub`, with storage behind a trait: Postgres (a drop-in for an
+existing deployment, legacy migration included) and SQLite (self-hosted, one
+file, no server). `docs/adr/0015` records the decision.
+
+The port found a real bug in the reference's legacy migration — its
+trailing-zero regex turns `.500000` into `.5`, which sorts *before* the
+client's own value under `COLLATE "C"` and so corrupts both the pull cursor and
+LWW conflict resolution. That is the one deliberate behavioural divergence in
+the whole hub, and it was found by running the migration against a live
+Postgres rather than by reading it.
+
 ---
 
 ## Verified as *not* gaps
@@ -173,8 +185,10 @@ Recorded because each looked like one:
 Under the parity-loop skill's rules these are never auto-implemented. All
 three were put to a human; two came back yes and are done.
 
-1. **E1, the hub** — a new deployable in another language. Scope decision
-   first; not filed as an issue. **Still open.**
+1. ~~**E1, the hub**~~ — **asked, answered, and done.** A new deployable in
+   another language, so the scope decision came first, as it should have. The
+   answer was to port it, with both storage backends behind a trait; see
+   `docs/adr/0015`.
 2. ~~**The Windows Job object for E5**~~ — **asked, answered, and done in
    [#186](https://github.com/baileyrd/rusty_remind_me/pull/186).** It was
    stopped-and-asked precisely because it needed a direct `windows-sys`
