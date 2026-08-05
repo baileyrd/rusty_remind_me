@@ -388,6 +388,12 @@ pub fn api_update(conn: &Connection, _wiki: &Wiki, req: &Request, params: &Param
     };
     let input = MemoryUpdateInput {
         memory_id: id,
+        // Deliberately not read from the body: the reference's own
+        // `api_update` (`api.py:1047`) handles content/category/source/tags/
+        // metadata/sensitive and nothing else, so `clear_superseded` is an
+        // MCP-tool affordance there, not an HTTP one. Exposing it here would
+        // be a route this crate has and `remind_me` does not.
+        clear_superseded: false,
         // Absent means "leave it alone", so a PATCH that does not mention the
         // flag cannot clear it.
         sensitive: body.get("sensitive").and_then(Value::as_bool),

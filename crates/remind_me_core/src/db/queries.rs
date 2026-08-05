@@ -284,6 +284,13 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
         bindings.push(Value::Integer(sensitive as i64));
     }
 
+    // Unconditional NULL rather than a bound parameter: the flag has only one
+    // direction. Re-superseding is `remind_me_add`'s job, on detecting a
+    // contradiction -- it is never something an update asserts directly.
+    if input.clear_superseded {
+        sets.push("superseded_by = NULL");
+    }
+
     if sets.is_empty() {
         return Ok(UpdateOutcome::NoFields);
     }

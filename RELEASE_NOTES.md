@@ -36,6 +36,36 @@ Dated entries, newest first. One entry per merged pull request.
 - `Request::query_bool_default_false` is deliberately not the negation of
   `query_bool_default_true`: a bare `?include_deleted` with no value reads as
   *on*, which is how a query-string flag is normally written.
+## 2026-08-05 — `clear_superseded` on `remind_me_update` (#174)
+
+### Added
+- **`MemoryUpdateInput.clear_superseded`** — clears a memory's `superseded_by`
+  pointer, un-hiding it from search, entity and subject/predicate lookups. The
+  recovery path for a false-positive contradiction-supersession, matching
+  `models.py:391` and `crud.py:410`.
+
+### Notes
+- **The two sides disagreed about a caller who sent this field, and not
+  symmetrically.** `remind_me`'s models are `extra="forbid"`, so it *rejects*
+  an unknown field loudly; serde here *ignores* one. A client sending
+  `clear_superseded: true` was getting a success response and no un-hiding,
+  with nothing saying why. A silently-ignored flag is a worse failure than a
+  rejected one because it is invisible from the caller's side.
+- **A plain `bool`, not `Option<bool>`** — unlike `sensitive`, there is no
+  "set it back on" direction to express. Re-superseding is something
+  `remind_me_add` does on detecting a contradiction, never something an update
+  asserts directly. The reference types it the same way.
+- **Deliberately not exposed on the HTTP `PATCH` route.** The reference's own
+  `api_update` (`api.py:1047`) handles content/category/source/tags/metadata/
+  sensitive and nothing else, so this is an MCP-tool affordance upstream, not
+  an HTTP one. Adding it to the route would be a surface this crate has and
+  `remind_me` does not.
+- Clearing does **not** cascade to the memory that did the superseding, which
+  the reference states explicitly and a test asserts.
+- **How this was found.** The 2026-08-05 assessment compared MCP tools by
+  *name* and reported 61/61. A follow-up pass comparing every reference
+  `*Input` model's fields against this crate's structs found this and three
+  siblings (#175, #176, #177). Name-matching alone is not a parity check.
 ## 2026-08-05 — Sidecar processes (#169)
 
 ### Added

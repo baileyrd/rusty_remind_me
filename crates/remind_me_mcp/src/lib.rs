@@ -382,7 +382,8 @@ impl McpServer {
                                         "category": { "type": "string" },
                                         "tags": { "type": "array", "items": { "type": "string" } },
                                         "metadata": { "type": "object" },
-                                        "sensitive": { "type": "boolean", "description": "Set or clear the sensitive flag. Omit to leave it unchanged." }
+                                        "sensitive": { "type": "boolean", "description": "Set or clear the sensitive flag. Omit to leave it unchanged." },
+                                        "clear_superseded": { "type": "boolean", "default": false, "description": "Clear this memory's superseded_by flag, un-hiding it from search, entity, and subject/predicate lookups. Recovery path for a false-positive contradiction-supersession. Does not affect the memory that did the superseding." }
                                     },
                                     "required": ["memory_id"]
                                 }

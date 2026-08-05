@@ -145,6 +145,7 @@ fn a_real_content_change_still_reaches_the_outbox() {
             category: None,
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
@@ -227,6 +228,7 @@ fn an_existing_database_has_its_stale_trigger_rebuilt_on_open() {
             category: None,
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
