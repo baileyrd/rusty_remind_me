@@ -1100,6 +1100,61 @@ fix for it.
 
 ---
 
+## #155 part 2 — the reranker, and why the deferral was wrong
+
+**The reason this was deferred did not survive contact with #156.** It was put
+aside as "needs an ONNX model fetched at runtime, so it cannot be verified in
+CI at all". That framing assumed the reference's own shape — download on first
+use — was the only one available. #156 established the alternative: an explicit
+model path, no download, and a refusal that CI can assert. Applied here, the
+supposed blocker disappears.
+
+**And the deferral undersold what was checkable by a wide margin.** The
+reference's `rerank()` takes an **injectable scorer**. That means the entire
+ordering contract — the head/tail split, tie stability, the recorded score, the
+degenerate cases, the misbehaving-scorer cases — is testable with no model, no
+feature and no runtime. That is precisely the part where a reranker silently
+corrupts a result page, and it is now asserted unconditionally, 22 tests' worth.
+The part that genuinely needs real weights is narrow: whether a real
+cross-encoder orders *well*.
+
+**Reranking may never break search.** Everything else follows from this. Search
+already returns correct, useful answers without a reranker, so no failure here
+may become an error or a lost result: missing feature, unconfigured model,
+unloadable model, tokenizer mismatch, inference failure, wrong number of scores
+returned — all return the incoming order untouched.
+
+**The pipeline position was not what I would have guessed, and reading the
+reference is what caught it.** It reranks a pool of `max(limit, top_k)` and
+truncates *after*. Truncating first — which is what the existing rusty pipeline
+did, and what I would have slotted the call behind — would have left the
+cross-encoder able only to reorder results that were already going to be
+returned, discarding the promotion-from-past-the-cutoff that is most of its
+value. Feedback adjustment stays ahead of it, so it perturbs the order feeding
+the cross-encoder rather than overriding it.
+
+**On by default, which contradicted my own issue's acceptance criteria.** The
+criteria said "both behind feature flags, both off by default". That is right
+for the Cargo feature and wrong for the runtime setting: the reference's
+`REMIND_ME_RERANK` defaults to `"onnx"`. Both are honoured here — the feature
+is off by default, the setting is on — and they compose into the sane outcome,
+because "on" without a configured model is a no-op rather than a download. This
+is the seventh issue in this loop whose criteria diverged from the reference,
+and the same cause every time: writing criteria from the gap table's one-line
+summary instead of the source.
+
+**`rerank_score` is deliberately not part of `score`.** Folding the logit into
+the fused total would double-count the signal and make the diagnostic
+`*_score` fields stop adding up. Reranking permutes; it does not contribute.
+
+**CI runs this feature's tests, unlike `ocr`/`audio`.** There the only thing a
+feature-on test run could have added was a model download. Here it adds two
+real assertions — that enabling the feature does not make a search download
+anything, and that a configured-but-unloadable model still degrades to RRF
+order — for about 45 seconds of pure-Rust build.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

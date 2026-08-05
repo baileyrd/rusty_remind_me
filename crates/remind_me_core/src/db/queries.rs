@@ -796,6 +796,15 @@ pub fn search_memories(
     // any similarly-worded past feedback before truncating to `limit`, so a
     // memory boosted from just past the cutoff can still make the page.
     let mut ranked = apply_feedback_adjustment(conn, &input.query, ranked)?;
+
+    // Optional cross-encoder rerank of the head, before truncation. The pool
+    // is deliberately wider than `limit`: rescoring only what was already
+    // going to be returned would throw away the most useful thing a
+    // cross-encoder does, which is promote a candidate from just past the
+    // cutoff. Feedback runs first so its nudge perturbs the order feeding the
+    // cross-encoder, leaving the cross-encoder with the final say.
+    ranked.truncate(crate::reranker::pool_size(input.limit));
+    let mut ranked = crate::reranker::maybe_rerank(&input.query, ranked);
     ranked.truncate(input.limit);
 
     let final_results = trim_by_token_budget(ranked, input.token_budget);

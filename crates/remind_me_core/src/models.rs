@@ -455,6 +455,12 @@ pub struct MemorySearchResult {
     /// applied to `score` from query-contextual feedback, or `None` when no
     /// stored feedback was similar enough to this query to count.
     pub feedback_adjustment: Option<f64>,
+    /// The cross-encoder logit [`crate::reranker`] scored this pair at, or
+    /// `None` when reranking did not run or this result was in the tail it
+    /// left alone. Unlike the `*_score` fields it is **not** a component of
+    /// `score`: reranking permutes the head rather than contributing to the
+    /// fused total, so folding it in would double-count the signal.
+    pub rerank_score: Option<f64>,
 }
 
 /// Input model for `remind_me_entity_traverse`.

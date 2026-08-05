@@ -423,6 +423,7 @@ fn result(id: &str, score: f64) -> MemorySearchResult {
         vitality_score: None,
         idf_score: None,
         feedback_adjustment: None,
+        rerank_score: None,
     }
 }
 
