@@ -20,6 +20,25 @@ pdf-extract = { version = "0.12", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 usearch = { version = "2", optional = true }
+ocrs = { version = "0.12", optional = true }
+# Pinned to the major version `ocrs` itself links against: `OcrEngineParams`
+# takes an `rten::Model`, so a newer `rten` here is a *different type* and the
+# build fails with a confusing "expected Model, found Model".
+rten = { version = "0.24", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = [
+    "png",
+    "jpeg",
+] }
+whisper-rs = { version = "0.16", optional = true }
+symphonia = { version = "0.6", optional = true, default-features = false, features = [
+    "mp3",
+    "aac",
+    "isomp4",
+    "vorbis",
+    "ogg",
+    "wav",
+    "pcm",
+] }
 
 [features]
 default = []
@@ -35,3 +54,13 @@ cloud-backup = ["dep:aws-sdk-s3", "dep:aws-config"]
 # C++ library built from source (~5 minutes), and brute-force search already
 # works — this is a scale improvement, not a capability.
 ann = ["dep:usearch"]
+# OCR for `.png`/`.jpg`/`.jpeg`. Optional because it carries a neural-network
+# runtime and its models. `ocrs`/`rten` are pure Rust — unlike the ONNX
+# Runtime binding, which fetches a native runtime at *run* time, which would
+# be exactly the implicit download this feature is required not to do.
+ocr = ["dep:ocrs", "dep:rten", "dep:image"]
+# Speech-to-text for `.mp3`/`.m4a`/`.wav`/`.ogg`. `whisper-rs` builds
+# whisper.cpp from source; `symphonia` decodes the containers in pure Rust, so
+# no system ffmpeg is needed — the same "no system binary" rule that made the
+# reference pick faster-whisper over pywhispercpp.
+audio = ["dep:whisper-rs", "dep:symphonia"]

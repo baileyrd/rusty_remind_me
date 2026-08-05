@@ -26,6 +26,15 @@
 /// Default category, kept distinct so a search can filter on PDFs.
 pub const PDF_CATEGORY: &str = "pdf";
 
+/// `memories.source` for PDF imports.
+///
+/// Distinct from `document_import`, which is what this originally — and
+/// wrongly — recorded. The two are not interchangeable: `normalize` selects on
+/// `source IN ('document_import', 'chat_import')`, so filing extracted PDF
+/// text as a document silently enrolled it in a rewriting pass the reference
+/// deliberately keeps it out of.
+pub const PDF_SOURCE: &str = "pdf_import";
+
 /// Told to the caller when the feature is compiled out.
 pub const PDF_UNAVAILABLE: &str =
     "PDF import is not available in this build: rebuild with the `pdf` feature \

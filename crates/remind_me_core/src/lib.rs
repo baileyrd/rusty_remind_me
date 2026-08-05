@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod ann_index;
 pub mod api_keys;
+pub mod audio_import;
 pub mod backup;
 pub mod capture;
 pub mod cloud_backup;
@@ -17,6 +18,7 @@ pub mod export;
 pub mod fts;
 pub mod history;
 pub mod ics;
+pub mod image_import;
 pub mod import_paths;
 pub mod importer;
 pub mod maintenance;
