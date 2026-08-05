@@ -174,6 +174,10 @@ jobs:
       - name: cargo test -p remind_me_hub (with postgres)
         env:
           REMIND_ME_HUB_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/hubtest
+          # A skipped Postgres test reports as *passed* and cargo hides the
+          # SKIP line, so losing the service container here would look
+          # identical to a clean run. This makes that a hard failure instead.
+          REMIND_ME_HUB_REQUIRE_POSTGRES: "1"
         run: cargo test -p remind_me_hub --locked -- --test-threads=1
 
       # The SQLite-only build must keep working: it is what a self-hosted hub

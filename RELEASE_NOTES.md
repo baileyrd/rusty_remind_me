@@ -2,6 +2,47 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — Hub deployment packaging
+
+### Added
+- **`Containerfile`** — a multi-stage Rust build producing a **~30 MB**
+  non-root image (the Python hub's is `python:3.12-slim` plus fastapi,
+  uvicorn and psycopg). Dependencies build in a cached layer, so editing hub
+  code rebuilds in seconds.
+- **`setup.sh`** — `install` / `restore` / `status` / `update` for rootless
+  Podman, plus `--sqlite` for a hub with no database server at all.
+- **`client-setup.sh`** — node id, hub URL, secret, optional SSH tunnel with a
+  dedicated key and systemd user service, and the Claude Code MCP entry.
+- **`deploy/`** — Podman Quadlets, Docker Compose, Fly and Railway templates,
+  each in both Postgres and SQLite flavours where that makes sense, plus env
+  examples and a README.
+- **`rusty-remind-me-hub --health-check`** — a loopback `/health` probe that
+  exits 0/1, so the image can carry a `HEALTHCHECK` without installing curl
+  into the runtime layer purely to make one request.
+- **`crates/remind_me_hub/README.md`** — configuration, routes, cursors, the
+  `origin_node` rule, operating commands and the security posture.
+
+### Changed
+- **CI sets `REMIND_ME_HUB_REQUIRE_POSTGRES=1`** on the Postgres test step. A
+  skipped Postgres test reports as *passed* and cargo hides the `SKIP` line, so
+  losing the service container would have looked identical to a clean run. That
+  is now a hard failure.
+
+### Notes
+- **The image build context is the workspace root**, not the crate directory —
+  the hub is one crate in a Cargo workspace and the build needs the root
+  `Cargo.toml`/`Cargo.lock`. Every template passes the right context; it is
+  documented because a hand-run `podman build crates/remind_me_hub` fails in a
+  way that does not explain itself.
+- The image was **built and run for real**, both backends, including a
+  push/pull round-trip and a row verified in Postgres — not merely written.
+  Two bugs surfaced that way: a missing stub for the `watchdog_stack_probe`
+  bin, and cargo linking the stub `remind_me_hub` lib because `COPY` preserves
+  source mtimes.
+- SQLite deployments use a named volume or `:U`, because the image runs as uid
+  10001 and a plain host bind mount arrives owned by the host user, leaving the
+  hub unable to create its database.
+
 ## 2026-08-05 — The sync hub, ported (E1)
 
 ### Added
