@@ -42,6 +42,32 @@ Dated entries, newest first. One entry per merged pull request.
   exactly this as its issue #139.
 - Sidecar stdio is detached. A child writing to the MCP server's stdout would
   corrupt the JSON-RPC stream, which is the one unrecoverable failure here.
+## 2026-08-05 — Fix a ~50% flake in the recalibration boundary test (#180)
+
+### Fixed
+- **`recalibrate_test::the_boundary_day_qualifies` was a coin flip**, failing
+  about half of all CI runs on unrelated changes. It planted a memory at
+  *exactly* the stale threshold using a sub-second timestamp, then compared it
+  against `julianday('now')` — which SQLite evaluates at coarser precision, so
+  the difference landed just *below* the threshold roughly half the time.
+  Measured over 2000 samples of the same arithmetic: `diff < 90` in 993, with a
+  typical shortfall of `-1.16e-08` days.
+
+### Notes
+- **The exact-boundary form could not be made to work, only made to look like
+  it worked.** Its stated purpose was to distinguish the predicate's `>=` from
+  a `>`, which needs a difference of exactly `90.0` — unreachable against a
+  wall clock read by `julianday('now')`. It caught nothing reliably; a `>=` →
+  `>` regression would have moved it from "fails half the time" to "fails half
+  the time".
+- Replaced with `the_stale_window_is_bracketed_on_both_sides`, which pins the
+  threshold from both directions with a margin: `+2s` past the window must
+  qualify, `-1h` inside it must not. Two seconds far exceeds any plausible
+  clock or precision skew and is far below the day granularity the window is
+  expressed in. 25 consecutive runs, zero failures.
+- The reasoning is recorded in the test itself, so the exact-boundary version
+  is not "restored" later as an apparent improvement.
+
 ## 2026-08-05 — A stuck-call watchdog (#168)
 
 ### Added
