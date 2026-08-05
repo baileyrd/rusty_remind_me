@@ -118,8 +118,17 @@ The finding that shaped the implementation: **the reference's teardown
 guarantee is Windows-only.** Its `_job()` returns `None` immediately when
 `sys.platform != "win32"`, so on Linux and macOS the reference orphans its
 sidecars on abnormal exit exactly as a naive implementation would. The gap
-against the reference is therefore one platform/exit cell, not four — see
+against the reference was therefore one platform/exit cell, not four — see
 `docs/adr/0013`.
+
+**Closed in [#186](https://github.com/baileyrd/rusty_remind_me/pull/186).**
+That one cell is now matched: children are assigned to a Windows Job object
+with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, taking the workspace's first FFI
+dependency (`windows-sys`, target-gated to `cfg(windows)`). ADR-0013 is
+amended in place. The Unix abnormal-exit row still orphans, in both
+implementations — deliberately, since closing it would overshoot the
+reference. The Windows path is type-checked against
+`x86_64-pc-windows-gnu`, not runtime-tested; CI is ubuntu-only.
 
 ### E1 — the hub
 
@@ -161,26 +170,30 @@ Recorded because each looked like one:
 
 ## Stop-and-ask items
 
-Under the parity-loop skill's rules these are never auto-implemented:
+Under the parity-loop skill's rules these are never auto-implemented. All
+three were put to a human; two came back yes and are done.
 
 1. **E1, the hub** — a new deployable in another language. Scope decision
-   first; not filed as an issue.
-2. **The Windows Job object for E5** — matching the reference's abnormal-exit
-   teardown needs a direct `windows-sys` dependency, against a workspace that
-   has deliberately had no FFI dependency at all (`docs/adr/0012` took the
-   same decision against `libc`). Recorded in `docs/adr/0013` with the
-   revisit path, rather than taken silently.
-3. ~~**A stack-dumping crate for D1**~~ — **asked, answered, and done.**
-   The framing above was too generous to itself: there is no pure-Rust way to
-   dump another thread's stack, so the real cost was a *system* library
+   first; not filed as an issue. **Still open.**
+2. ~~**The Windows Job object for E5**~~ — **asked, answered, and done in
+   [#186](https://github.com/baileyrd/rusty_remind_me/pull/186).** It was
+   stopped-and-asked precisely because it needed a direct `windows-sys`
+   dependency against a workspace that had deliberately had no FFI dependency
+   at all (`docs/adr/0012` took the same decision against `libc`). The answer
+   was to take it, target-gated to `cfg(windows)`; ADR-0013 is amended in
+   place rather than quietly contradicted. ADR-0012's refusal of `libc`
+   stands — that probe has a pure-`std` alternative and `CreateJobObjectW`
+   does not.
+3. ~~**A stack-dumping crate for D1**~~ — **asked, answered, and done.** The
+   framing in the row above was too generous to itself: there is no pure-Rust
+   way to dump another thread's stack, so the real cost was a *system* library
    (`libunwind-ptrace`) plus permission to `ptrace`, not just a crate. Taken
-   behind an off-by-default, Linux-only `stack-dumps` feature; the in-process
+   behind an off-by-default, Linux-only `stack-dumps` feature. The in-process
    signal-handler alternative was rejected because capturing a backtrace is not
    async-signal-safe and would deadlock precisely when the diagnostic fires.
    `docs/adr/0014` records it.
 
-None of the three was taken unattended. Items 2 and 3 have since been
-taken, each with an explicit yes.
+None was taken unattended. **E1 is the only one still awaiting a decision.**
 
 ---
 

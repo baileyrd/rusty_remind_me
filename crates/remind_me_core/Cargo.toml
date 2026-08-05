@@ -80,6 +80,17 @@ rerank = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
 # call's identity and duration exactly as it does today.
 stack-dumps = ["dep:rstack-self"]
 
+# The workspace's only *unconditional* FFI dependency, and target-gated so it
+# exists nowhere else. `docs/adr/0013` records why the sidecar teardown gap was
+# worth closing and `docs/adr/0012` records the general reluctance -- read both
+# before adding a second one. (`stack-dumps` also reaches FFI, but only when
+# someone opts in; see `docs/adr/0014`.)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+] }
+
 # Thread-stack dumping for the slow-call watchdog, behind the `stack-dumps`
 # feature. Linux-only because it works by `ptrace`-ing this process from a
 # short-lived child -- out-of-process by design, so a thread wedged in

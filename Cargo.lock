@@ -3025,6 +3025,7 @@ dependencies = [
  "usearch",
  "uuid",
  "whisper-rs",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

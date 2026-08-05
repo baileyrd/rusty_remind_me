@@ -1276,3 +1276,38 @@ runs.
 Revisit if: macOS becomes worth covering (a different mechanism entirely —
 `task_for_pid` and code signing), or if a pure-Rust unwinder that is genuinely
 async-signal-safe appears.
+
+## Windows Job object for sidecars: take the FFI dependency (ADR-0013 amendment)
+
+**Decision:** add `windows-sys`, target-gated to `cfg(windows)`, and assign
+every sidecar to a job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — closing the
+last behavioural divergence in `sidecars`.
+
+This reverses the "no FFI" half of ADR-0013, which is why the reversal lives
+there as a full amendment rather than only here. The short version: ADR-0013
+deferred the work behind a trigger ("Windows becomes a first-class deployment
+target, or an orphaned tunnel is observed") that was never going to fire on its
+own, while this is a parity effort and the gap was a known divergence. Its own
+cost estimate held exactly, so the only remaining argument for waiting was that
+nobody had complained.
+
+**ADR-0012 is not reopened.** That refused `libc` for a `kill(0)` probe that
+has a pure-`std` alternative. This has none — there is no way to reach
+`CreateJobObjectW` from `std`. The dependency is also
+`[target.'cfg(windows)'.dependencies]`, so it is absent from the dependency
+graph on the platforms this actually runs on today.
+
+**Deliberate divergence — `SetInformationJobObject` failure.** The reference
+warns, keeps the handle, and still assigns children to a job that now grants
+nothing. This closes the handle and returns `None`. Observable sidecar
+behaviour is identical (no auto-kill either way); the difference is only a
+leaked kernel handle and a stream of pointless per-child warnings.
+
+**Not runtime-tested, and the code says so.** CI is ubuntu-only. Verification
+is `cargo check --target x86_64-pc-windows-gnu` plus a read against the
+reference's `ctypes` calls. Stated in the module docs and the ADR rather than
+implied by a green check.
+
+Revisit if: a Windows runner joins CI (then test it for real), or the Unix
+abnormal-exit row starts mattering — but note that closing *that* would put
+this ahead of the reference, which is a different decision than parity.

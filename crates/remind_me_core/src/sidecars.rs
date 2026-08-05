@@ -14,33 +14,40 @@
 //! children on drop, and unwinding runs `Drop`, so a normal return or a panic
 //! both tear the children down.
 //!
-//! **Abnormal exit is not** — `SIGKILL`, a power cut, or a hard crash leaves
-//! the children orphaned. The reference closes exactly half of this hole: it
-//! spawns into a Windows **Job object** with `KILL_ON_JOB_CLOSE`, so the OS
-//! reaps them no matter how the parent died. Its `_job()` returns `None`
-//! immediately when `sys.platform != "win32"`, so on Linux and macOS the
-//! reference has no such guarantee either.
+//! **Abnormal exit is covered on Windows only** — and that is the reference's
+//! shape, not a shortfall from it. Every child is assigned to a Windows **Job
+//! object** created with `KILL_ON_JOB_CLOSE` ([`job`]), so when the parent's
+//! handle closes for *any* reason — `TerminateProcess`, a hard crash, a power
+//! cut — the OS reaps the whole job. No exit hook is involved, which is
+//! precisely what makes it robust. The reference's `_job()` returns `None`
+//! immediately when `sys.platform != "win32"`, so on Linux and macOS neither
+//! it nor this module has any such guarantee: a `SIGKILL`ed server orphans its
+//! sidecars.
 //!
 //! So relative to the reference this module is:
 //!
 //! | Platform | Reference | Here |
 //! | --- | --- | --- |
 //! | Windows, graceful | children killed | children killed |
-//! | Windows, abnormal | children killed (Job object) | **children orphaned** |
+//! | Windows, abnormal | children killed (Job object) | children killed (Job object) |
 //! | Unix, graceful | children killed | children killed |
 //! | Unix, abnormal | children orphaned | children orphaned |
 //!
-//! One cell differs. Matching it needs `CreateJobObjectW` /
-//! `AssignProcessToJobObject`, which means a direct `windows-sys` dependency —
-//! and this workspace has deliberately had no FFI dependency at all (see
-//! `docs/adr/0012`, which took the same decision for `libc::kill`). That
-//! trade is recorded in `docs/adr/0013` rather than silently taken here.
+//! All four cells match. `docs/adr/0013` records both halves of that history:
+//! the original decision to ship without the Job object, and the amendment
+//! that closed it by taking this workspace's first — and still only — FFI
+//! dependency, target-gated to Windows.
 //!
-//! The practical symptom of the missing cell: an SSH tunnel surviving a
-//! `SIGKILL`ed server keeps holding its local port, and the next server's
-//! `ensure_sidecars` sees the port answering and declines to start its own —
-//! which is *usually* fine, since the surviving tunnel still works, and is
-//! why this is a gap rather than an outage.
+//! The remaining Unix gap has a mild practical symptom: an SSH tunnel
+//! surviving a `SIGKILL`ed server keeps holding its local port, and the next
+//! server's `ensure_sidecars` sees the port answering and declines to start
+//! its own — which is *usually* fine, since the surviving tunnel still works,
+//! and is why this is a gap rather than an outage.
+//!
+//! One caveat worth stating plainly: the Windows path is **type-checked but
+//! not runtime-tested**. CI runs on Ubuntu only, so `mod job` is verified by
+//! `cargo check --target x86_64-pc-windows-gnu` and by inspection against the
+//! reference's `ctypes` calls, and by nothing else.
 //!
 //! # Why the port, not the process, decides
 //!
@@ -260,6 +267,9 @@ impl Sidecars {
         }
 
         let child = cmd.spawn()?;
+        // Immediately after spawn, before anything can return early: an
+        // unassigned child is exactly the orphan this exists to prevent.
+        job::assign(&child, &spec.name);
         eprintln!("sidecars: {} started (pid {})", spec.name, child.id());
         self.procs.insert(spec.name.clone(), child);
         Ok(())
@@ -589,4 +599,148 @@ mod tests {
     fn an_unresolvable_host_reads_as_closed_rather_than_panicking() {
         assert!(!port_open("no-such-host.invalid", 80));
     }
+}
+
+/// Windows Job-object teardown: the OS kills the sidecars when this process
+/// dies, however it dies.
+///
+/// `Drop` covers a graceful exit and an unwinding panic, but not
+/// `TerminateProcess`, a hard crash, or a power cut. A Job object created with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` covers all of those: the kernel
+/// terminates every assigned process when the last handle to the job closes,
+/// which happens automatically when the process object is destroyed. No exit
+/// hook is involved, which is precisely what makes it robust.
+///
+/// This is the cell `docs/adr/0013` recorded as deliberately missing. It is
+/// closed now; the ADR carries the amendment.
+///
+/// # Unix has no equivalent, and neither does the reference
+///
+/// The reference's `_job()` returns `None` immediately when
+/// `sys.platform != "win32"`. `prctl(PR_SET_PDEATHSIG)` is the nearest Linux
+/// analogue, is Linux-only rather than Unix-wide, and would need a second FFI
+/// dependency to reach — so the Unix rows stay as they were, matching the
+/// reference exactly.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// A `HANDLE` is a raw pointer, so it is neither `Send` nor `Sync` by
+    /// default. Wrapping it is sound here because a job handle is an opaque
+    /// kernel identifier rather than something dereferenced: it is only ever
+    /// passed back to Win32 calls, which are themselves thread-safe, and it is
+    /// created exactly once and never mutated afterwards.
+    struct JobHandle(HANDLE);
+    // SAFETY: see the type's own docs -- the handle is never dereferenced,
+    // only handed back to thread-safe Win32 APIs.
+    unsafe impl Send for JobHandle {}
+    unsafe impl Sync for JobHandle {}
+
+    static JOB: OnceLock<Option<JobHandle>> = OnceLock::new();
+
+    /// Create the process-wide job, once.
+    ///
+    /// Returns `None` when the job could not be created or configured, which
+    /// is a *degradation*, never a failure: sidecars still start and are still
+    /// killed on a graceful exit. Only the abnormal-exit guarantee is lost, so
+    /// this warns rather than propagating.
+    fn job() -> Option<HANDLE> {
+        JOB.get_or_init(|| {
+            // SAFETY: both arguments are optional per the Win32 contract; a
+            // null security descriptor and null name request an unnamed job
+            // with default security, which is what is wanted.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                // SAFETY: reads a thread-local error code set by the call
+                // immediately above; no pointers involved.
+                let err = unsafe { GetLastError() };
+                eprintln!(
+                    "sidecars: CreateJobObjectW failed (GetLastError={err}) -- sidecars will \
+                     not be killed automatically if this process exits abnormally"
+                );
+                return None;
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+                // SAFETY: the struct is plain old data with no padding
+                // invariants and no pointers; Win32 expects a zeroed struct
+                // with only the fields it is told to read populated.
+                unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            // SAFETY: `info` outlives the call, and the length matches the
+            // struct the class argument selects.
+            let ok = unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::addr_of!(info).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if ok == 0 {
+                // SAFETY: reads a thread-local error code set by the call
+                // immediately above; no pointers involved.
+                let err = unsafe { GetLastError() };
+                eprintln!(
+                    "sidecars: SetInformationJobObject failed (GetLastError={err}) -- \
+                     KILL_ON_JOB_CLOSE not set, so sidecars may outlive this process"
+                );
+                // Deliberate divergence: the reference warns here but keeps
+                // the handle and still assigns children to it. A job without
+                // KILL_ON_JOB_CLOSE grants nothing, so that buys no teardown
+                // guarantee -- it just leaks a kernel handle and makes every
+                // later `assign` do pointless work and emit pointless
+                // warnings. Sidecar behaviour is identical either way; this
+                // is tidier. Recorded in `docs/parity-loop-decisions.md`.
+                //
+                // SAFETY: `handle` is a valid handle this function created and
+                // is not stored anywhere after this point.
+                unsafe { CloseHandle(handle) };
+                return None;
+            }
+            Some(JobHandle(handle))
+        })
+        .as_ref()
+        .map(|j| j.0)
+    }
+
+    /// Put a freshly-spawned child under the job.
+    ///
+    /// A failure is reported and tolerated for the same reason the job's own
+    /// creation failure is: the sidecar is running and useful either way. The
+    /// commonest cause is this process already living inside a job without
+    /// `JOB_OBJECT_LIMIT_BREAKAWAY_OK`, which the reference hit as its issue
+    /// #138 and which no amount of care here can fix from the inside.
+    pub(super) fn assign(child: &Child, name: &str) {
+        let Some(job) = job() else {
+            return;
+        };
+        // SAFETY: the handle belongs to a live `Child` borrowed for this call,
+        // so it cannot have been closed.
+        let ok = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
+        if ok == 0 {
+            // SAFETY: reads a thread-local error code set by the call
+            // immediately above; no pointers involved.
+            let err = unsafe { GetLastError() };
+            eprintln!(
+                "sidecars: AssignProcessToJobObject failed for {name} (GetLastError={err}) \
+                 -- it will not be auto-killed if this process exits abnormally"
+            );
+        }
+    }
+}
+
+/// No-op on every non-Windows target, matching the reference's own `_job()`.
+#[cfg(not(windows))]
+mod job {
+    pub(super) fn assign(_child: &std::process::Child, _name: &str) {}
 }

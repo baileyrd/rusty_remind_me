@@ -40,6 +40,40 @@ Dated entries, newest first. One entry per merged pull request.
   names that frame with a source location — not by compiling the feature and
   hoping. CI runs those tests.
 
+## 2026-08-05 — Windows Job object for sidecars (#186)
+
+### Added
+- **Sidecars are assigned to a Windows Job object** created with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, matching the reference. When the
+  server dies abnormally on Windows — `TerminateProcess`, a hard crash, a
+  power cut — the OS now reaps the SSH tunnel and the dashboard UI instead of
+  leaving them orphaned holding their ports. No exit hook is involved, which
+  is what makes it hold where `Drop` cannot.
+- `windows-sys` as the workspace's **first and only FFI dependency**, declared
+  under `[target.'cfg(windows)'.dependencies]` so it is absent from the
+  dependency graph on Linux and macOS entirely.
+
+### Changed
+- `sidecars`' teardown table now reads **all four cells matching** the
+  reference, where it previously documented one divergent cell. The Unix
+  abnormal-exit row still orphans — in both implementations.
+- All three Win32 calls report `GetLastError()` on failure, matching the
+  reference (whose issue #138 was precisely about these having been silent).
+  None is fatal: a failure costs the abnormal-exit guarantee, not the sidecar.
+
+### Notes
+- **The Windows path is type-checked, not runtime-tested.** CI is
+  `ubuntu-latest` only. Verification is `cargo check --target
+  x86_64-pc-windows-gnu -p remind_me_core` plus a line-by-line read against the
+  reference's `ctypes` calls. Runtime-testing it needs a Windows runner.
+- **This reverses the "no FFI" half of ADR-0013**, which is amended in place
+  rather than quietly contradicted. ADR-0012's refusal of `libc` stands: that
+  probe has a pure-`std` alternative, and `CreateJobObjectW` does not.
+- One deliberate divergence: when `SetInformationJobObject` fails, the
+  reference keeps the now-useless handle and still assigns children to it;
+  this closes it and skips assignment. Identical sidecar behaviour, minus a
+  leaked handle.
+
 ## 2026-08-05 — `remind_me_history` defaults `limit` to 10 (#183)
 
 ### Changed
