@@ -71,14 +71,38 @@ audio = ["dep:whisper-rs", "dep:symphonia"]
 # the same reason: it is pure Rust and takes explicit model paths, so enabling
 # reranking can never turn a search into a model download.
 rerank = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
+# Dump every thread's stack when a tool call hangs, matching the reference's
+# `faulthandler.dump_traceback_later`. Optional and Linux-only, and unlike
+# every other feature here it needs *system* libraries (`libunwind-dev` and
+# `liblzma-dev` -- see `build.rs` for why the second is not optional) plus
+# permission to `ptrace`. That is a real departure
+# from this list's "no system binary" rule, which is why it is off by default
+# and why `docs/adr/0014` exists. Feature-off, the watchdog reports the stuck
+# call's identity and duration exactly as it does today.
+stack-dumps = ["dep:rstack-self"]
 
-# The workspace's only FFI dependency, and target-gated so it exists nowhere
-# else. `docs/adr/0013` records why the sidecar teardown gap was worth closing
-# and `docs/adr/0012` records the general reluctance -- read both before adding
-# a second one.
+# The workspace's only *unconditional* FFI dependency, and target-gated so it
+# exists nowhere else. `docs/adr/0013` records why the sidecar teardown gap was
+# worth closing and `docs/adr/0012` records the general reluctance -- read both
+# before adding a second one. (`stack-dumps` also reaches FFI, but only when
+# someone opts in; see `docs/adr/0014`.)
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",
 ] }
 
+# Thread-stack dumping for the slow-call watchdog, behind the `stack-dumps`
+# feature. Linux-only because it works by `ptrace`-ing this process from a
+# short-lived child -- out-of-process by design, so a thread wedged in
+# CPU-bound code still gets dumped, which is the whole point and is exactly
+# what an in-process signal handler could not do safely.
+[target.'cfg(target_os = "linux")'.dependencies]
+rstack-self = { version = "0.3", optional = true }
+
+# Test fixture for `stack-dumps`, not a shipped tool. Declared explicitly so
+# `required-features` applies: without it, a default build would try to compile
+# a binary whose whole purpose is the feature it is missing.
+[[bin]]
+name = "watchdog_stack_probe"
+required-features = ["stack-dumps"]

@@ -43,6 +43,44 @@ Dated entries, newest first. One entry per merged pull request.
   `--no-default-features` (SQLite-only) configuration so a `postgres::`
   reference cannot leak outside the feature gate.
 
+## 2026-08-05 — Thread-stack dumps for the slow-call watchdog
+
+### Added
+- **`stack-dumps`, an optional Linux-only feature** that makes the slow-call
+  watchdog dump *every thread's stack* when a call runs past the threshold —
+  the reference's `faulthandler.dump_traceback_later` guarantee, including for
+  a thread wedged in synchronous CPU-bound code.
+- `watchdog::install_stack_dump_hook()`, which a binary must call first thing
+  in `main`, and `watchdog::stack_dumps_available()`, which reports whether all
+  three preconditions (feature, platform, hook) actually hold.
+- `StuckCall::stacks`, carrying the dump when there is one.
+
+### Changed
+- Nothing, with the feature off — which is the default, and every non-Linux
+  build. The watchdog still reports the stuck call's identity and duration.
+
+### Notes
+- **This costs a system library**, `libunwind-ptrace` (`libunwind-dev`), plus
+  permission to `ptrace`. That is the first exception to this crate's
+  "no system binary" rule for optional features, which is why it is off by
+  default and why `docs/adr/0014` exists.
+- **Out-of-process by design.** Capture spawns a short-lived child that
+  `ptrace`s this process. The cheaper-looking alternative — unwinding the stuck
+  thread from a signal handler — can deadlock, because capturing a backtrace is
+  not async-signal-safe, and it would deadlock exactly when the diagnostic is
+  needed. The reference's rule that the watchdog must never be why a call fails
+  ruled it out.
+- **The hook is a safety interlock, not a formality.** Capture re-executes the
+  binary; without the hook that child would run the *program*, starting a
+  second server. Nothing is spawned unless the hook has announced itself, so
+  forgetting it degrades to the feature-off behaviour rather than misfiring.
+- **A refused `ptrace` is survivable.** Hardened hosts (`ptrace_scope` 2/3,
+  seccomp, no `CAP_SYS_PTRACE`) log once and still get the identity-and-duration
+  report.
+- Tested by actually wedging a thread in CPU-bound code and asserting the dump
+  names that frame with a source location — not by compiling the feature and
+  hoping. CI runs those tests.
+
 ## 2026-08-05 — Windows Job object for sidecars (#186)
 
 ### Added

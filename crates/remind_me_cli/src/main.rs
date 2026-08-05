@@ -170,6 +170,13 @@ fn parse_list_args(args: &[String]) -> Result<ListArgs, String> {
 const LIST_USAGE: &str = "Usage: rusty-remind-me list [--limit N] [--category CATEGORY] [--json]";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // First, before argv or the database. The slow-call watchdog dumps thread
+    // stacks by re-executing this binary as a tracer child, and everything
+    // done ahead of this line would be done again in every such child --
+    // including opening the database. A no-op unless the `stack-dumps`
+    // feature is on, and it never returns when this process *is* the child.
+    remind_me_core::watchdog::install_stack_dump_hook();
+
     let args: Vec<String> = env::args().collect();
     let db_path = env::var("REMIND_ME_DB_PATH").unwrap_or_else(|_| "remind_me.db".to_string());
 

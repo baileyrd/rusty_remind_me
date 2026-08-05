@@ -1230,6 +1230,53 @@ Revisit if: the reference adds a write path to `remind_me_entity`, or drops
 `extra="forbid"` such that the two could converge on a superset instead.
 
 
+## Watchdog stack dumps: take the system library, behind a feature (ADR-0014)
+
+**Decision:** implement the reference's `faulthandler.dump_traceback_later`
+guarantee — every thread's stack, including one wedged in CPU-bound code —
+using `rstack-self`, behind an off-by-default, Linux-only `stack-dumps`
+feature.
+
+**The gap-analysis undersold the cost, and that is worth recording.** It listed
+this as "a stack-dumping crate", on the same footing as ADR-0012's `libc`. It
+is not: there is no pure-Rust way to dump another thread's stack, so the real
+price is a *system* C library (`libunwind-ptrace`) plus permission to `ptrace`.
+That breaks this crate's otherwise-consistent "no system binary" rule for
+optional features — the rule that picked `symphonia` over ffmpeg bindings and
+`rten` over the ONNX Runtime binding. Off-by-default is what keeps the
+exception contained.
+
+**Out-of-process, not a signal handler.** The cheaper option is to signal the
+stuck thread and unwind it in the handler, as `pprof-rs` does. Rejected on the
+reference's own stated rule, which this module inherits: *the watchdog must
+never be the reason a tool call fails.* Capturing a backtrace is not
+async-signal-safe — it allocates and takes loader locks — so a thread
+interrupted inside one deadlocks permanently, in exactly the situation the
+diagnostic exists to explain. A sampling profiler can wear those odds; a
+one-shot diagnostic on a wedged server cannot.
+
+**The hook is an interlock.** Capture re-executes `current_exe()`, so a binary
+that enabled the feature but forgot `install_stack_dump_hook()` would spawn a
+second server. Nothing spawns unless the hook has positively announced itself,
+so forgetting it degrades rather than misfires. Pinned by a test that passes in
+every test binary in the workspace, none of which can install the hook.
+
+**`WatchdogStatus` deliberately unchanged.** It keeps the reference's exact
+`{enabled, threshold_seconds, calls_in_flight}`. A `stack_dumps` field was
+considered and rejected: `remind_me_server_status` is a parity surface and a
+build-time fact is not worth diverging it for.
+
+**Tested by wedging a real thread**, not by compiling the feature. The first
+version of that test was flaky at ~1-in-5 because a debug build turns every
+arithmetic helper into a call, so the sampled PC usually landed in `std` where
+the unwinder could not recover the caller. The fixture now spins in float
+arithmetic that compiles to inline instructions; measured 12/12, then 5/5 full
+runs.
+
+Revisit if: macOS becomes worth covering (a different mechanism entirely —
+`task_for_pid` and code signing), or if a pure-Rust unwinder that is genuinely
+async-signal-safe appears.
+
 ## Windows Job object for sidecars: take the FFI dependency (ADR-0013 amendment)
 
 **Decision:** add `windows-sys`, target-gated to `cfg(windows)`, and assign
