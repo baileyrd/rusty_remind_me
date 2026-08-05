@@ -2,6 +2,39 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — The `list` CLI subcommand (#167)
+
+### Added
+- **`rusty-remind-me list [--limit N] [--category CATEGORY] [--json]`** — browse
+  memories by filter, the counterpart to `search`. The reference has exposed
+  `add`/`search`/`list` since its issue #189; this crate had only the first two,
+  so the one subcommand for enumerating a known slice was missing.
+
+### Notes
+- **The flag set is the reference's, not this crate's tool input's.**
+  `MemoryListInput` also carries `tags`, `source`, `offset` and
+  `include_sensitive`, but `remind_me_mcp/cli.py`'s `list_p` exposes only
+  `--limit`, `--category` and `--json`. Accepting flags the reference rejects
+  would be the same drop-in divergence as missing ones, just in the other
+  direction, so the extra fields stay at their defaults.
+- **An out-of-range `--limit` is refused rather than clamped.** `list_memories`
+  clamps into `LIST_LIMIT_MIN..=LIST_LIMIT_MAX` silently, which would hand
+  someone who asked for 500 a page of 100 with no indication why. The reference
+  bounds `limit` on its pydantic model and so rejects it; this matches that at
+  the CLI boundary instead of inheriting the clamp.
+- **Markdown by default, JSON on `--json`,** matching the reference's
+  `ResponseFormat` default. The renderer is the existing
+  `reminders::render_memories_markdown`, already kept byte-compatible with the
+  reference's `_fmt_memory_md` — a second renderer would be a second thing to
+  keep in step.
+- The JSON branch serializes `MemoryListResult` whole. The reference's payload
+  is `count`/`memories`/`total`; this additionally carries the pagination
+  cursor rather than reshaping into a strictly smaller object.
+- Parsing is factored into `parse_list_args` returning `Result` rather than
+  exiting inline, so it is testable without a process boundary. Six end-to-end
+  tests still drive the real binary, since a parser wired to nothing would pass
+  the unit tests.
+
 ## 2026-08-05 — Cross-encoder reranking (#155, part 2 of 2)
 
 ### Added
