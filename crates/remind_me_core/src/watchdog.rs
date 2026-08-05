@@ -6,18 +6,37 @@
 //! Diagnosing a real incident on the reference side — a correlated subquery
 //! pegging a core for minutes — meant attaching `py-spy` to a live process.
 //!
-//! # What this is not
+//! # Two levels of detail, and how to get the better one
 //!
 //! The reference arms `faulthandler.dump_traceback_later`, which dumps *every*
-//! thread's stack, including one blocked in synchronous CPU-bound code. There
-//! is no stdlib equivalent in Rust, and reaching for a stack-unwinding crate to
-//! chase one would be a new third-party dependency for a diagnostic.
+//! thread's stack, including one blocked in synchronous CPU-bound code. Rust
+//! has no stdlib equivalent, so this module has two modes:
 //!
-//! So this reports identity and duration rather than a stack: *which* call has
-//! been running, and for how long. That preserves the property that actually
-//! mattered — a stuck call names itself from outside, without a debugger — and
-//! is a strictly weaker signal than the reference's. Said plainly here rather
-//! than left for someone to discover when the dump they expected is a log line.
+//! - **Always: identity and duration.** *Which* call has been running, and for
+//!   how long. This needs nothing beyond `std` and works on every platform.
+//! - **With the `stack-dumps` feature, on Linux: every thread's stack**, the
+//!   reference's actual guarantee. See [`install_stack_dump_hook`], which the
+//!   binary must call — without it, no dump is ever attempted.
+//!
+//! The feature is off by default, and deliberately so: it needs a *system*
+//! library (`libunwind-ptrace`) and permission to `ptrace`, which is a heavier
+//! ask than every other optional feature in this crate. `docs/adr/0014`
+//! records that trade in full. Feature-off the watchdog is exactly what it was
+//! — a strictly weaker signal than the reference's, said plainly here rather
+//! than left for someone to discover when the dump they expected is a log
+//! line.
+//!
+//! # Why out-of-process, and why that is not paranoia
+//!
+//! The dump works by spawning a short-lived child that `ptrace`s this process.
+//! The obvious alternative — a signal handler that unwinds the stuck thread in
+//! place — is what a profiler like `pprof` does, and it is not safe here.
+//! Capturing a backtrace is not async-signal-safe: it allocates and takes
+//! loader locks, so a thread interrupted while already holding one deadlocks,
+//! permanently, in the exact situation the diagnostic exists to explain. The
+//! reference states the rule this module inherits — *this must never be the
+//! reason a tool call fails* — and an in-process unwinder cannot honour it.
+//! Being ptraced from outside costs the target nothing but a stop.
 //!
 //! # Reference-counted, because calls overlap
 //!
@@ -56,6 +75,15 @@ pub struct StuckCall {
     pub tool: String,
     /// How long it had been running when the watchdog noticed.
     pub elapsed: Duration,
+    /// Every thread's stack at the moment the watchdog noticed, when
+    /// [`stack_dumps_available`] is true and the capture succeeded.
+    ///
+    /// `None` covers three different situations on purpose — feature off,
+    /// hook not installed, capture failed — because none of them changes what
+    /// a caller does: report what is known and carry on. The distinction is
+    /// logged at the point it is discovered, where the reason is still in
+    /// hand, rather than encoded in a type nobody matches on.
+    pub stacks: Option<String>,
 }
 
 /// Where a stuck-call report goes.
@@ -65,7 +93,12 @@ pub struct StuckCall {
 pub type Sink = Arc<dyn Fn(&StuckCall) + Send + Sync>;
 
 /// The default sink: one line per stuck call, matching this crate's
-/// `subsystem: message` convention.
+/// `subsystem: message` convention, followed by the thread stacks when there
+/// are any.
+///
+/// Stacks go to stderr rather than a file, matching where the reference points
+/// `faulthandler` — the operator reading "the call timed out" is already
+/// looking at this stream.
 pub fn stderr_sink() -> Sink {
     Arc::new(|stuck: &StuckCall| {
         eprintln!(
@@ -73,6 +106,9 @@ pub fn stderr_sink() -> Sink {
             stuck.tool,
             stuck.elapsed.as_secs_f64()
         );
+        if let Some(stacks) = &stuck.stacks {
+            eprintln!("{}", stacks);
+        }
     })
 }
 
@@ -95,6 +131,139 @@ pub fn configured_threshold() -> Option<Duration> {
         // 0 (or a negative/NaN value) is the reference's "off" switch.
         None
     }
+}
+
+/// Thread-stack capture. Real only with `stack-dumps` on Linux; a no-op
+/// everywhere else, so the call sites need no `cfg` of their own.
+mod stacks {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Set on the child process so it knows to become a tracer instead of
+    /// running the program again.
+    ///
+    /// An env var rather than an argv flag deliberately: argv is the binary's
+    /// public interface, and a stray `--rstack-child` in `--help` output — or
+    /// worse, colliding with a real subcommand — is a cost this diagnostic has
+    /// no business imposing.
+    pub const CHILD_MARKER_ENV: &str = "REMIND_ME_WATCHDOG_STACK_CHILD";
+
+    /// Whether the binary called [`super::install_stack_dump_hook`].
+    ///
+    /// This is a safety interlock, not bookkeeping. Capturing works by
+    /// re-executing this binary; if the hook is absent, that child would run
+    /// the *program* — starting a second MCP server behind the operator's
+    /// back. So nothing is ever spawned unless the hook has positively
+    /// announced itself.
+    static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+    pub fn mark_hook_installed() {
+        HOOK_INSTALLED.store(true, Ordering::SeqCst);
+    }
+
+    pub fn hook_installed() -> bool {
+        HOOK_INSTALLED.load(Ordering::SeqCst)
+    }
+
+    /// Is this build able to dump stacks at all, ignoring the hook?
+    pub const fn compiled_in() -> bool {
+        cfg!(all(target_os = "linux", feature = "stack-dumps"))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "stack-dumps"))]
+    pub fn capture() -> Result<String, String> {
+        use std::fmt::Write as _;
+
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.env(CHILD_MARKER_ENV, "1");
+        // The child's job is to report through the pipe rstack-self sets up.
+        // Anything it writes to stdout would interleave with the MCP protocol
+        // on a stdio server, so it is silenced rather than inherited.
+        cmd.stdout(std::process::Stdio::null());
+
+        let trace = rstack_self::trace(&mut cmd).map_err(|e| format!("trace: {e}"))?;
+
+        let mut out = String::from("watchdog: thread stacks follow\n");
+        for thread in trace.threads() {
+            let _ = writeln!(out, "  thread {} ({:?})", thread.id(), thread.name());
+            for frame in thread.frames() {
+                // A frame can resolve to several symbols when it is inlined,
+                // and to none at all when the binary is stripped -- both are
+                // normal, and neither is worth failing the whole dump over.
+                let mut named = false;
+                for symbol in frame.symbols() {
+                    named = true;
+                    let _ = write!(out, "    {}", symbol.name().unwrap_or("<unknown>"));
+                    match (symbol.file(), symbol.line()) {
+                        (Some(file), Some(line)) => {
+                            let _ = writeln!(out, " ({}:{})", file.display(), line);
+                        }
+                        (Some(file), None) => {
+                            let _ = writeln!(out, " ({})", file.display());
+                        }
+                        _ => {
+                            let _ = writeln!(out);
+                        }
+                    }
+                }
+                if !named {
+                    let _ = writeln!(out, "    <no symbol> (ip {:#x})", frame.ip());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "stack-dumps")))]
+    pub fn capture() -> Result<String, String> {
+        Err("built without the `stack-dumps` feature on Linux".to_string())
+    }
+
+    /// Become the tracer child and exit. Only correct when the marker is set.
+    #[cfg(all(target_os = "linux", feature = "stack-dumps"))]
+    pub fn run_as_child() -> ! {
+        // A failure here is the child's alone: the parent sees the trace fail
+        // and degrades to identity-and-duration. Exiting non-zero would make
+        // that clearer, but the parent already reports the error it got.
+        if let Err(e) = rstack_self::child() {
+            eprintln!("watchdog: stack-dump child failed: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "stack-dumps")))]
+    pub fn run_as_child() -> ! {
+        std::process::exit(0);
+    }
+}
+
+/// Whether a stuck call will actually produce thread stacks in this process.
+///
+/// Three things must all hold: the `stack-dumps` feature, Linux, and a binary
+/// that called [`install_stack_dump_hook`].
+pub fn stack_dumps_available() -> bool {
+    stacks::compiled_in() && stacks::hook_installed()
+}
+
+/// Enable thread-stack dumps for this binary. Call it **first thing in
+/// `main`**, before parsing arguments or opening a database.
+///
+/// Two jobs, and the order matters. If this process *is* the tracer child, it
+/// traces its parent and exits without ever returning. Otherwise it records
+/// that the hook exists, which is what unlocks dumping at all.
+///
+/// Calling it late is not a style nit: everything `main` does before it runs
+/// also runs in every child, so a hook placed after the database opens means
+/// each dump opens the database again.
+///
+/// Safe to call from a binary built without the feature — then it does
+/// nothing, and [`stack_dumps_available`] stays false.
+pub fn install_stack_dump_hook() {
+    if std::env::var_os(stacks::CHILD_MARKER_ENV).is_some() {
+        stacks::run_as_child();
+    }
+    stacks::mark_hook_installed();
 }
 
 /// What the watchdog reports about itself, for `remind_me_server_status`.
@@ -270,6 +439,7 @@ fn monitor_loop(state: Arc<(Mutex<State>, Condvar)>, threshold: Duration, sink: 
                 due.push(StuckCall {
                     tool: call.tool.clone(),
                     elapsed,
+                    stacks: None,
                 });
             } else {
                 let remaining = threshold - elapsed;
@@ -279,8 +449,26 @@ fn monitor_loop(state: Arc<(Mutex<State>, Condvar)>, threshold: Duration, sink: 
 
         if !due.is_empty() {
             // Report without the lock held: a sink is caller-supplied code and
-            // must not be able to block every arm/disarm in the process.
+            // must not be able to block every arm/disarm in the process. The
+            // stack capture below is the sharper version of the same rule --
+            // it spawns a process and stops every thread, and doing that under
+            // the state lock would wedge arm/disarm for its whole duration.
             drop(guard);
+
+            // One capture per batch, attached to the first report. The dump is
+            // process-wide, so if three calls went stuck together, three
+            // copies of the same all-thread stack would be three times the
+            // output and no extra information.
+            if stack_dumps_available() {
+                match stacks::capture() {
+                    Ok(text) => due[0].stacks = Some(text),
+                    // A failed capture must not cost the report that would
+                    // have happened anyway. The commonest cause is a hardened
+                    // host refusing `ptrace`, which is worth naming once.
+                    Err(e) => eprintln!("watchdog: could not capture thread stacks: {e}"),
+                }
+            }
+
             for stuck in &due {
                 sink(stuck);
             }
@@ -446,6 +634,33 @@ mod tests {
         let (sink, _rx) = channel_sink();
         let disabled = Watchdog::new(None, sink);
         assert_eq!(disabled.status().threshold_seconds, None);
+    }
+
+    /// The interlock that keeps a missing hook from becoming a second server.
+    ///
+    /// Capture re-executes `current_exe()`. This test binary never calls
+    /// [`install_stack_dump_hook`] — a libtest harness has nowhere to put it —
+    /// so nothing may be spawned, whether or not the feature is compiled in.
+    /// If this ever fails, every armed call in the test suite is forking a
+    /// copy of the test binary.
+    #[test]
+    fn without_the_hook_no_dump_is_attempted() {
+        assert!(
+            !stack_dumps_available(),
+            "a binary that never installed the hook must never spawn a tracer"
+        );
+
+        let (sink, rx) = channel_sink();
+        let watchdog = Watchdog::new(Some(THRESHOLD), sink);
+        let _guard = watchdog.arm("remind_me_search");
+
+        let stuck = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the call should still be reported");
+        assert_eq!(
+            stuck.stacks, None,
+            "no hook means no stacks -- and the report still happens regardless"
+        );
     }
 
     /// A panic must not leave the watchdog permanently armed — the failure the
