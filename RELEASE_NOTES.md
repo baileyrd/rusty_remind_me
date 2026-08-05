@@ -2,6 +2,47 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — A stuck-call watchdog (#168)
+
+### Added
+- **`watchdog`** — a call running past a threshold announces itself. Previously
+  the only symptom of a hung tool call, from outside the process, was the
+  client reporting a timeout; nothing said *which* call or for how long.
+- **`REMIND_ME_SLOW_CALL_SECONDS`** — threshold in seconds, default `30`,
+  `0` disables. Both match the reference.
+- **`watchdog` on `remind_me_server_status`** — `enabled`,
+  `threshold_seconds`, `calls_in_flight`, the same three fields the
+  reference's `watchdog.status()` reports.
+
+### Notes
+- **This is a weaker signal than the reference's, deliberately.** The reference
+  arms `faulthandler.dump_traceback_later`, which dumps every thread's stack
+  including one blocked in synchronous CPU-bound code. Rust has no stdlib
+  equivalent, and pulling in a stack-unwinding crate for a diagnostic would be
+  a new third-party dependency. So this reports *identity and duration* — which
+  call, how long — rather than a stack. The property that mattered survives: a
+  stuck call names itself without a debugger attached. The module docs say this
+  outright rather than leaving it to be discovered.
+- **Reference-counting is `CallGuard`'s job, not a counter's.** Calls overlap,
+  so a watchdog tied to one would disarm while others still run. Dropping the
+  guard is what disarms — which means an early return, a `?`, or a panic cannot
+  leak a permanently-armed watchdog the way an unbalanced manual `disarm()`
+  can. A test asserts the panic path specifically.
+- **One report per stuck call, not one per monitor wake-up.** The reference
+  passes `repeat=True` because a *later stack dump* can show something the first
+  did not. Here the payload is "call X has been running Ys", which does not
+  change qualitatively, so repeating it would be noise.
+- **A malformed threshold falls back to the default rather than disabling.**
+  `0` is the off switch; a typo in a tuning knob should not silently turn the
+  diagnostic off.
+- **The monitor thread starts lazily, on the first armed call.** The CLI's
+  one-shot subcommands and every test that only builds a server never pay for a
+  thread they will not use.
+- The report sink is injectable, so the firing behaviour is tested against a
+  120 ms threshold and a channel rather than by capturing stderr and waiting 30
+  seconds.
+- `server_status` counts the status call itself in `calls_in_flight`; the
+  reference does the same, since its own `arm()` is active during the call.
 ## 2026-08-05 — The `list` CLI subcommand (#167)
 
 ### Added
