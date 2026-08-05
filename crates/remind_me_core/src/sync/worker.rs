@@ -63,7 +63,17 @@ impl SyncWorker {
         let handle = std::thread::Builder::new()
             .name("sync-worker".to_string())
             .spawn(move || {
+                // Owned by the sync thread, so the children are killed when
+                // this thread ends -- including on a normal server shutdown,
+                // which drops the worker and joins here. The reference ties
+                // sidecars to its sync thread the same way, and for the same
+                // reason: a tunnel is only wanted while something is syncing
+                // through it.
+                let mut sidecars = crate::sidecars::Sidecars::new();
                 while !thread_shutdown.load(Ordering::Relaxed) {
+                    // Before the cycle, not after: the tunnel this may start
+                    // is what the cycle about to run needs in place.
+                    sidecars.ensure();
                     run_one_cycle(&db, &hub_url, &secret, &node_id, &thread_state);
 
                     let mut waited = Duration::ZERO;
