@@ -2,6 +2,49 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — Cross-encoder reranking (#155, part 2 of 2)
+
+### Added
+- **Optional `rerank` feature** (`rten`/`tokenizers`) adding a cross-encoder
+  stage that re-scores the head of the RRF-ranked list. RRF fuses *independent*
+  rank lists and so never reads the query and a candidate together; a
+  cross-encoder does, which is far more precise at ordering the few candidates
+  that matter.
+- `MemorySearchResult.rerank_score`, the logit each rescored pair got. It is a
+  diagnostic, **not** a component of `score` — reranking permutes the head
+  rather than contributing to the fused total.
+
+### Notes
+- **Reranking may never break search.** A missing feature, an unconfigured
+  model, an unreadable one, a tokenizer mismatch, an inference failure, a
+  scorer returning the wrong number of scores — every one returns the incoming
+  order untouched. None is an error. Search already worked without this.
+- **The head is reordered; the tail is preserved.** Only the first
+  `REMIND_ME_RERANK_TOP_K` (default 20) are rescored, and the rest keep their
+  places. Reranking never drops a candidate and never changes how many results
+  come back — it permutes a prefix. Ties keep their RRF order.
+- **The pool is wider than the response limit, and truncation happens after.**
+  Rescoring only what was already going to be returned would discard the most
+  useful thing a cross-encoder does: promote a candidate from just past the
+  cutoff. Feedback adjustment still runs first, so it perturbs the order
+  feeding the cross-encoder and the cross-encoder keeps the final say.
+- **On by default, but "on" never means "downloads a model".** `REMIND_ME_RERANK`
+  defaults to enabled, matching the reference. What differs is the cost: the
+  reference fetches a cross-encoder from HuggingFace on first use, whereas
+  `REMIND_ME_RERANK_MODEL_PATH` and `REMIND_ME_RERANK_TOKENIZER_PATH` must
+  point at files that already exist. Unconfigured, reranking is a no-op — which
+  is the default state of every build.
+- **`rten` again rather than a second runtime.** It is already the optional
+  dependency behind `ocr`, is pure Rust, and takes explicit model paths.
+- A malformed `REMIND_ME_RERANK_TOP_K` falls back to the default rather than
+  disabling reranking: `REMIND_ME_RERANK` is the switch, and a typo in a tuning
+  knob should not silently turn a feature off.
+- **Unlike `ocr`/`audio`, CI runs this feature's tests.** The whole ordering
+  contract is testable with an injected scorer — no model, no runtime — and the
+  feature-on tests additionally prove that compiling the reranker in does not
+  make a search download anything. What is *not* verified is the quality of a
+  real cross-encoder's ordering, which needs real weights.
+
 ## 2026-08-05 — Image (OCR) and audio (transcription) import (#156)
 
 ### Added

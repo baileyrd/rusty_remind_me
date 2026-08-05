@@ -533,6 +533,9 @@ pub fn rank_rrf(
                 // database connection this pure ranking function doesn't
                 // have.
                 feedback_adjustment: None,
+                // Likewise applied later, by `reranker::maybe_rerank`, which
+                // reorders the head rather than contributing to this total.
+                rerank_score: None,
             }
         })
         .collect();

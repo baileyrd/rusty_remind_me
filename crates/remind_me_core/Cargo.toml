@@ -29,6 +29,8 @@ image = { version = "0.25", optional = true, default-features = false, features 
     "png",
     "jpeg",
 ] }
+rten-tensor = { version = "0.24", optional = true }
+tokenizers = { version = "0.23", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 symphonia = { version = "0.6", optional = true, default-features = false, features = [
     "mp3",
@@ -64,3 +66,8 @@ ocr = ["dep:ocrs", "dep:rten", "dep:image"]
 # no system ffmpeg is needed — the same "no system binary" rule that made the
 # reference pick faster-whisper over pywhispercpp.
 audio = ["dep:whisper-rs", "dep:symphonia"]
+# Cross-encoder reranking of the head of the RRF-ranked list. Shares `rten`
+# with `ocr` rather than pulling a second neural-network runtime in, and for
+# the same reason: it is pure Rust and takes explicit model paths, so enabling
+# reranking can never turn a search into a model download.
+rerank = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]

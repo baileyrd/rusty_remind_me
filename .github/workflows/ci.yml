@@ -85,3 +85,12 @@ jobs:
 
       - name: cargo clippy --features audio
         run: cargo clippy -p remind_me_core --features audio --all-targets --locked -- -D warnings
+
+      # This one runs the tests rather than only clippy, unlike ocr/audio
+      # above. The difference is that its feature-on tests assert something a
+      # build check cannot: that compiling the reranker in does *not* turn a
+      # search into a model download, and that a configured-but-unloadable
+      # model still degrades to RRF order. Both are cheap — rten and
+      # tokenizers are pure Rust and the tests need no model.
+      - name: cargo test --features rerank
+        run: cargo test -p remind_me_core --features rerank --locked

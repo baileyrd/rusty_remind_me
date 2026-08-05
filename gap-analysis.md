@@ -233,10 +233,19 @@ the entries above name PRs, these name issues.)
 Then #149 (I4, Obsidian) as PR #158, and #150 (I5, Readwise), #151 (E4),
 #152 (E5), #153 (I1), #154 (E6), #155 (E8, index half), #156 (I2/I3).
 
-**What is left after #156:** the reranker half of #155 (E8), which needs an
-ONNX model fetched at runtime and so cannot be verified in CI at all, and
-#160 — a durability defect in the OAuth state store found while chasing a
-flake, not a parity gap. Every other item in this table is merged.
+**Every gap in this table is now merged**, #155's reranker half included.
+
+*Correction:* that half was previously recorded here as un-shippable because it
+"needs an ONNX model fetched at runtime and so cannot be verified in CI at
+all". Both clauses were wrong. The runtime-fetch was an assumption inherited
+from the reference's shape, not a constraint — #156 established the explicit-
+model-path alternative, which applies here unchanged. And the reference's own
+reranker takes an injectable scorer, so the entire ordering contract is
+testable with no model at all; only the *quality* of a real cross-encoder's
+ordering needs real weights.
+
+**Still open, and not a parity gap:** #160, a durability defect in the OAuth
+state store found while chasing a test flake.
 
 **#156's guarantee is weaker than the rest of Wave 8, and this is the one item
 whose core behaviour is unverified.** OCR and transcription cannot do their job
