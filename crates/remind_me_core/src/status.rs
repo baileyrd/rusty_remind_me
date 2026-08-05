@@ -91,6 +91,10 @@ pub struct ServerStatus {
     /// Reported by the watcher itself now that one exists, rather than as an
     /// absent subsystem.
     pub watcher: crate::watcher::WatchStatus,
+    /// Whether a stuck tool call would announce itself, and how many calls are
+    /// in flight right now. Process-wide state, not database state — the
+    /// reference reports it from the same tool for the same reason.
+    pub watchdog: crate::watchdog::WatchdogStatus,
 }
 
 fn database_file(conn: &Connection) -> Result<Option<PathBuf>> {
@@ -163,5 +167,6 @@ pub fn server_status(conn: &Connection) -> Result<ServerStatus> {
             Some(w) => w.status(),
             None => crate::watcher::disabled_status(),
         },
+        watchdog: crate::watchdog::status(),
     })
 }

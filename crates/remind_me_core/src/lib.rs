@@ -49,6 +49,7 @@ pub mod undo_import;
 pub mod updater;
 pub mod vectors;
 pub mod vitality;
+pub mod watchdog;
 pub mod watcher;
 pub mod webhook;
 pub mod wiki;
