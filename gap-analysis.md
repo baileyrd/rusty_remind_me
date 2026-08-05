@@ -144,6 +144,15 @@ ships its own hub, or keeps syncing against the existing Python one, is a
 scope decision that belongs to a human. Filing it as a `parity-gap` issue
 would imply the loop should work it unattended, which it should not.
 
+**Resolved: ported.** The reasoning above is kept as the record of why this was
+never filed, but the decision has since been made and taken. The answer was to
+ship a hub, with storage behind a `HubStore` trait — Postgres as a drop-in for
+an existing deployment, SQLite for a self-hosted one wanting no database server
+(`docs/adr/0015`). `crates/remind_me_hub` serves all ten routes, and its
+deployment packaging — Containerfile, `setup.sh`, `client-setup.sh`, and
+Quadlet/Compose/Fly/Railway templates — followed in
+[#190](https://github.com/baileyrd/rusty_remind_me/pull/190).
+
 **Asked, answered, and ported.** All ten routes now exist as `remind_me_hub` /
 `rusty-remind-me-hub`, with storage behind a trait: Postgres (a drop-in for an
 existing deployment, legacy migration included) and SQLite (self-hosted, one
@@ -183,7 +192,7 @@ Recorded because each looked like one:
 ## Stop-and-ask items
 
 Under the parity-loop skill's rules these are never auto-implemented. All
-three were put to a human; two came back yes and are done.
+three were put to a human; all three came back yes and are done.
 
 1. ~~**E1, the hub**~~ — **asked, answered, and done.** A new deployable in
    another language, so the scope decision came first, as it should have. The
@@ -207,7 +216,10 @@ three were put to a human; two came back yes and are done.
    async-signal-safe and would deadlock precisely when the diagnostic fires.
    `docs/adr/0014` records it.
 
-None was taken unattended. **E1 is the only one still awaiting a decision.**
+None was taken unattended. **All three are now decided and done** — E1 was the
+last, and its answer landed in [#189](https://github.com/baileyrd/rusty_remind_me/pull/189)
+(the hub) and [#190](https://github.com/baileyrd/rusty_remind_me/pull/190)
+(its deployment packaging).
 
 ---
 
