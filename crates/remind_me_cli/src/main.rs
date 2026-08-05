@@ -1,8 +1,8 @@
 use remind_me_api::ApiServer;
 use remind_me_core::db::queries;
 use remind_me_core::{
-    entity, stats, updater, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
-    MemorySearchInput,
+    entity, reminders, stats, updater, wiki, wiki_import, Database, EntityInput, MemoryAddInput,
+    MemoryListInput, MemorySearchInput, ResponseFormat, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
 };
 use remind_me_mcp::McpServer;
 use serde_json::{json, Value};
@@ -100,6 +100,74 @@ fn configure_mcp_clients() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSetup complete! Restart your client application to activate rusty-remind-me.");
     Ok(())
 }
+
+/// Parsed form of `rusty-remind-me list [--limit N] [--category C] [--json]`.
+///
+/// The flag set is deliberately the reference's, not this crate's tool input's.
+/// [`MemoryListInput`] also carries `tags`, `source`, `offset` and
+/// `include_sensitive`, but `remind_me_mcp/cli.py`'s `list_p` exposes only
+/// `--limit`, `--category` and `--json` — and a CLI that accepts flags the
+/// reference rejects is the same drop-in divergence in the other direction.
+#[derive(Debug)]
+struct ListArgs {
+    limit: usize,
+    category: Option<String>,
+    as_json: bool,
+}
+
+/// Parse `list`'s flags, or return the message to print to stderr.
+///
+/// Returns `Err` rather than exiting so this is testable without a process
+/// boundary; `main` is what turns the message into an exit code.
+fn parse_list_args(args: &[String]) -> Result<ListArgs, String> {
+    let mut parsed = ListArgs {
+        // Matches `list_p.add_argument("--limit", type=int, default=20)`.
+        limit: 20,
+        category: None,
+        as_json: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {
+                parsed.as_json = true;
+                i += 1;
+            }
+            "--limit" | "--category" => {
+                let flag = &args[i];
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("Error: {} expects a value.\n{}", flag, LIST_USAGE))?;
+                if flag == "--limit" {
+                    let n: usize = value.parse().map_err(|_| {
+                        format!("Error: --limit expects a number, got {:?}.", value)
+                    })?;
+                    // The reference's MemoryListInput bounds `limit`, so an
+                    // out-of-range value is a validation error there. Rejecting
+                    // here rather than deferring to `list_memories`, which
+                    // clamps silently — a caller who asked for 500 should be
+                    // told they got 100, not quietly handed a short page.
+                    if !(LIST_LIMIT_MIN..=LIST_LIMIT_MAX).contains(&n) {
+                        return Err(format!(
+                            "Error: --limit must be between {} and {}, got {}.",
+                            LIST_LIMIT_MIN, LIST_LIMIT_MAX, n
+                        ));
+                    }
+                    parsed.limit = n;
+                } else {
+                    parsed.category = Some(value.clone());
+                }
+                i += 2;
+            }
+            other => {
+                return Err(format!("Error: unknown flag {:?}.\n{}", other, LIST_USAGE));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+const LIST_USAGE: &str = "Usage: rusty-remind-me list [--limit N] [--category CATEGORY] [--json]";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -246,6 +314,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mem = queries::add_memory(&conn, add_input)?;
                 println!("Added memory: {}", mem.id);
             }
+            "list" => {
+                // Browse by filter, no ranking -- the counterpart to `search`,
+                // and the reason both exist: `search` answers "what do I know
+                // about X", `list` answers "show me the X slice".
+                let list_args = match parse_list_args(&args[2..]) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        eprintln!("{}", message);
+                        std::process::exit(1);
+                    }
+                };
+                let list_input = MemoryListInput {
+                    category: list_args.category,
+                    limit: list_args.limit,
+                    response_format: if list_args.as_json {
+                        ResponseFormat::Json
+                    } else {
+                        ResponseFormat::Markdown
+                    },
+                    ..Default::default()
+                };
+                let conn = db.conn();
+                let page = queries::list_memories(&conn, &list_input)?;
+                match list_input.response_format {
+                    // The reference's `_fmt_memories` JSON branch carries
+                    // `count`/`memories`/`total`; `MemoryListResult` also
+                    // carries the pagination cursor, so it is serialized whole
+                    // rather than reshaped into a strictly smaller payload.
+                    ResponseFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&page)?)
+                    }
+                    ResponseFormat::Markdown => {
+                        println!("{}", reminders::render_memories_markdown(&page.memories))
+                    }
+                }
+            }
             "get" => {
                 if args.len() < 3 {
                     eprintln!("Usage: rusty-remind-me get <id>");
@@ -329,11 +433,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", serde_json::to_string_pretty(&stats::collect(&conn)?)?);
             }
             cmd => {
-                eprintln!("Unknown subcommand: {}. Available: configure, api, remote, server, search, add, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);
+                eprintln!("Unknown subcommand: {}. Available: configure, api, remote, server, search, add, list, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);
                 std::process::exit(1);
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_flags_matches_the_reference_defaults() {
+        let parsed = parse_list_args(&args(&[])).expect("bare `list` is valid");
+        assert_eq!(parsed.limit, 20);
+        assert_eq!(parsed.category, None);
+        assert!(!parsed.as_json);
+    }
+
+    #[test]
+    fn every_flag_parses_together() {
+        let parsed =
+            parse_list_args(&args(&["--limit", "5", "--category", "work", "--json"])).unwrap();
+        assert_eq!(parsed.limit, 5);
+        assert_eq!(parsed.category.as_deref(), Some("work"));
+        assert!(parsed.as_json);
+    }
+
+    #[test]
+    fn flag_order_does_not_matter() {
+        let parsed =
+            parse_list_args(&args(&["--json", "--category", "work", "--limit", "5"])).unwrap();
+        assert_eq!(parsed.limit, 5);
+        assert_eq!(parsed.category.as_deref(), Some("work"));
+        assert!(parsed.as_json);
+    }
+
+    #[test]
+    fn a_non_numeric_limit_is_rejected() {
+        let err = parse_list_args(&args(&["--limit", "lots"])).unwrap_err();
+        assert!(err.contains("--limit expects a number"), "got: {}", err);
+    }
+
+    /// The boundary that matters: `list_memories` clamps, so without this the
+    /// out-of-range value would be silently honoured as something else.
+    #[test]
+    fn an_out_of_range_limit_is_rejected_rather_than_clamped() {
+        for bad in [0, LIST_LIMIT_MAX + 1] {
+            let err = parse_list_args(&args(&["--limit", &bad.to_string()])).unwrap_err();
+            assert!(
+                err.contains("must be between"),
+                "limit {} should be refused, got: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn the_range_bounds_themselves_are_accepted() {
+        for good in [LIST_LIMIT_MIN, LIST_LIMIT_MAX] {
+            let parsed = parse_list_args(&args(&["--limit", &good.to_string()]))
+                .unwrap_or_else(|e| panic!("limit {} should be accepted, got: {}", good, e));
+            assert_eq!(parsed.limit, good);
+        }
+    }
+
+    #[test]
+    fn a_flag_missing_its_value_is_rejected() {
+        for flag in ["--limit", "--category"] {
+            let err = parse_list_args(&args(&[flag])).unwrap_err();
+            assert!(err.contains("expects a value"), "got: {}", err);
+        }
+    }
+
+    #[test]
+    fn an_unknown_flag_is_rejected() {
+        let err = parse_list_args(&args(&["--tags", "work"])).unwrap_err();
+        assert!(err.contains("unknown flag"), "got: {}", err);
+    }
 }
