@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod ann_index;
 pub mod api_keys;
 pub mod backup;
 pub mod capture;

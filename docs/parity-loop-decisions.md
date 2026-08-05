@@ -996,6 +996,45 @@ deliberate reduction in coverage, not an oversight.
 
 ---
 
+## #155 — ANN index (part 1; reranker deferred)
+
+**Split, as the issue anticipated.** `usearch` builds here (5 minutes, C++ from
+source) and the ANN half is fully testable. The reranker needs an ONNX model
+fetched at runtime and cannot be verified in CI at all, so blocking a working,
+checkable improvement on an uncheckable one would have been the wrong trade.
+
+**The index narrows; it does not rank.** Trusting ANN distances would make
+vector scores subtly different from the brute-force ones and force every
+downstream consumer — RRF fusion especially — to care which path ran.
+Over-fetching candidates and then computing the exact dot product over that
+small set keeps scores identical, and has the second benefit that a category
+filter can be applied during exact scoring, which the index cannot express.
+
+**Every failure falls back to brute force.** This is an optimisation over a
+path that already returns correct answers, so no failure here may become an
+error or a wrong answer. Missing, stale, unreadable, wrong dimension, empty
+result: all scan instead.
+
+**A short list falls back rather than being returned.** After a category
+filter, the index's candidates may not fill a page. Returning fewer results
+than a full scan would have is a retrieval regression nobody would notice,
+which makes it worse than the extra scan.
+
+**The key mapping is persisted, and this was a real bug caught before commit.**
+The first version held position → rowid in a process-local static populated
+during `build`. That would have made the index work only inside the process
+that built it and fall back silently everywhere else — a feature that looks
+enabled, passes its tests, and never actually runs in production. Exactly the
+half-wiring pattern flagged on `sensitive` and `remind_at` earlier in this
+loop. The mapping now lives in the sidecar next to the index.
+
+**CI runs this feature's tests rather than only clippy**, unlike #154's
+cloud-backup step. The equivalence check is the entire reason the feature is
+safe to turn on; a build-only check would confirm it compiles while saying
+nothing about whether it returns the right rows.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

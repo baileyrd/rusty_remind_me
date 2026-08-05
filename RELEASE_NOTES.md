@@ -2,6 +2,46 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-04 — ANN vector index (#155, part 1 of 2)
+
+### Added
+- **Optional `ann` feature** (`usearch`) putting an approximate-nearest-
+  neighbour index in front of vector recall, so it stops being a full scan of
+  every chunk. `ann_index::build` creates and persists it; search uses it
+  automatically when it is present and current.
+
+### Notes
+- **The index narrows candidates; it never scores them.** It over-fetches, and
+  the caller then computes the **exact** dot product over that much smaller
+  set. Scores are therefore identical to brute force, so nothing downstream —
+  RRF fusion in particular — has to know which path ran, and a category filter
+  can still be applied during exact scoring, which the index cannot express.
+- **Every failure resolves to brute force.** No index, a stale one, an
+  unreadable one, a dimension mismatch, an empty candidate set: all fall back.
+  A search must never fail, or change its answers, because an optimisation was
+  unavailable.
+- **A short list after filtering falls back rather than being returned.** A
+  category filter can remove most of what the index proposed, and silently
+  returning fewer results than a full scan would is a retrieval regression
+  nobody would notice.
+- **Staleness is detected, not assumed away.** The vector count and dimension
+  are recorded at build time and checked at search time. A stale index quietly
+  returning deleted memories is worse than no index, because the results still
+  look plausible.
+- **The position → rowid mapping is persisted alongside the index**, not held
+  in a process-local map. In memory it would make the index work only in the
+  process that built it and fall back silently everywhere else — a feature that
+  looks enabled and never runs.
+- **Building is always explicit.** A search must not silently pay for an index
+  build, which would turn one slow query into a pathological one at exactly the
+  moment someone is waiting.
+- CI **runs the tests** for this feature rather than only clippy: the
+  equivalence check — that narrowing never drops a row brute force would rank —
+  is the reason the feature is safe to enable, so it has to actually run.
+- The reranker half of #155 is **not** included. It needs a model downloaded at
+  runtime and cannot be verified in CI, so it is left as its own change rather
+  than blocking the half that can be.
+
 ## 2026-08-04 — Cloud backup upload (#154)
 
 ### Added

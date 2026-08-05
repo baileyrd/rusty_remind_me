@@ -88,7 +88,7 @@ pub fn dimension_of(bytes: &[u8]) -> usize {
     bytes.len() / 4
 }
 
-fn le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+pub(crate) fn le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -263,14 +263,55 @@ pub fn semantic_search_scored(
         return Ok(Vec::new());
     }
 
+    // The index, when usable, narrows which rows are scanned. It never scores:
+    // the exact dot product runs over whatever survives, so results are
+    // identical either way and nothing downstream needs to know which path
+    // ran. `None` means scan everything — a search must not fail, or change
+    // its answers, because an optimisation was unavailable.
+    if let Some(narrowed) = crate::ann_index::candidates(conn, &query_vector, limit) {
+        let scored = scan_and_score(conn, &query_vector, limit, category, Some(&narrowed))?;
+        // A category filter can remove most of what the index proposed.
+        // Returning fewer results than a full scan would have is a retrieval
+        // regression nobody would notice, so fall back rather than accept a
+        // short list.
+        if scored.len() >= limit {
+            return Ok(scored);
+        }
+    }
+    scan_and_score(conn, &query_vector, limit, category, None)
+}
+
+/// Score every candidate exactly and return the best `limit`.
+///
+/// `narrowed` restricts which memory rowids are considered; `None` scans all
+/// of them. Scoring is identical in both cases — that is the whole point of
+/// letting the index propose candidates rather than rank them.
+fn scan_and_score(
+    conn: &Connection,
+    query_vector: &[f32],
+    limit: usize,
+    category: Option<&str>,
+    narrowed: Option<&[i64]>,
+) -> Result<Vec<(Memory, f32)>, VectorError> {
     let (filter_sql, filter_bindings) = category_filter(category);
+    let narrow_sql = match narrowed {
+        Some(rowids) => format!(
+            " AND vc.memory_rowid IN ({})",
+            rowids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        None => String::new(),
+    };
     let sql = format!(
         "SELECT vc.memory_rowid, ve.embedding
            FROM vec_chunks vc
            JOIN vec_embeddings ve ON ve.vec_rowid = vc.vec_rowid
            JOIN memories m ON m.rowid = vc.memory_rowid
-          WHERE m.superseded_by IS NULL AND m.deleted_at IS NULL{}",
-        filter_sql
+          WHERE m.superseded_by IS NULL AND m.deleted_at IS NULL{}{}",
+        filter_sql, narrow_sql
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(filter_bindings.iter()), |row| {
