@@ -1,10 +1,16 @@
 //! The Postgres backend, against a real server.
 //!
 //! Skipped unless `REMIND_ME_HUB_TEST_DATABASE_URL` is set, because a database
-//! server is not something a `cargo test` may assume. Skipping is a `return`,
-//! not an `#[ignore]`: an ignored test is invisible in the summary, and this
-//! one *should* be loud about not having run — it is the only coverage the
-//! drop-in backend has.
+//! server is not something a `cargo test` may assume.
+//!
+//! Be clear-eyed about what that costs: a skipped test here reports as
+//! **passed**, and cargo captures the `SKIP` line unless you pass
+//! `--nocapture`. So a local run that never touched a database looks exactly
+//! like one that did. That is tolerable for a developer and intolerable for
+//! CI, which is the run everyone actually trusts — so
+//! `REMIND_ME_HUB_REQUIRE_POSTGRES=1` turns the skip into a hard failure, and
+//! CI sets it. The environment cannot quietly lose its database and stay
+//! green.
 //!
 //! # What is worth testing here specifically
 //!
@@ -32,9 +38,17 @@ use serde_json::{json, Value};
 static DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn url() -> Option<String> {
-    std::env::var("REMIND_ME_HUB_TEST_DATABASE_URL")
+    let configured = std::env::var("REMIND_ME_HUB_TEST_DATABASE_URL")
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    if configured.is_none() && std::env::var("REMIND_ME_HUB_REQUIRE_POSTGRES").is_ok() {
+        panic!(
+            "REMIND_ME_HUB_REQUIRE_POSTGRES is set but \
+             REMIND_ME_HUB_TEST_DATABASE_URL is not -- refusing to skip. \
+             This exists so CI cannot lose its database and still report green."
+        );
+    }
+    configured
 }
 
 fn reset(url: &str) {

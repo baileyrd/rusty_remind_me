@@ -20,14 +20,77 @@ use std::time::{Duration, Instant};
 const DB_WAIT: Duration = Duration::from_secs(120);
 const DB_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default listen port, shared by the server and `--health-check` so the two
+/// can never disagree about where the hub is.
+const DEFAULT_PORT: u16 = 8765;
+/// Short on purpose: a healthcheck that hangs is a healthcheck that reports
+/// nothing, and the container runtime has its own (longer) timeout on top.
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> std::process::ExitCode {
+    // `--health-check` asks an already-running hub on this host whether it is
+    // healthy, and exits 0/1. It exists for container healthchecks: the image
+    // ships the binary and nothing else — no curl, no wget — so without this
+    // a `HEALTHCHECK` would mean installing a whole HTTP client into the
+    // runtime layer purely to make one loopback request.
+    //
+    // It works against `/health` specifically because that route is
+    // unauthenticated by design, so the check needs no secret.
+    if std::env::args().any(|a| a == "--health-check") {
+        return match health_check() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("hub: health check failed: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("hub: {e}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// Ask the local hub for `/health` and succeed only on a 200.
+///
+/// Deliberately a raw request rather than anything shared with the server:
+/// this must work when the hub is degraded, and it is the one code path whose
+/// whole job is to disagree with the process it is checking.
+fn health_check() -> Result<(), String> {
+    let port: u16 = std::env::var("REMIND_ME_HUB_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_PORT);
+    // Always loopback, never REMIND_ME_HUB_BIND: the bind address may be
+    // 0.0.0.0, which is not a valid destination to connect to.
+    let addr = format!("127.0.0.1:{port}");
+
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| format!("could not connect to {addr}: {e}"))?;
+    stream
+        .set_read_timeout(Some(HEALTH_CHECK_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(HEALTH_CHECK_TIMEOUT)))
+        .map_err(|e| format!("could not set a timeout: {e}"))?;
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .map_err(|e| format!("could not send the request: {e}"))?;
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|e| format!("could not read the response: {e}"))?;
+    let head = String::from_utf8_lossy(&response);
+    let status = head.lines().next().unwrap_or_default();
+
+    // 200 only. `/health` answers 503 when the database is unreachable, and
+    // that is exactly the state a healthcheck must report as unhealthy.
+    if status.contains(" 200 ") {
+        Ok(())
+    } else {
+        Err(format!("hub reported {status:?}"))
     }
 }
 
@@ -60,7 +123,7 @@ fn run() -> Result<(), String> {
     let port: u16 = std::env::var("REMIND_ME_HUB_PORT")
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(8765);
+        .unwrap_or(DEFAULT_PORT);
     let listener = TcpListener::bind((bind.as_str(), port))
         .map_err(|e| format!("could not bind {bind}:{port}: {e}"))?;
 
