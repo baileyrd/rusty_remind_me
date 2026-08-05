@@ -7,6 +7,8 @@
 //! transport. This module does the same, gated behind a fake `UnixListener`
 //! in its own tests rather than a real daemon.
 
+// Only the Tailscale status structs derive it, and those are `cfg(unix)`.
+#[cfg(unix)]
 use serde::Deserialize;
 use std::collections::HashSet;
 
@@ -58,6 +60,11 @@ pub const TAILSCALE_SOCKET_ENV: &str = "REMIND_ME_TAILSCALE_SOCKET";
 /// then the platform default (`/var/run/tailscaled.socket` on macOS,
 /// `/var/run/tailscale/tailscaled.sock` elsewhere) -- matching the
 /// reference's own `_tailscale_socket()` exactly.
+///
+/// Unix-only, like everything else in this section: the local API is reached
+/// over a Unix domain socket, so on Windows there is nothing to resolve a path
+/// *for*. Gated rather than merely unused so the Windows build stays clean.
+#[cfg(unix)]
 fn tailscale_socket_path() -> String {
     if let Ok(configured) = std::env::var(TAILSCALE_SOCKET_ENV) {
         if !configured.is_empty() {
@@ -71,6 +78,7 @@ fn tailscale_socket_path() -> String {
     }
 }
 
+#[cfg(unix)]
 #[derive(Debug, Deserialize)]
 struct TailscalePeerInfo {
     #[serde(default)]
@@ -84,6 +92,7 @@ struct TailscalePeerInfo {
     host_name: String,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Deserialize)]
 struct TailscaleStatus {
     #[serde(default)]
@@ -96,6 +105,7 @@ struct TailscaleStatus {
 /// on -- the reference makes the same assumption (there is no per-peer
 /// port discovery; every remind_me install uses the same default unless
 /// its operator overrides it identically everywhere).
+#[cfg(unix)]
 fn peer_port() -> u16 {
     std::env::var(super::PEER_PORT_ENV)
         .ok()
@@ -266,6 +276,7 @@ mod tests {
         assert!(parse_static_peers().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn tailscale_socket_path_honors_the_env_override() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
