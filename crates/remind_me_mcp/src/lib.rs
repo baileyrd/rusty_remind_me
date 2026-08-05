@@ -1130,6 +1130,12 @@ impl McpServer {
                 // itself whether metrics are on, the same way `maybe_span`
                 // above does, so this dispatch never grows an `if enabled`.
                 let started = std::time::Instant::now();
+                // Reference-counted for the life of this dispatch. The guard
+                // drops at the end of this arm -- including on an early return
+                // or a panic -- so a stuck call cannot leave the watchdog armed
+                // forever, and an overlapping call keeps it armed after this
+                // one finishes.
+                let _watchdog = remind_me_core::watchdog::arm(tool_name);
 
                 let result = match tool_name {
                     "remind_me_add" => {
@@ -3127,6 +3133,34 @@ mod tests {
 
         assert_eq!(report["degraded"], true);
         assert_eq!(report["embedded"], 0);
+    }
+
+    /// The dispatch arm holds a watchdog guard for the life of the call, so a
+    /// tool asking for status sees itself in flight. That self-count is the
+    /// cheapest available proof that `tools/call` is actually armed — a guard
+    /// that was never taken would report zero.
+    #[test]
+    fn test_a_tool_call_is_watched_while_it_runs() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let report: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_server_status",
+            json!({}),
+        )))
+        .unwrap();
+
+        assert_eq!(report["watchdog"]["enabled"], true);
+        // `>= 1` rather than `== 1`: the suite runs tests in parallel against
+        // the one process-wide watchdog, so a sibling test's call may legitimately
+        // overlap this one.
+        assert!(
+            report["watchdog"]["calls_in_flight"].as_u64().unwrap_or(0) >= 1,
+            "the in-flight status call should count itself, got: {}",
+            report["watchdog"]
+        );
     }
 
     #[test]
