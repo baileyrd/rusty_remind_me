@@ -688,9 +688,46 @@ fn sensitive_ids(conn: &Connection) -> Result<std::collections::HashSet<String>>
     Ok(ids)
 }
 
+/// Search with the configured embedder, if one is resolvable and answering.
+///
+/// Thin wrapper over [`search_memories_with_embedder`]. Every existing caller
+/// keeps its behaviour: `available_embedder` probes the configured backend and
+/// yields `None` when none is set or it does not answer, which is the same
+/// "keyword-only" case the fused ranker already handles.
 pub fn search_memories(
     conn: &Connection,
     input: &MemorySearchInput,
+) -> Result<Vec<MemorySearchResult>> {
+    let configured = crate::embedder::available_embedder();
+    search_memories_with_embedder(
+        conn,
+        input,
+        configured
+            .as_ref()
+            .map(|e| e as &dyn crate::embedder::Embedder),
+    )
+}
+
+/// Search with a caller-supplied embedder, or none.
+///
+/// [`Embedder`](crate::embedder::Embedder) exists as a trait so "a future
+/// backend (ONNX-in-process, say) can be added without touching anything that
+/// already depends on this" — its own words. That was not quite true while this
+/// function reached for the concrete `available_embedder()` itself: a caller
+/// holding a perfectly good `impl Embedder` had no way to get it in here, and
+/// the only supported backend was the one this module named.
+///
+/// `None` means keyword-only, explicitly rather than by a failed probe. That
+/// distinction matters to a caller that needs the *same* query to return the
+/// *same* rows every time: `search_memories` degrades to keyword-only when the
+/// daemon is unreachable, which is the right call for an interactive search and
+/// the wrong one where reproducibility is the requirement. Passing `None` — or a
+/// deterministic in-process embedder — makes that choice at the call site rather
+/// than leaving it to whether a probe happened to succeed.
+pub fn search_memories_with_embedder(
+    conn: &Connection,
+    input: &MemorySearchInput,
+    embedder: Option<&dyn crate::embedder::Embedder>,
 ) -> Result<Vec<MemorySearchResult>> {
     let weights = choose_rrf_weights(&input.query, input.strategy);
 
@@ -748,18 +785,19 @@ pub fn search_memories(
         keyword_memories.push(memory);
     }
 
-    // Semantic augmentation is entirely optional: no embedder configured or
-    // reachable means an empty list, which `rank_rrf` treats as "semantic
+    // Semantic augmentation is entirely optional: no embedder passed in — because
+    // the caller has none, or because `search_memories` found none configured or
+    // reachable — means an empty list, which `rank_rrf` treats as "semantic
     // search did not run" rather than as a real empty result — see its own
     // doc comment. Any failure during the search itself (the embedder
     // rejects the query text, say) degrades the same way rather than
     // failing the keyword search it would otherwise still have been able to
     // answer.
-    let (semantic_memories, semantic_similarity) = match crate::embedder::available_embedder() {
+    let (semantic_memories, semantic_similarity) = match embedder {
         Some(embedder) => {
             let scored = crate::vectors::semantic_search_scored(
                 conn,
-                &embedder,
+                embedder,
                 &input.query,
                 input.limit * 2,
                 input.category.as_deref(),
