@@ -20,6 +20,32 @@ pub enum RetrievalStrategy {
     SemanticFavored,
 }
 
+/// Input for `remind_me_entity`: look up one entity by name or alias.
+///
+/// Read-only, and deliberately carries no `kind`. `remind_me_entity` used to
+/// upsert here — same tool name as the reference, opposite effect — so a
+/// mistyped name returned `found=false` from `remind_me` while silently
+/// *creating* a junk entity in this crate. The write moved to
+/// [`crate::entity::upsert_entity`]'s own tool (`remind_me_entity_upsert`);
+/// this matches `EntityLookupInput` (`models.py:283`) field for field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityLookupInput {
+    /// Entity name or alias. Resolution is case- and whitespace-insensitive.
+    pub name: String,
+    /// Maximum facts and maximum linked memories to return.
+    #[serde(default = "default_entity_lookup_limit")]
+    pub limit: usize,
+}
+
+fn default_entity_lookup_limit() -> usize {
+    20
+}
+
+/// Inclusive bounds the reference enforces on `EntityLookupInput::limit`
+/// (`ge=1, le=100`).
+pub const ENTITY_LOOKUP_LIMIT_MIN: usize = 1;
+pub const ENTITY_LOOKUP_LIMIT_MAX: usize = 100;
+
 /// An entity mentioned by a memory (Knowledge Graph).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityInput {

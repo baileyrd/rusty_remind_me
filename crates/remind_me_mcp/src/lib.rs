@@ -22,17 +22,18 @@ use remind_me_core::{
     wiki_fs::Wiki,
     wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
     ConsolidateInput, ContradictionCandidatesInput, Database, DbsImportInput, DecomposeBatchInput,
-    DecomposeInput, DigestInput, EntityInput, EntityTraverseInput, ExportInput, ExtractBatchInput,
-    FeedbackInput, HistoryInput, ListRemindersInput, MemoryAddInput, MemoryListInput,
-    MemorySearchInput, MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput,
-    NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput,
-    ReconcilePeerInput, ResponseFormat, RevertInput, SaveSearchInput, SavedSearchNameInput,
-    SetReminderInput, SyncRepairInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome,
-    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN,
-    CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX,
-    CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
-    DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, EXTRACT_BATCH_MAX,
-    EXTRACT_BATCH_MIN, EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
+    DecomposeInput, DigestInput, EntityInput, EntityLookupInput, EntityTraverseInput, ExportInput,
+    ExtractBatchInput, FeedbackInput, HistoryInput, ListRemindersInput, MemoryAddInput,
+    MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
+    NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
+    ReclassifyInput, ReconcilePeerInput, ResponseFormat, RevertInput, SaveSearchInput,
+    SavedSearchNameInput, SetReminderInput, SyncRepairInput, UndoImportInput, UpdateOutcome,
+    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
+    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
+    CONTRADICTION_LIMIT_MAX, CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN,
+    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
+    ENTITY_LOOKUP_LIMIT_MAX, ENTITY_LOOKUP_LIMIT_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN,
+    EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
     IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
     NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
     RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
@@ -421,12 +422,25 @@ impl McpServer {
                             },
                             {
                                 "name": "remind_me_entity",
-                                "description": "Upsert or fetch knowledge graph entity.",
+                                "description": "Everything known about ONE named thing — a person, project, tool, org, or place. Read-only: returns the entity record, its facts, and the memories mentioning it, or found=false for an unknown name. Use remind_me_search for topic questions or anything you cannot name exactly.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string", "description": "Entity name or alias, resolved case- and whitespace-insensitively" },
+                                        "limit": { "type": "integer", "default": 20, "minimum": ENTITY_LOOKUP_LIMIT_MIN, "maximum": ENTITY_LOOKUP_LIMIT_MAX, "description": "Maximum facts and maximum linked memories to return" }
+                                    },
+                                    "required": ["name"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_entity_upsert",
+                                "description": "Create a knowledge-graph entity, or update its kind. Not present in remind_me — remind_me_entity is read-only there, and is here too, so writing is a separate, explicit call.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "name": { "type": "string" },
-                                        "kind": { "type": "string" }
+                                        "kind": { "type": "string" },
+                                        "aliases": { "type": "array", "items": { "type": "string" } }
                                     },
                                     "required": ["name"]
                                 }
@@ -1242,7 +1256,58 @@ impl McpServer {
                             }
                         }
                     }
+                    // Read-only, matching the reference. A miss reports
+                    // `found: false` rather than creating the entity -- see
+                    // `EntityLookupInput`'s docs for why that distinction is
+                    // load-bearing rather than cosmetic.
                     "remind_me_entity" => {
+                        let input: Result<EntityLookupInput, _> = serde_json::from_value(args);
+                        match input {
+                            Ok(lookup) => {
+                                let limit = lookup
+                                    .limit
+                                    .clamp(ENTITY_LOOKUP_LIMIT_MIN, ENTITY_LOOKUP_LIMIT_MAX);
+                                match entity::entity_profile(&conn, &lookup.name, limit) {
+                                    Ok(Some(profile)) => {
+                                        // `found` alongside the profile's own
+                                        // fields, not wrapping them -- the
+                                        // reference spreads the payload
+                                        // (`{"found": True, **profile}`), and a
+                                        // caller written against one shape
+                                        // must not have to unwrap the other.
+                                        let mut payload =
+                                            serde_json::to_value(&profile).unwrap_or(json!({}));
+                                        if let Some(object) = payload.as_object_mut() {
+                                            object.insert("found".into(), json!(true));
+                                        }
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap() }] })
+                                    }
+                                    // Not `isError`: an unknown name is a valid
+                                    // answer to a lookup, and the reference
+                                    // returns a normal payload for it too.
+                                    Ok(None) => {
+                                        let payload = json!({
+                                            "found": false,
+                                            "query": lookup.name,
+                                            "message": format!("No entity found matching {:?}.", lookup.name),
+                                        });
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Entity error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid entity input: {}", e) }] })
+                            }
+                        }
+                    }
+                    // Target-only: the reference has no upsert tool. This is
+                    // where `remind_me_entity`'s old write behaviour lives, so
+                    // the capability is kept rather than dropped -- it is just
+                    // no longer reachable by a call that meant to read.
+                    "remind_me_entity_upsert" => {
                         let input: Result<EntityInput, _> = serde_json::from_value(args);
                         match input {
                             Ok(ent_input) => match entity::upsert_entity(&conn, &ent_input) {
@@ -3161,6 +3226,140 @@ mod tests {
             report["watchdog"]["calls_in_flight"].as_u64().unwrap_or(0) >= 1,
             "the in-flight status call should count itself, got: {}",
             report["watchdog"]
+        );
+    }
+
+    /// The bug this split exists to remove: a lookup with a name that does
+    /// not resolve used to *create* that entity. `remind_me` returns
+    /// `found=false` and writes nothing, so a mistyped name silently forked
+    /// the two vaults.
+    #[test]
+    fn test_entity_lookup_does_not_create_the_entity_it_failed_to_find() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let lookup = |name: &str| -> Value {
+            serde_json::from_str(&text_of(&call(
+                &server,
+                "remind_me_entity",
+                json!({ "name": name }),
+            )))
+            .unwrap()
+        };
+
+        // A typo for an entity that does not exist.
+        let first = lookup("Tsamania");
+        assert_eq!(first["found"], false);
+        assert_eq!(first["query"], "Tsamania");
+
+        // Asserted through the tool rather than by counting rows: if the
+        // lookup had created the entity, this second call would find it. That
+        // is exactly the symptom a user would hit, and it does not depend on
+        // reaching past the server for a connection.
+        assert_eq!(
+            lookup("Tsamania")["found"],
+            false,
+            "a lookup must never write -- the second call found what the first created"
+        );
+    }
+
+    /// A miss is a valid answer, not a tool error -- the reference returns an
+    /// ordinary payload for it, and `isError` would make a client retry.
+    #[test]
+    fn test_an_unknown_entity_is_not_reported_as_a_tool_error() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let result = call(&server, "remind_me_entity", json!({ "name": "nobody" }));
+        assert!(
+            result.get("isError").is_none(),
+            "a miss must not be an error, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_entity_lookup_returns_the_profile_for_a_known_entity() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        call(
+            &server,
+            "remind_me_add",
+            json!({ "content": "Tasmania is an island", "entities": [{ "name": "Tasmania" }] }),
+        );
+
+        let report: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_entity",
+            json!({
+                "name": "tasmania"  // resolution is case-insensitive
+            }),
+        )))
+        .unwrap();
+
+        assert_eq!(report["found"], true);
+        assert_eq!(report["entity"]["name"], "Tasmania");
+        // Spread alongside the profile, not nested under it -- a caller
+        // written against the reference reads `entity`/`memories` at the top
+        // level.
+        assert!(report.get("memories").is_some(), "got: {}", report);
+        assert!(report.get("total_linked_memories").is_some());
+    }
+
+    /// The write survives the split, just under its own name.
+    #[test]
+    fn test_entity_upsert_still_creates() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        call(
+            &server,
+            "remind_me_entity_upsert",
+            json!({ "name": "Hobart", "kind": "place" }),
+        );
+
+        let report: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_entity",
+            json!({
+                "name": "Hobart"
+            }),
+        )))
+        .unwrap();
+        assert_eq!(report["found"], true, "the upsert should have created it");
+        assert_eq!(
+            report["entity"]["kind"], "place",
+            "and carried the kind through"
+        );
+    }
+
+    /// Both halves must be declared, or a client cannot discover the write it
+    /// used to get from `remind_me_entity`.
+    #[test]
+    fn test_both_entity_tools_are_declared_and_the_read_one_takes_a_limit() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let listed = server
+            .handle_request(
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+            )
+            .unwrap();
+        let tools = listed["result"]["tools"].as_array().unwrap().clone();
+
+        let read = tools
+            .iter()
+            .find(|t| t["name"] == "remind_me_entity")
+            .expect("remind_me_entity must still be declared");
+        let props = read["inputSchema"]["properties"].as_object().unwrap();
+        assert!(props.contains_key("limit"), "the reference's field");
+        assert!(
+            !props.contains_key("kind"),
+            "kind belongs to the write tool; `remind_me` rejects it here (extra=forbid)"
+        );
+
+        assert!(
+            tools.iter().any(|t| t["name"] == "remind_me_entity_upsert"),
+            "the write must stay reachable under its own name"
         );
     }
 
