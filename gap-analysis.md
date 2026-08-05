@@ -110,8 +110,17 @@ The finding that shaped the implementation: **the reference's teardown
 guarantee is Windows-only.** Its `_job()` returns `None` immediately when
 `sys.platform != "win32"`, so on Linux and macOS the reference orphans its
 sidecars on abnormal exit exactly as a naive implementation would. The gap
-against the reference is therefore one platform/exit cell, not four — see
+against the reference was therefore one platform/exit cell, not four — see
 `docs/adr/0013`.
+
+**Closed in [#186](https://github.com/baileyrd/rusty_remind_me/pull/186).**
+That one cell is now matched: children are assigned to a Windows Job object
+with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, taking the workspace's first FFI
+dependency (`windows-sys`, target-gated to `cfg(windows)`). ADR-0013 is
+amended in place. The Unix abnormal-exit row still orphans, in both
+implementations — deliberately, since closing it would overshoot the
+reference. The Windows path is type-checked against
+`x86_64-pc-windows-gnu`, not runtime-tested; CI is ubuntu-only.
 
 ### E1 — the hub
 
@@ -157,15 +166,20 @@ Under the parity-loop skill's rules these are never auto-implemented:
 
 1. **E1, the hub** — a new deployable in another language. Scope decision
    first; not filed as an issue.
-2. **The Windows Job object for E5** — matching the reference's abnormal-exit
-   teardown needs a direct `windows-sys` dependency, against a workspace that
-   has deliberately had no FFI dependency at all (`docs/adr/0012` took the
-   same decision against `libc`). Recorded in `docs/adr/0013` with the
-   revisit path, rather than taken silently.
+2. ~~**The Windows Job object for E5**~~ — **asked, answered, and done in
+   [#186](https://github.com/baileyrd/rusty_remind_me/pull/186).** It was
+   stopped-and-asked precisely because it needed a direct `windows-sys`
+   dependency against a workspace that had deliberately had no FFI dependency
+   at all (`docs/adr/0012` took the same decision against `libc`). The answer
+   was to take it, target-gated to `cfg(windows)`; ADR-0013 is amended in
+   place rather than quietly contradicted. ADR-0012's refusal of `libc`
+   stands — that probe has a pure-`std` alternative and `CreateJobObjectW`
+   does not.
 3. **A stack-dumping crate for D1** — same shape: a new dependency would be
    needed to match the reference's `faulthandler` behavior faithfully.
 
-None of the three was taken unattended.
+None of the three was taken unattended. Item 2 has since been taken,
+with an explicit yes.
 
 ---
 

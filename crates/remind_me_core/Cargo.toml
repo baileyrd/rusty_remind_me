@@ -71,3 +71,14 @@ audio = ["dep:whisper-rs", "dep:symphonia"]
 # the same reason: it is pure Rust and takes explicit model paths, so enabling
 # reranking can never turn a search into a model download.
 rerank = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
+
+# The workspace's only FFI dependency, and target-gated so it exists nowhere
+# else. `docs/adr/0013` records why the sidecar teardown gap was worth closing
+# and `docs/adr/0012` records the general reluctance -- read both before adding
+# a second one.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+] }
+
