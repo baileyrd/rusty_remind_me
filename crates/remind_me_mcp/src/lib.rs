@@ -24,7 +24,7 @@ use remind_me_core::{
     ConsolidateInput, ContradictionCandidatesInput, Database, DbsImportInput, DecomposeBatchInput,
     DecomposeInput, DigestInput, EntityInput, EntityLookupInput, EntityTraverseInput, ExportInput,
     ExtractBatchInput, FeedbackInput, HistoryInput, ListRemindersInput, MemoryAddInput,
-    MemoryListInput, MemorySearchInput, MemoryUpdateInput, MempalaceImportInput,
+    MemoryListInput, MemorySearchInput, MemoryStatsInput, MemoryUpdateInput, MempalaceImportInput,
     NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
     ReclassifyInput, ReconcilePeerInput, ResponseFormat, RevertInput, SaveSearchInput,
     SavedSearchNameInput, SetReminderInput, SyncRepairInput, UndoImportInput, UpdateOutcome,
@@ -725,7 +725,8 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {
                                         "memory_id": { "type": "string" },
-                                        "limit": { "type": "integer", "default": 20, "minimum": HISTORY_LIMIT_MIN, "maximum": HISTORY_LIMIT_MAX }
+                                        "limit": { "type": "integer", "default": 20, "minimum": HISTORY_LIMIT_MIN, "maximum": HISTORY_LIMIT_MAX },
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown" }
                                     },
                                     "required": ["memory_id"]
                                 }
@@ -1015,7 +1016,9 @@ impl McpServer {
                                 "description": "Get database stats and memory counts.",
                                 "inputSchema": {
                                     "type": "object",
-                                    "properties": {}
+                                    "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown" }
+                                    }
                                 }
                             }
                         ]
@@ -1862,7 +1865,28 @@ impl McpServer {
                             } else {
                                 match history::history(&conn, &input.memory_id, input.limit) {
                                     Ok(revisions) => {
-                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&revisions).unwrap() }] })
+                                        let text = match input.response_format {
+                                            // The reference's JSON branch is an
+                                            // envelope, not the bare array this
+                                            // used to emit -- `count` saves a
+                                            // caller re-deriving what the
+                                            // producer already knew.
+                                            ResponseFormat::Json => {
+                                                serde_json::to_string_pretty(&json!({
+                                                    "memory_id": input.memory_id,
+                                                    "count": revisions.len(),
+                                                    "revisions": revisions,
+                                                }))
+                                                .unwrap()
+                                            }
+                                            ResponseFormat::Markdown => {
+                                                history::render_revisions_markdown(
+                                                    &input.memory_id,
+                                                    &revisions,
+                                                )
+                                            }
+                                        };
+                                        json!({ "content": [{ "type": "text", "text": text }] })
                                     }
                                     Err(e) => {
                                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("History error: {}", e) }] })
@@ -2325,14 +2349,27 @@ impl McpServer {
                             }
                         }
                     }
-                    "remind_me_stats" => match stats::collect(&conn) {
-                        Ok(s) => {
-                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&s).unwrap() }] })
+                    "remind_me_stats" => {
+                        // `unwrap_or_default` rather than erroring on a bad
+                        // payload: the only field is optional, so an absent or
+                        // malformed body still has one sensible reading.
+                        let input: MemoryStatsInput =
+                            serde_json::from_value(args).unwrap_or_default();
+                        match stats::collect(&conn) {
+                            Ok(s) => {
+                                let text = match input.response_format {
+                                    ResponseFormat::Json => {
+                                        serde_json::to_string_pretty(&s).unwrap()
+                                    }
+                                    ResponseFormat::Markdown => stats::render_markdown(&s),
+                                };
+                                json!({ "content": [{ "type": "text", "text": text }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Stats error: {}", e) }] })
+                            }
                         }
-                        Err(e) => {
-                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("Stats error: {}", e) }] })
-                        }
-                    },
+                    }
                     "remind_me_consolidate" => {
                         let input: Result<ConsolidateInput, _> = serde_json::from_value(args);
                         match input {
@@ -3361,6 +3398,142 @@ mod tests {
             tools.iter().any(|t| t["name"] == "remind_me_entity_upsert"),
             "the write must stay reachable under its own name"
         );
+    }
+
+    /// Both tools defaulted to JSON; the reference defaults both to markdown
+    /// (`models.py:510`, `models.py:754`). A caller who omits the field must
+    /// get the same thing from either implementation.
+    #[test]
+    fn test_stats_defaults_to_markdown_and_honours_json() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        call(&server, "remind_me_add", json!({ "content": "a note" }));
+
+        let markdown = text_of(&call(&server, "remind_me_stats", json!({})));
+        assert!(
+            markdown.starts_with("## Memory Store Statistics"),
+            "the reference's heading, got: {}",
+            markdown
+        );
+        assert!(markdown.contains("### Categories"), "got: {}", markdown);
+        assert!(
+            markdown.contains("### Recent Memories"),
+            "got: {}",
+            markdown
+        );
+
+        let raw = text_of(&call(
+            &server,
+            "remind_me_stats",
+            json!({ "response_format": "json" }),
+        ));
+        let parsed: Value = serde_json::from_str(&raw).expect("json branch must parse");
+        assert_eq!(parsed["total_memories"], 1);
+    }
+
+    #[test]
+    fn test_history_defaults_to_markdown_and_honours_json() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let added: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_add",
+            json!({
+                "content": "the original wording"
+            }),
+        )))
+        .unwrap();
+        let id = added["id"].as_str().unwrap().to_string();
+        // An update is what writes a revision.
+        call(
+            &server,
+            "remind_me_update",
+            json!({ "memory_id": id, "content": "the revised wording" }),
+        );
+
+        let markdown = text_of(&call(
+            &server,
+            "remind_me_history",
+            json!({ "memory_id": id }),
+        ));
+        assert!(
+            markdown.contains("revision(s) for memory"),
+            "the reference's header, got: {}",
+            markdown
+        );
+        assert!(
+            markdown.contains("- **Revision `"),
+            "the reference's bullet, got: {}",
+            markdown
+        );
+        // The snapshot holds the *pre-edit* content -- what the edit replaced.
+        assert!(
+            markdown.contains("the original wording"),
+            "got: {}",
+            markdown
+        );
+
+        let raw = text_of(&call(
+            &server,
+            "remind_me_history",
+            json!({ "memory_id": id, "response_format": "json" }),
+        ));
+        let parsed: Value = serde_json::from_str(&raw).expect("json branch must parse");
+        // An envelope, matching the reference -- not the bare array this
+        // used to return.
+        assert_eq!(parsed["memory_id"], id);
+        assert_eq!(parsed["count"], 1);
+        assert!(parsed["revisions"].is_array(), "got: {}", parsed);
+    }
+
+    /// The empty case has its own sentence in the reference rather than an
+    /// empty list, and a model reads that sentence.
+    #[test]
+    fn test_history_with_no_revisions_says_so_in_markdown() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let added: Value = serde_json::from_str(&text_of(&call(
+            &server,
+            "remind_me_add",
+            json!({
+                "content": "never edited"
+            }),
+        )))
+        .unwrap();
+        let id = added["id"].as_str().unwrap();
+
+        let markdown = text_of(&call(
+            &server,
+            "remind_me_history",
+            json!({ "memory_id": id }),
+        ));
+        assert!(
+            markdown.contains("_No revision history for memory"),
+            "got: {}",
+            markdown
+        );
+    }
+
+    #[test]
+    fn test_both_tools_declare_response_format_defaulting_to_markdown() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let listed = server
+            .handle_request(
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+            )
+            .unwrap();
+        let tools = listed["result"]["tools"].as_array().unwrap().clone();
+
+        for name in ["remind_me_stats", "remind_me_history"] {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{} must be declared", name));
+            let field = &tool["inputSchema"]["properties"]["response_format"];
+            assert_eq!(field["default"], "markdown", "{} default", name);
+            assert_eq!(field["type"], "string", "{} type", name);
+        }
     }
 
     #[test]

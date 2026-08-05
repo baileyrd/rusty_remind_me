@@ -116,3 +116,41 @@ pub fn collect(conn: &Connection) -> Result<Stats> {
         db_size_mb: db_size_mb(conn)?,
     })
 }
+
+/// Render the stats snapshot the way the reference's `remind_me_stats`
+/// markdown branch does (`tools/admin.py:457`).
+///
+/// Section order and headings are the reference's, not this crate's
+/// preference: the markdown is what a model reads back, so a reordered or
+/// renamed section is a different prompt even when the numbers match.
+pub fn render_markdown(stats: &Stats) -> String {
+    let mut lines = vec![
+        "## Memory Store Statistics".to_string(),
+        String::new(),
+        format!("**Total memories:** {}", stats.total_memories),
+        format!("**Total imports:** {}", stats.total_imports),
+        format!(
+            "**Database:** `{}` ({} MB)",
+            stats.db_path, stats.db_size_mb
+        ),
+        String::new(),
+        "### Categories".to_string(),
+    ];
+    for (category, count) in &stats.categories {
+        lines.push(format!("- **{}**: {}", category, count));
+    }
+    lines.push(String::new());
+    lines.push("### Sources".to_string());
+    for (source, count) in &stats.sources {
+        lines.push(format!("- **{}**: {}", source, count));
+    }
+    lines.push(String::new());
+    lines.push("### Recent Memories".to_string());
+    for recent in &stats.recent {
+        lines.push(format!(
+            "- `{}` [{}] {}…",
+            recent.id, recent.category, recent.preview
+        ));
+    }
+    lines.join("\n")
+}
