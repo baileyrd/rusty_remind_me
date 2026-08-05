@@ -230,8 +230,23 @@ the pin is now part of closing the loop, not just opening it.** (Note that
 those issue numbers collide with the PR numbers cited just above for #121/#122;
 the entries above name PRs, these name issues.)
 
-Then #149 (I4, Obsidian) as PR #158, and #150 (I5, Readwise). Remaining:
-#151 (E4), #152 (E5), #153 (I1), #154 (E6), #155 (E8), #156 (I2/I3).
+Then #149 (I4, Obsidian) as PR #158, and #150 (I5, Readwise), #151 (E4),
+#152 (E5), #153 (I1), #154 (E6), #155 (E8, index half), #156 (I2/I3).
+
+**What is left after #156:** the reranker half of #155 (E8), which needs an
+ONNX model fetched at runtime and so cannot be verified in CI at all, and
+#160 — a durability defect in the OAuth state store found while chasing a
+flake, not a parity gap. Every other item in this table is merged.
+
+**#156's guarantee is weaker than the rest of Wave 8, and this is the one item
+whose core behaviour is unverified.** OCR and transcription cannot do their job
+without a model, and downloading one is exactly what the feature forbids CI to
+do. What is proven: both compile, both refuse correctly when a model is absent,
+and the audio decode/resample path is correct. What is **not** proven: that a
+real image OCRs to the right text, or a real recording transcribes to it.
+Neither has been run against a real model — that is still to do, by hand,
+before anyone relies on the output. Nothing else in this table rests on an
+unverified path.
 
 *Correction:* the #118 entry claimed 61 of 61 tools. That counted the
 target-only `remind_me_wiki_import` toward the reference's 61; the real figure

@@ -23,7 +23,8 @@
 
 use crate::entity::{upsert_entity, upsert_entity_relation};
 use crate::import_paths::{
-    suffix_of, validate_import_dir, validate_import_file, DOCUMENT_SUFFIXES, SUPPORTED_SUFFIXES,
+    suffix_of, validate_import_dir, validate_import_file, AUDIO_SUFFIXES, DOCUMENT_SUFFIXES,
+    IMAGE_SUFFIXES, SUPPORTED_SUFFIXES,
 };
 use crate::models::{
     BulkImportDirInput, BulkImportResult, ChatImportInput, EntityInput, ImportKind, ImportOutcome,
@@ -706,6 +707,10 @@ pub fn import_content(
         // `.pdf` is unambiguous, so unlike Readwise it is safe to route from
         // `Auto` — there is no other thing a PDF could plausibly be.
         ("pdf", _) => ImportKind::Pdf,
+        // Likewise for images and recordings: the suffix decides the parser
+        // outright, because there is no text reading of these bytes at all.
+        (s, _) if IMAGE_SUFFIXES.contains(&s) => ImportKind::Image,
+        (s, _) if AUDIO_SUFFIXES.contains(&s) => ImportKind::Audio,
         ("json" | "jsonl", _) => ImportKind::Chat,
         (_, ImportKind::Auto) => {
             if looks_like_chat_markdown(raw) {
@@ -760,9 +765,86 @@ pub fn import_content(
                 raw_entries: pages_with_text,
                 extras,
                 frontmatter: serde_json::Map::new(),
-                source: DOCUMENT_SOURCE,
+                source: crate::pdf_import::PDF_SOURCE,
                 category: if category.is_empty() || category == CHAT_SOURCE {
                     crate::pdf_import::PDF_CATEGORY.to_string()
+                } else {
+                    category.to_string()
+                },
+            }
+        }
+        ImportKind::Image => {
+            let (chunks, lines) = match crate::image_import::parse_image(raw_bytes, max_length) {
+                Ok(parsed) => parsed,
+                // An image with no readable text is refused rather than
+                // imported as zero memories — otherwise it is indistinguishable
+                // from an empty file, the failure #147 fixed.
+                Err(reason) => {
+                    return Ok(ImportOutcome::Failed {
+                        file: filename.to_string(),
+                        reason,
+                    })
+                }
+            };
+            let extras = vec![ChunkExtras::default(); chunks.len()];
+            ParsedImport {
+                chunks: chunks.into_iter().map(|c| (c, None)).collect(),
+                // Recognised lines, not chunks produced — the honest answer to
+                // "how much of this image was readable".
+                raw_entries: lines,
+                extras,
+                frontmatter: serde_json::Map::new(),
+                source: crate::image_import::IMAGE_SOURCE,
+                category: if category.is_empty() || category == CHAT_SOURCE {
+                    crate::image_import::IMAGE_CATEGORY.to_string()
+                } else {
+                    category.to_string()
+                },
+            }
+        }
+        ImportKind::Audio => {
+            let (segments, segment_count) =
+                match crate::audio_import::parse_audio(raw_bytes, max_length) {
+                    Ok(parsed) => parsed,
+                    // Silence is refused for the same reason a textless image
+                    // is: a successful import of nothing hides the problem.
+                    Err(reason) => {
+                        return Ok(ImportOutcome::Failed {
+                            file: filename.to_string(),
+                            reason,
+                        })
+                    }
+                };
+            let mut chunks = Vec::with_capacity(segments.len());
+            let mut extras = Vec::with_capacity(segments.len());
+            for segment in segments {
+                chunks.push((segment.content, None));
+                let mut metadata = serde_json::Map::new();
+                // Rounded to centiseconds, which is whisper.cpp's own
+                // resolution — more digits would be invented precision.
+                metadata.insert(
+                    "start".to_string(),
+                    serde_json::json!((segment.start * 100.0).round() / 100.0),
+                );
+                metadata.insert(
+                    "end".to_string(),
+                    serde_json::json!((segment.end * 100.0).round() / 100.0),
+                );
+                extras.push(ChunkExtras {
+                    extra_tags: Vec::new(),
+                    mention_entities: Vec::new(),
+                    metadata,
+                });
+            }
+            ParsedImport {
+                chunks,
+                // Segments transcribed, not chunks produced.
+                raw_entries: segment_count,
+                extras,
+                frontmatter: serde_json::Map::new(),
+                source: crate::audio_import::AUDIO_SOURCE,
+                category: if category.is_empty() || category == CHAT_SOURCE {
+                    crate::audio_import::AUDIO_CATEGORY.to_string()
                 } else {
                     category.to_string()
                 },
@@ -1006,6 +1088,39 @@ pub fn validate_kind_and_suffix(
         return Some(ImportOutcome::Failed {
             file: filename.to_string(),
             reason: format!("pdf import does not support .{}", suffix),
+        });
+    }
+    if kind == ImportKind::Image && !IMAGE_SUFFIXES.contains(&suffix) {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!(
+                "image import does not support .{}: use .png, .jpg or .jpeg",
+                suffix
+            ),
+        });
+    }
+    if kind == ImportKind::Audio && !AUDIO_SUFFIXES.contains(&suffix) {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!(
+                "audio import does not support .{}: use .mp3, .m4a, .wav or .ogg",
+                suffix
+            ),
+        });
+    }
+    // The other direction: these bytes have no text reading at all, so a
+    // request to parse them as chat or prose is a mistake worth naming rather
+    // than a lossy decode worth attempting.
+    if IMAGE_SUFFIXES.contains(&suffix) && !matches!(kind, ImportKind::Auto | ImportKind::Image) {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!(".{} files must be imported as an image", suffix),
+        });
+    }
+    if AUDIO_SUFFIXES.contains(&suffix) && !matches!(kind, ImportKind::Auto | ImportKind::Audio) {
+        return Some(ImportOutcome::Failed {
+            file: filename.to_string(),
+            reason: format!(".{} files must be imported as audio", suffix),
         });
     }
     if kind == ImportKind::Readwise && suffix != "json" {

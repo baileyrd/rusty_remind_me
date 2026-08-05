@@ -232,7 +232,9 @@ fn unsupported_files_are_ignored() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
     let dir = scratch("suffix");
-    write(&dir, "photo.png", "not markdown");
+    // Not `.png`: images became a supported format when OCR landed, so a
+    // watcher now *does* pick one up. `.exe` is still nothing this reads.
+    write(&dir, "installer.exe", "not markdown");
     let mut w = watcher(&dir);
 
     assert_eq!(w.scan_once(&conn), ScanCounts::default());

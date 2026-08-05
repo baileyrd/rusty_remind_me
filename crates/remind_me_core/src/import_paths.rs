@@ -24,9 +24,16 @@ pub const IMPORT_ROOTS_ENV: &str = "REMIND_ME_IMPORT_ROOTS";
 pub const EXPORT_ROOTS_ENV: &str = "REMIND_ME_EXPORT_ROOTS";
 
 /// Extensions the importer accepts.
-pub const SUPPORTED_SUFFIXES: [&str; 6] = ["json", "jsonl", "md", "markdown", "txt", "pdf"];
+pub const SUPPORTED_SUFFIXES: [&str; 13] = [
+    "json", "jsonl", "md", "markdown", "txt", "pdf", "png", "jpg", "jpeg", "mp3", "m4a", "wav",
+    "ogg",
+];
 /// Extensions a *document* import accepts — a document is prose, not a chat log.
 pub const DOCUMENT_SUFFIXES: [&str; 3] = ["md", "markdown", "txt"];
+/// Extensions OCR'd by an image import.
+pub const IMAGE_SUFFIXES: [&str; 3] = ["png", "jpg", "jpeg"];
+/// Extensions transcribed by an audio import.
+pub const AUDIO_SUFFIXES: [&str; 4] = ["mp3", "m4a", "wav", "ogg"];
 
 fn roots_from(env: &str) -> Vec<PathBuf> {
     match std::env::var(env) {

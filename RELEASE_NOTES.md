@@ -2,6 +2,64 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — Image (OCR) and audio (transcription) import (#156)
+
+### Added
+- **Optional `ocr` feature** (`ocrs`/`rten`) importing `.png`, `.jpg` and
+  `.jpeg` by recognising the text in them. One memory per image, matching the
+  reference's deliberate choice not to make one per detected text region.
+- **Optional `audio` feature** (`whisper-rs`/`symphonia`) importing `.mp3`,
+  `.m4a`, `.wav` and `.ogg` by transcribing them. One chunk per Whisper
+  segment, each carrying `{"start", "end"}` in seconds — the positional anchor
+  that lets a search hit be found again in the recording, exactly as a PDF
+  chunk carries its page.
+- `image` and `audio` import kinds, picked automatically from the extension.
+
+### Fixed
+- **PDF imports recorded `source = "document_import"`; they now record
+  `"pdf_import"`, as the reference does.** These are not interchangeable:
+  `normalize` selects on `source IN ('document_import', 'chat_import')`, so
+  extracted PDF text was silently enrolled in a rewriting pass the reference
+  deliberately keeps it out of.
+
+### Notes
+- **Neither feature downloads a model, ever.** `REMIND_ME_OCR_DET_MODEL_PATH`
+  and `REMIND_ME_OCR_REC_MODEL_PATH` point at the two `ocrs` models;
+  `REMIND_ME_AUDIO_MODEL_PATH` points at a Whisper GGML file. Unset, an import
+  fails with a message naming the variables and saying where the files come
+  from. This is stricter than the reference, which fetches from HuggingFace on
+  first use — importing a voice memo should not quietly pull several hundred
+  megabytes.
+- **This is the one place the port needs configuration the reference does
+  not.** RapidOCR's models ship inside its Python wheel, so the reference needs
+  none at all; the Rust models are separate files.
+- **A textless image and a silent recording are refused, not imported as zero
+  memories.** A successful import of nothing is indistinguishable from an empty
+  file — the failure #147 fixed for JSONL transcripts and #153 for scanned
+  PDFs.
+- **`ocrs`/`rten` rather than an ONNX Runtime binding.** The reference picked
+  RapidOCR because it already had ONNX Runtime present for its embedder; that
+  reasoning does not transfer, because the Rust ONNX binding does not carry a
+  runtime — it downloads one at run time. A runtime whose install strategy is
+  an implicit download is the wrong shape for a feature required not to
+  download anything. `ocrs` is pure Rust and takes explicit model paths.
+- **No system `ffmpeg`.** whisper.cpp decodes nothing, so `symphonia` handles
+  all four containers in-process — the same "no system binary" rule that made
+  the reference reject `pywhispercpp` in favour of faster-whisper.
+- **Resampling to 16 kHz low-passes first.** Dropping samples would fold
+  everything above 8 kHz down into the speech band as a tone that was never in
+  the recording, degrading transcription in a way that looks like a bad model
+  rather than a bad resampler.
+- **A real recognition or transcription is not verified at all yet**, and
+  cannot be in CI without a model. CI compiles both features; the feature-off
+  refusals, the model-configuration errors, and the audio decode/resample
+  arithmetic are tested unconditionally. That an actual image OCRs to the right
+  text, or an actual recording transcribes to it, has **not** been run against
+  a real model — do that by hand before relying on the output.
+- Images and recordings are now *supported* formats, so a directory sweep or
+  watcher picks them up instead of passing over them. Feature-off, each is
+  reported as a failed file rather than skipped — the same as the reference.
+
 ## 2026-08-04 — ANN vector index (#155, part 1 of 2)
 
 ### Added

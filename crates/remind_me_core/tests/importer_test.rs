@@ -528,7 +528,9 @@ fn a_missing_file_inside_the_roots_reports_not_found() {
 #[test]
 fn an_unsupported_extension_is_rejected() {
     let dir = scratch("suffix");
-    let path = write(&dir, "image.png", "not really a png");
+    // Not `.png` — images became a supported format when OCR landed, and an
+    // example that quietly turns into a supported one stops testing anything.
+    let path = write(&dir, "installer.exe", "not really an executable");
 
     assert!(matches!(
         validate_import_file(&path.display().to_string()),
@@ -600,12 +602,12 @@ fn unsupported_files_are_passed_over_rather_than_failing_the_run() {
     let conn = db.conn();
     let dir = scratch("mixed");
     write(&dir, "notes.md", "# Notes\n\nalpha");
-    write(&dir, "photo.png", "binary-ish");
+    write(&dir, "installer.exe", "binary-ish");
 
     let result = bulk(&conn, &dir, true);
 
-    // A notes folder holding a stray image should import the markdown beside
-    // it, not refuse the lot.
+    // A notes folder holding a stray file of a format nothing here reads
+    // should import the markdown beside it, not refuse the lot.
     assert_eq!(result.files_seen, 1);
     assert_eq!(result.files_failed, 0);
 

@@ -823,6 +823,12 @@ pub enum ImportKind {
     Obsidian,
     /// A PDF: per-page text extraction. Requires the `pdf` feature.
     Pdf,
+    /// An image: OCR the whole image into one document. Requires the `ocr`
+    /// feature.
+    Image,
+    /// A recording: transcribed per Whisper segment, each carrying its time
+    /// range. Requires the `audio` feature.
+    Audio,
     /// A saved Readwise export: one memory per highlight. Must be requested
     /// explicitly — never chosen by `Auto`, because a Readwise export and a
     /// chat export are both an unadorned `.json` and guessing wrong silently

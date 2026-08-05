@@ -1035,6 +1035,71 @@ nothing about whether it returns the right rows.
 
 ---
 
+## #156 — image (OCR) and audio (transcription) import
+
+**The issue's stated risk was wrong, and the probes said so before any code was
+written.** It expected the native toolchain to block. Nothing blocked: `ocrs`
+compiles in 51 seconds and `whisper-rs` in about a minute. What actually
+constrains this item is the models, not the build.
+
+**`ocrs`/`rten`, not an ONNX Runtime binding.** The reference picked RapidOCR
+because ONNX Runtime was already present for its embedder. That reasoning does
+not transfer: the Rust ONNX binding does not *carry* a runtime, it downloads
+one at run time on first use. A feature whose central requirement is "never
+download anything implicitly" cannot be built on a runtime whose install
+strategy is an implicit download, however good it is otherwise. `ocrs` is pure
+Rust and takes explicit model paths — the wanted contract rather than something
+to work around.
+
+**`symphonia` for decoding, for the reason the reference already established.**
+whisper.cpp takes 16 kHz mono samples and decodes nothing. The reference
+rejected `pywhispercpp` specifically because it shelled out to a system
+`ffmpeg`; `symphonia` is pure Rust and handles all four containers in-process,
+so the same rule is honoured rather than re-litigated.
+
+**Resampling filters before it decimates.** Almost no recording is already
+16 kHz, and dropping samples to get there aliases everything above 8 kHz down
+into the speech band. The failure would present as poor transcription — which
+reads as a bad model, not a bad resampler, and so would likely never be traced
+back here. A windowed-sinc low-pass runs first.
+
+**Model paths are configuration, and their absence is a loud error.** This is
+the one place the port is less convenient than the reference: RapidOCR's models
+ship inside its wheel, so the reference needs no configuration at all. Here
+three env vars are required, and unset they produce a message naming them and
+saying where the files come from. Quietly returning nothing would be
+indistinguishable from an image that genuinely had no text in it.
+
+**Deliberately stricter than the reference on downloads.** The reference
+fetches a Whisper model from HuggingFace on first use. whisper.cpp takes a file
+path instead, and that is the better contract: reading a voice memo should not
+pull several hundred megabytes as a side effect.
+
+**The scope really is narrower than the title, and the tests say which part.**
+No real recognition or transcription is regression-tested, and cannot be
+without a model. What *is* tested unconditionally: the feature-off refusals,
+every model-configuration error, and the decode/resample arithmetic. That last
+one was worth doing properly rather than writing off as part of the untestable
+feature — it is deterministic maths over synthesised audio, including a test
+that a 20 kHz tone is filtered out where naive decimation would fold it to
+4 kHz.
+
+**CI clippy-checks these rather than running their tests**, unlike #155. There
+is no equivalence property here that only a test run can establish, and the
+only thing a feature-on test run could add is a model download — the exact
+thing the feature forbids.
+
+**Two defects found by reading the reference, both adjacent rather than
+central.** PDF imports were recording `source = "document_import"` where the
+reference uses `"pdf_import"`; since `normalize` selects on `source IN
+('document_import', 'chat_import')`, extracted PDF text was silently enrolled
+in a rewriting pass the reference keeps it out of. And three tests used `.png`
+as their "unsupported extension" example, so making images supported turned
+them into OCR tests — the same trap `.pdf` sprang on #153, now sprung by the
+fix for it.
+
+---
+
 ## Process corrections made mid-loop
 
 **A tool can be advertised without being routable, and only clippy notices.**

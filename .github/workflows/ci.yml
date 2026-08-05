@@ -72,3 +72,16 @@ jobs:
       # feature is safe to enable, and it has to actually run somewhere.
       - name: cargo test --features ann
         run: cargo test -p remind_me_core --features ann --locked
+
+      # OCR and transcription are build+clippy checks rather than test runs:
+      # neither can do its actual job without a model, and downloading one in
+      # CI is precisely the implicit fetch these features are required never
+      # to perform. Everything that *is* checkable without a model — the
+      # feature-off refusals, the model-configuration errors, and the audio
+      # decode/resample arithmetic — runs unconditionally in the default test
+      # run above, so this step is only proving the feature-on code compiles.
+      - name: cargo clippy --features ocr
+        run: cargo clippy -p remind_me_core --features ocr --all-targets --locked -- -D warnings
+
+      - name: cargo clippy --features audio
+        run: cargo clippy -p remind_me_core --features audio --all-targets --locked -- -D warnings
