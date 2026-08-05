@@ -2,7 +2,7 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
-## 2026-08-05 — Windows Job object for sidecars
+## 2026-08-05 — Windows Job object for sidecars (#186)
 
 ### Added
 - **Sidecars are assigned to a Windows Job object** created with
@@ -35,6 +35,24 @@ Dated entries, newest first. One entry per merged pull request.
   reference keeps the now-useless handle and still assigns children to it;
   this closes it and skips assignment. Identical sidecar behaviour, minus a
   leaked handle.
+
+## 2026-08-05 — `remind_me_history` defaults `limit` to 10 (#183)
+
+### Changed
+- **`limit` now defaults to 10**, matching the reference's
+  `RevisionHistoryInput.limit` (`models.py:504`). It defaulted to 20 here.
+
+### Notes
+- **A caller who omits `limit` now gets 10 revisions instead of 20.** Callers
+  that pass it explicitly are unaffected.
+- The bounds already matched (`1..=100`); only the default had drifted, so
+  this is the narrowest possible fix.
+- Unlike the other signature gaps found this run, nothing here was rejected,
+  created, or lost — the extra revisions were real. What it broke was the
+  "same call, same answer" property: a session summarising "your last N edits"
+  got a different N depending on which implementation it was talking to.
+- A test pins both the struct default and the declared schema, so the next
+  drift is caught rather than re-derived.
 
 ## 2026-08-05 — `response_format` on `remind_me_history` and `remind_me_stats` (#176)
 

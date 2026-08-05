@@ -725,7 +725,7 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {
                                         "memory_id": { "type": "string" },
-                                        "limit": { "type": "integer", "default": 20, "minimum": HISTORY_LIMIT_MIN, "maximum": HISTORY_LIMIT_MAX },
+                                        "limit": { "type": "integer", "default": 10, "minimum": HISTORY_LIMIT_MIN, "maximum": HISTORY_LIMIT_MAX },
                                         "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown" }
                                     },
                                     "required": ["memory_id"]
@@ -3488,6 +3488,35 @@ mod tests {
 
     /// The empty case has its own sentence in the reference rather than an
     /// empty list, and a model reads that sentence.
+    /// Pins the default so the next drift is caught rather than re-derived.
+    /// The bounds already matched the reference; only this number had drifted
+    /// (#183), and nothing was asserting it.
+    #[test]
+    fn test_history_limit_defaults_to_the_references_ten() {
+        let parsed: HistoryInput =
+            serde_json::from_value(json!({ "memory_id": "m1" })).expect("parse");
+        assert_eq!(parsed.limit, 10);
+
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let listed = server
+            .handle_request(
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+            )
+            .unwrap();
+        let declared = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "remind_me_history")
+            .expect("remind_me_history")["inputSchema"]["properties"]["limit"]["default"]
+            .clone();
+        assert_eq!(
+            declared, 10,
+            "the declared schema must agree with the struct default"
+        );
+    }
+
     #[test]
     fn test_history_with_no_revisions_says_so_in_markdown() {
         let db = Database::open_in_memory().unwrap();

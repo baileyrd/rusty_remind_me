@@ -1382,7 +1382,11 @@ pub struct HistoryInput {
 }
 
 fn default_history_limit() -> usize {
-    20
+    // 10, not 20 -- the reference's `RevisionHistoryInput.limit` default
+    // (`models.py:504`). The bounds already matched; only the default drifted,
+    // so a caller omitting `limit` was getting a different number of revisions
+    // from each implementation with nothing announcing it.
+    10
 }
 
 /// Input for `remind_me_stats`.
