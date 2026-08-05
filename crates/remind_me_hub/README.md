@@ -29,6 +29,21 @@ client machine:
 crates/remind_me_hub/client-setup.sh --node-id my-laptop --tunnel me@hub-host
 ```
 
+That prompts for the secret, sets up an SSH tunnel, and calls
+`rusty-remind-me configure` to write the MCP entry — sync environment included
+— for every client. For a node that needs no tunnel, `configure` alone is
+enough:
+
+```sh
+REMIND_ME_SYNC_SECRET=... rusty-remind-me configure \
+    --node-id my-laptop --hub-url http://127.0.0.1:8765
+```
+
+The secret is read from the environment and has no flag: argv is world-readable
+through `/proc` and lands in shell history. `configure` also refuses a partial
+triple — node id, hub URL and secret, or none of them — because sync silently
+does nothing unless all three are set.
+
 Other deployments — Docker Compose, Fly, Railway — are in [`deploy/`](deploy/).
 
 ## Running it directly

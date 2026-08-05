@@ -10,7 +10,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-fn get_target_config_paths() -> Vec<(PathBuf, &'static str)> {
+fn get_target_config_paths() -> Vec<(PathBuf, &'static str, &'static str)> {
     let mut targets = Vec::new();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
@@ -22,6 +22,7 @@ fn get_target_config_paths() -> Vec<(PathBuf, &'static str)> {
         targets.push((
             appdata.join("Claude").join("claude_desktop_config.json"),
             "Claude Desktop",
+            "claude-desktop",
         ));
     }
     #[cfg(not(target_os = "windows"))]
@@ -31,6 +32,7 @@ fn get_target_config_paths() -> Vec<(PathBuf, &'static str)> {
                 .join("Claude")
                 .join("claude_desktop_config.json"),
             "Claude Desktop",
+            "claude-desktop",
         ));
     }
 
@@ -39,35 +41,179 @@ fn get_target_config_paths() -> Vec<(PathBuf, &'static str)> {
             .join("antigravity")
             .join("mcp_config.json"),
         "Antigravity",
+        "antigravity",
     ));
-    targets.push((home.join(".cursor").join("mcp.json"), "Cursor"));
+    targets.push((home.join(".cursor").join("mcp.json"), "Cursor", "cursor"));
     targets.push((
         home.join(".mcp").join("config.json"),
         "Codex / Generic MCP Client",
+        "mcp",
     ));
 
     targets
 }
 
-fn configure_mcp_clients() -> Result<(), Box<dyn std::error::Error>> {
+const CONFIGURE_USAGE: &str = "\
+Usage: rusty-remind-me configure [--node-id ID --hub-url URL] [--peer-port N]
+                                 [--sync-interval SECS] [--db-path PATH]
+
+Writes the MCP server entry for every client this tool knows about. With
+--node-id and --hub-url it also writes the sync environment, so a synced node
+needs one command rather than a hand-edited config per client.
+
+The sync secret is read from REMIND_ME_SYNC_SECRET in the environment. There
+is deliberately no --secret flag: argv is world-readable through /proc on
+Linux and lands in shell history, and a token that grants access to the whole
+memory database should not go there.";
+
+/// Parsed `configure` flags.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConfigureArgs {
+    node_id: Option<String>,
+    hub_url: Option<String>,
+    peer_port: Option<u16>,
+    sync_interval: Option<u64>,
+    db_path: Option<String>,
+}
+
+fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs, String> {
+    let mut parsed = ConfigureArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            flag
+            @ ("--node-id" | "--hub-url" | "--peer-port" | "--sync-interval" | "--db-path") => {
+                let value = args.get(i + 1).ok_or_else(|| {
+                    format!("Error: {} expects a value.\n{}", flag, CONFIGURE_USAGE)
+                })?;
+                match flag {
+                    "--node-id" => parsed.node_id = Some(value.clone()),
+                    "--hub-url" => parsed.hub_url = Some(value.clone()),
+                    "--db-path" => parsed.db_path = Some(value.clone()),
+                    "--peer-port" => {
+                        parsed.peer_port = Some(value.parse().map_err(|_| {
+                            format!(
+                                "Error: --peer-port expects a number 0-65535, got {:?}.",
+                                value
+                            )
+                        })?)
+                    }
+                    _ => {
+                        parsed.sync_interval = Some(value.parse().map_err(|_| {
+                            format!(
+                                "Error: --sync-interval expects a number of seconds, got {:?}.",
+                                value
+                            )
+                        })?)
+                    }
+                }
+                i += 2;
+            }
+            // Rejected by name rather than falling into "unknown flag", so the
+            // reason is the reason -- someone reaching for --secret should
+            // learn why it does not exist, not that it is misspelled.
+            "--secret" | "--sync-secret" => {
+                return Err(format!(
+                    "Error: there is no {} flag. Pass the secret through the \
+                     environment instead:\n\n    \
+                     REMIND_ME_SYNC_SECRET=... rusty-remind-me configure ...\n\n\
+                     argv is world-readable through /proc and is kept in shell \
+                     history; the environment of a process is neither.",
+                    args[i]
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "Error: unknown flag {:?}.\n{}",
+                    other, CONFIGURE_USAGE
+                ));
+            }
+        }
+    }
+
+    // Sync turns on only when node id, hub URL and secret are ALL present
+    // (`remind_me_core::sync::sync_enabled`). A half-configured node is
+    // therefore a node with sync silently off, which is the failure this
+    // whole session kept running into -- so say so at the point the mistake
+    // is made, rather than letting it look configured.
+    let secret = std::env::var(remind_me_core::sync::SYNC_SECRET_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let wants_sync = parsed.node_id.is_some() || parsed.hub_url.is_some() || secret.is_some();
+    if wants_sync {
+        let mut missing = Vec::new();
+        if parsed.node_id.is_none() {
+            missing.push("--node-id");
+        }
+        if parsed.hub_url.is_none() {
+            missing.push("--hub-url");
+        }
+        if secret.is_none() {
+            missing.push("REMIND_ME_SYNC_SECRET");
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "Error: sync needs a node id, a hub URL and a secret, and {} \
+                 {} missing. Sync would be silently disabled otherwise.\n{}",
+                missing.join(" + "),
+                if missing.len() == 1 { "is" } else { "are" },
+                CONFIGURE_USAGE
+            ));
+        }
+    }
+
+    Ok(parsed)
+}
+
+fn configure_mcp_clients(parsed: &ConfigureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let current_exe = env::current_exe()?;
     let exe_str = current_exe.to_string_lossy().to_string();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let db_path = home.join(".remind_me").join("remind_me.db");
+    let db_path = match &parsed.db_path {
+        Some(p) => PathBuf::from(p),
+        None => home.join(".remind_me").join("remind_me.db"),
+    };
 
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let server_entry = json!({
-        "command": exe_str,
-        "args": ["server"],
-        "env": {
-            "REMIND_ME_DB_PATH": db_path.to_string_lossy()
-        }
+    let mut env_map = json!({
+        "REMIND_ME_DB_PATH": db_path.to_string_lossy()
     });
 
-    for (config_path, name) in get_target_config_paths() {
+    // `parse_configure_args` has already refused any partial combination, so
+    // reaching here with a node id means the hub URL and secret are present
+    // too -- there is no half-configured entry to write.
+    if let Some(node_id) = &parsed.node_id {
+        let secret = std::env::var(remind_me_core::sync::SYNC_SECRET_ENV).unwrap_or_default();
+        let hub_url = parsed.hub_url.clone().unwrap_or_default();
+        env_map[remind_me_core::sync::NODE_ID_ENV] = json!(node_id);
+        env_map[remind_me_core::sync::HUB_URL_ENV] = json!(hub_url);
+        env_map[remind_me_core::sync::SYNC_SECRET_ENV] = json!(secret);
+        env_map[remind_me_core::sync::PEER_PORT_ENV] = json!(parsed
+            .peer_port
+            .unwrap_or(remind_me_core::sync::DEFAULT_PEER_PORT)
+            .to_string());
+        env_map[remind_me_core::sync::SYNC_INTERVAL_ENV] = json!(parsed
+            .sync_interval
+            .unwrap_or(remind_me_core::sync::DEFAULT_SYNC_INTERVAL_SECS)
+            .to_string());
+    }
+
+    for (config_path, name, client_slug) in get_target_config_paths() {
+        // Built per target rather than once: REMIND_ME_CLIENT is the writer
+        // the hub records against every memory, so "which app was this typed
+        // into" is answerable in /stats. Left unset it is `unknown` for
+        // everything, which is the same as not having the field.
+        let mut env_for_target = env_map.clone();
+        env_for_target[remind_me_core::sync::CLIENT_ENV] = json!(client_slug);
+        let server_entry = json!({
+            "command": exe_str,
+            "args": ["server"],
+            "env": env_for_target,
+        });
+
         if let Some(parent) = config_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -88,13 +234,31 @@ fn configure_mcp_clients() -> Result<(), Box<dyn std::error::Error>> {
             data["mcpServers"] = json!({});
         }
 
-        data["mcpServers"]["rusty-remind-me"] = server_entry.clone();
+        data["mcpServers"]["rusty-remind-me"] = server_entry;
 
         if let Ok(json_str) = serde_json::to_string_pretty(&data) {
             if fs::write(&config_path, json_str).is_ok() {
                 println!("✔ Configured {}: {}", name, config_path.display());
             }
         }
+    }
+
+    if let Some(node_id) = &parsed.node_id {
+        println!(
+            "\nSync configured: node {:?} -> {}",
+            node_id,
+            parsed.hub_url.as_deref().unwrap_or("")
+        );
+        // Named, not printed: the written files hold the secret because a
+        // client has to read it, but echoing it to a terminal puts it in
+        // scrollback and any terminal-logging setup for no benefit -- whoever
+        // ran this already had it in their environment.
+        println!(
+            "The secret was taken from {} and written into each config above.",
+            remind_me_core::sync::SYNC_SECRET_ENV
+        );
+    } else {
+        println!("\nSync not configured (no --node-id). Pass --node-id and --hub-url, with REMIND_ME_SYNC_SECRET set, to enable it.");
     }
 
     println!("\nSetup complete! Restart your client application to activate rusty-remind-me.");
@@ -204,7 +368,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         match args[1].as_str() {
             "configure" | "setup" => {
-                configure_mcp_clients()?;
+                let configure_args = match parse_configure_args(&args[2..]) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        eprintln!("{}", message);
+                        std::process::exit(1);
+                    }
+                };
+                configure_mcp_clients(&configure_args)?;
             }
             "api" => {
                 let port_arg = args.get(2).cloned().unwrap_or_else(|| "8080".to_string());
@@ -524,6 +695,165 @@ mod tests {
     #[test]
     fn an_unknown_flag_is_rejected() {
         let err = parse_list_args(&args(&["--tags", "work"])).unwrap_err();
+        assert!(err.contains("unknown flag"), "got: {}", err);
+    }
+
+    // ---------------------------------------------------------------------
+    // configure
+    //
+    // These manipulate REMIND_ME_SYNC_SECRET, a process-global, so they are
+    // serialised behind one mutex and always restore what they found. Without
+    // that they pass alone and fail under the default thread-per-test.
+    // ---------------------------------------------------------------------
+
+    use std::sync::Mutex;
+    static SECRET_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `f` with REMIND_ME_SYNC_SECRET set (or removed, for `None`).
+    fn with_secret<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = SECRET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var(remind_me_core::sync::SYNC_SECRET_ENV).ok();
+        match value {
+            Some(v) => std::env::set_var(remind_me_core::sync::SYNC_SECRET_ENV, v),
+            None => std::env::remove_var(remind_me_core::sync::SYNC_SECRET_ENV),
+        }
+        let result = f();
+        match previous {
+            Some(v) => std::env::set_var(remind_me_core::sync::SYNC_SECRET_ENV, v),
+            None => std::env::remove_var(remind_me_core::sync::SYNC_SECRET_ENV),
+        }
+        result
+    }
+
+    #[test]
+    fn bare_configure_asks_for_no_sync() {
+        let parsed = with_secret(None, || {
+            parse_configure_args(&args(&[])).expect("bare `configure` is valid")
+        });
+        assert_eq!(parsed, ConfigureArgs::default());
+    }
+
+    #[test]
+    fn a_full_sync_triple_parses() {
+        let parsed = with_secret(Some("s3cret"), || {
+            parse_configure_args(&args(&[
+                "--node-id",
+                "laptop",
+                "--hub-url",
+                "http://127.0.0.1:8765",
+                "--peer-port",
+                "9000",
+                "--sync-interval",
+                "30",
+            ]))
+            .unwrap()
+        });
+        assert_eq!(parsed.node_id.as_deref(), Some("laptop"));
+        assert_eq!(parsed.hub_url.as_deref(), Some("http://127.0.0.1:8765"));
+        assert_eq!(parsed.peer_port, Some(9000));
+        assert_eq!(parsed.sync_interval, Some(30));
+    }
+
+    /// The point of the whole check: sync is off unless all three are present,
+    /// so a partial triple must be an error rather than a config that looks
+    /// written and silently never syncs.
+    #[test]
+    fn any_partial_sync_triple_is_refused() {
+        let cases: [(&[&str], Option<&str>, &str); 3] = [
+            (&["--node-id", "laptop"], Some("s3cret"), "--hub-url"),
+            (&["--hub-url", "http://h:8765"], Some("s3cret"), "--node-id"),
+            (
+                &["--node-id", "laptop", "--hub-url", "http://h:8765"],
+                None,
+                "REMIND_ME_SYNC_SECRET",
+            ),
+        ];
+        for (flags, secret, expected) in cases {
+            let err = with_secret(secret, || parse_configure_args(&args(flags)).unwrap_err());
+            assert!(
+                err.contains(expected) && err.contains("silently disabled"),
+                "flags {:?} should name {} as missing, got: {}",
+                flags,
+                expected,
+                err
+            );
+        }
+    }
+
+    /// A secret in the environment on its own still counts as asking for sync
+    /// -- otherwise `REMIND_ME_SYNC_SECRET=... configure` would quietly write
+    /// an unsynced config, which is the exact trap this guards.
+    #[test]
+    fn a_lone_secret_in_the_environment_still_demands_the_rest() {
+        let err = with_secret(Some("s3cret"), || {
+            parse_configure_args(&args(&[])).unwrap_err()
+        });
+        assert!(
+            err.contains("--node-id") && err.contains("--hub-url"),
+            "got: {}",
+            err
+        );
+    }
+
+    /// Whitespace is not a secret. Without the trim this passes the presence
+    /// check and writes `SYNC_SECRET="   "`, which the hub rejects on every
+    /// request -- a working-looking config that never syncs.
+    #[test]
+    fn a_blank_secret_counts_as_absent() {
+        let err = with_secret(Some("   "), || {
+            parse_configure_args(&args(&[
+                "--node-id",
+                "laptop",
+                "--hub-url",
+                "http://h:8765",
+            ]))
+            .unwrap_err()
+        });
+        assert!(err.contains("REMIND_ME_SYNC_SECRET"), "got: {}", err);
+    }
+
+    #[test]
+    fn a_secret_flag_is_refused_with_the_reason() {
+        for flag in ["--secret", "--sync-secret"] {
+            let err = with_secret(None, || {
+                parse_configure_args(&args(&[flag, "s3cret"])).unwrap_err()
+            });
+            assert!(
+                err.contains("REMIND_ME_SYNC_SECRET") && err.contains("/proc"),
+                "{} should explain why it does not exist, got: {}",
+                flag,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_numeric_peer_port_is_rejected() {
+        let err = with_secret(None, || {
+            parse_configure_args(&args(&["--peer-port", "http"])).unwrap_err()
+        });
+        assert!(err.contains("--peer-port expects a number"), "got: {}", err);
+    }
+
+    #[test]
+    fn a_configure_flag_missing_its_value_is_rejected() {
+        for flag in [
+            "--node-id",
+            "--hub-url",
+            "--peer-port",
+            "--sync-interval",
+            "--db-path",
+        ] {
+            let err = with_secret(None, || parse_configure_args(&args(&[flag])).unwrap_err());
+            assert!(err.contains("expects a value"), "{}: {}", flag, err);
+        }
+    }
+
+    #[test]
+    fn an_unknown_configure_flag_is_rejected() {
+        let err = with_secret(None, || {
+            parse_configure_args(&args(&["--hub", "http://h"])).unwrap_err()
+        });
         assert!(err.contains("unknown flag"), "got: {}", err);
     }
 }
