@@ -1264,3 +1264,55 @@ implied by a green check.
 Revisit if: a Windows runner joins CI (then test it for real), or the Unix
 abnormal-exit row starts mattering — but note that closing *that* would put
 this ahead of the reference, which is a different decision than parity.
+
+## E1, the hub: port it, with storage behind a trait (ADR-0015)
+
+**Decision:** port all ten routes as `remind_me_hub` / `rusty-remind-me-hub`,
+with a `HubStore` trait and two backends — Postgres (default) and SQLite.
+
+This was the one gap-analysis item deliberately never filed as an issue,
+because it is a scope decision rather than an implementation gap: a second
+deployable in a second runtime. It was put to a human and came back yes, with
+"both backends" chosen over either alone.
+
+**Why a trait and not just Postgres.** The reference is Postgres-only, and a
+Postgres-only port is the faithful reading. But it makes a single-operator
+self-hosted hub run a database server for a workload one file would serve. And
+the trait had to exist anyway for the differential test — the thing that makes
+"two backends" a claim rather than a hope.
+
+**Why not just SQLite.** Far smaller, and it would have reused
+`sync::server` almost wholesale. But it cannot adopt an existing Postgres
+deployment without a data migration, and "successor" means little for a
+component whose whole job is holding the shared copy if it cannot take that
+copy over.
+
+**Where the trait boundary sits, and why there.** Complete operations only — no
+connections, no transactions, no SQL. `apply_record` takes one *already
+validated* record and owns the transaction around it, because the
+savepoint-per-record isolation is part of the operation rather than something a
+caller can be trusted to remember. Validation and canonicalisation live above
+the trait, so a backend never sees a malformed record and "malformed" can never
+be confused with "storage failed" in the push tally.
+
+**The one deliberate divergence, and it is a bug fix.** The reference's legacy
+TIMESTAMPTZ→TEXT migration strips all trailing zeros, turning `.500000` into
+`.5` — which `datetime.isoformat()` never emits, despite the reference's own
+comment saying the goal is to match it exactly. Under `COLLATE "C"` that sorts
+*before* the client's own value, so a migrated row compares as older than the
+identical instant on the node that wrote it, corrupting the pull cursor and LWW
+alike. This strips only a wholly-zero fraction.
+
+**That bug is the argument for the Postgres tests.** It was invisible in
+review and only appeared when the migration ran against a live server. Everything
+else about the backend compiles and type-checks perfectly while getting this
+wrong.
+
+**`approx` degrades honestly.** SQLite has no planner estimate worth reporting,
+so the backend says so, the route falls back to exact counts, and the response
+reports `approximate: false`. Labelling a scan "approximate" would be the one
+thing the flag must never mean.
+
+Revisit if: the SQLite backend ever needs to *become* a Postgres one in place
+(there is no migration between them today, deliberately — they are different
+deployments, not two states of one).

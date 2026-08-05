@@ -2,6 +2,47 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — The sync hub, ported (E1)
+
+### Added
+- **`remind_me_hub` and the `rusty-remind-me-hub` binary** — a port of the
+  reference's `hub/main.py`, all ten routes: `/health`, `/stats`, `/count`,
+  `/metrics`, `/admin/compact_tombstones`, `/sync/push`, and the four
+  `/sync/pull*` routes.
+- **Two storage backends behind a `HubStore` trait.** Postgres (default) is a
+  drop-in for an existing deployment, schema and legacy migration included.
+  SQLite is for a self-hosted hub that wants one file and no server; it is
+  wire-identical and not schema-identical, and says so.
+- A differential test that runs the same script through both backends and
+  asserts the pulled records, `/stats` and `/count` match.
+
+### Fixed
+- **A bug in the reference's legacy-schema migration.** Its
+  `regexp_replace(..., '\.?0+$', '')` strips *all* trailing zeros, turning
+  `.500000` into `.5` — which `datetime.isoformat()` never produces, despite
+  the reference's own comment saying the goal is to match it exactly. Under
+  `COLLATE "C"` that sorts *before* the client's own value, so a migrated row
+  compares as older than the identical instant on the node that wrote it,
+  corrupting both the pull cursor and LWW conflict resolution. This strips only
+  a wholly-zero fraction. Found by running the migration against a real
+  Postgres, not by reading the regex.
+
+### Notes
+- **This closes E1**, the last item in `gap-analysis.md` and the only one
+  deliberately never filed as an issue, because it was a scope decision rather
+  than an implementation gap.
+- `origin_node` remains hub-only and never reaches the wire; pull's
+  `exclude_node` filters on it rather than the record's `node_id`, matching the
+  reference's one deliberate divergence from the peer protocol.
+- `/count?approx=1` degrades honestly on SQLite: there is no planner estimate,
+  so it falls back to exact counts and reports `approximate: false` rather than
+  labelling a scan approximate.
+- A hub with no `SYNC_SECRET` refuses to start, and an unconfigured secret
+  rejects every request rather than accepting an empty bearer.
+- CI gains a `hub` job with a Postgres service container, and builds the
+  `--no-default-features` (SQLite-only) configuration so a `postgres::`
+  reference cannot leak outside the feature gate.
+
 ## 2026-08-05 — Windows Job object for sidecars (#186)
 
 ### Added
