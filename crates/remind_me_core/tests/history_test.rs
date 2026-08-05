@@ -40,6 +40,7 @@ fn update(conn: &Connection, id: &str, content: Option<&str>, category: Option<&
         conn,
         &MemoryUpdateInput {
             memory_id: id.to_string(),
+            clear_superseded: false,
             content: content.map(str::to_string),
             category: category.map(str::to_string),
             tags: None,
@@ -167,6 +168,7 @@ fn reverting_restores_every_tracked_field_together() {
         &conn,
         &MemoryUpdateInput {
             memory_id: id.clone(),
+            clear_superseded: false,
             content: Some("rewritten".into()),
             category: Some("engineering".into()),
             tags: Some(vec!["edited".into()]),

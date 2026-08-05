@@ -284,6 +284,7 @@ fn editing_a_category_no_longer_contradicts_a_classification() {
             category: Some("action_item".into()),
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();

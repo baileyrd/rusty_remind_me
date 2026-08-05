@@ -285,6 +285,7 @@ fn an_edited_imported_memory_is_still_removed() {
             category: None,
             tags: None,
             metadata: None,
+            clear_superseded: false,
         },
     )
     .unwrap();
