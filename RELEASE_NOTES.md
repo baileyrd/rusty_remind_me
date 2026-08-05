@@ -2,6 +2,47 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-05 — Sidecar processes (#169)
+
+### Added
+- **`sidecars`** — child processes kept alive alongside the server: the hub
+  SSH tunnel, and optionally the dashboard UI. `Sidecars::ensure` is
+  idempotent and runs at the top of each sync cycle, so a sidecar lost to a
+  sibling server's exit returns within one interval.
+- **`REMIND_ME_TUNNEL`** — full command line for the tunnel. Unset = no
+  sidecar management at all.
+- **`REMIND_ME_SIDECAR_UI`** — `1`/`true`/`yes` to also keep the dashboard
+  alive, on `REMIND_ME_MCP_UI_PORT` (default `5199`, the reference's).
+
+### Notes
+- **Teardown is guaranteed on graceful exit, not on abnormal exit — and that
+  is one cell short of the reference, not four.** Children are killed on
+  `Drop`, and unwinding runs `Drop`, so a normal return *and* a panic both
+  tear them down. What is missing is the reference's Windows Job object with
+  `KILL_ON_JOB_CLOSE`, which survives `TerminateProcess`. Its `_job()` returns
+  `None` immediately on non-Windows, so on Linux and macOS the reference
+  orphans its sidecars on abnormal exit exactly as this does. See
+  `docs/adr/0013` and the table in the module docs.
+- **No new dependency.** Matching the Windows cell needs `windows-sys`; this
+  workspace has deliberately had no FFI dependency at all (`docs/adr/0012`
+  took the same decision against `libc`). ADR-0013 records the trade and how
+  to revisit it, rather than leaving a silent gap.
+- **Backslash handling in the tunnel command is platform-dependent, and has
+  to be.** On Windows `\` is a path separator, so `"C:\Program Files\ssh.exe"`
+  must survive intact; on Unix it escapes. The reference makes the same split
+  via `shlex.split(..., posix=sys.platform != "win32")`. Treating `\` as an
+  escape everywhere would mangle every Windows tunnel command into an
+  unrunnable path — there is a test for exactly that.
+- **The port, not the process handle, decides whether to start.** Several
+  servers share one database, so a tunnel started by a sibling is a perfectly
+  good tunnel; keying off `self.procs` would start a second one.
+- **A dead sidecar is reaped before respawning.** Without that, a
+  persistently-failing sidecar (bad key, unreachable host) leaks one zombie
+  per tick for as long as the misconfiguration lasts — the reference hit
+  exactly this as its issue #139.
+- Sidecar stdio is detached. A child writing to the MCP server's stdout would
+  corrupt the JSON-RPC stream, which is the one unrecoverable failure here.
+
 ## 2026-08-05 — Cross-encoder reranking (#155, part 2 of 2)
 
 ### Added
