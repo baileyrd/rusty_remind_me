@@ -415,6 +415,14 @@ fn result(id: &str, score: f64) -> MemorySearchResult {
             chunk_index: None,
             remind_at: None,
             sensitive: false,
+            // Present so a Memory can round-trip to JSON (#198); feedback
+            // scoring reads none of them.
+            memory_type: None,
+            status: None,
+            node_id: None,
+            client: None,
+            source_capture_id: None,
+            deleted_at: None,
         },
         score,
         fts_score: Some(score),

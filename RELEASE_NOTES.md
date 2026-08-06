@@ -2,6 +2,31 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — Memory JSON carries the six fields it was dropping
+
+### Fixed
+- **`memory_type`, `status`, `node_id`, `client`, `source_capture_id` and
+  `deleted_at` now reach a client** (#198). All six were already stored in this
+  crate's own database and then dropped on the way out, so the serialised
+  memory carried 22 fields where the reference's carries 28.
+- `memory_type` was the sharp end. `reference` had just been added as an eighth
+  type, and a client talking to this port could not see *any* memory's type —
+  `remind_me_reclassify` wrote a value nothing could read back.
+
+### Added
+- **`memory_json_test.rs`, which derives the expected key set from the live
+  schema** rather than restating it. The reference builds its payload as
+  `dict(row)` over a `SELECT *`, so it tracks the schema automatically; a fixed
+  Rust struct cannot, which is why six columns went missing with no single
+  change causing it and no test noticing — every existing test compared this
+  crate against itself. The guard runs both directions: a column with no field
+  fails, and a field with no column fails too.
+
+Worth recording, because it made the earlier gate misleading: `cargo build
+--workspace` passed the whole time. Five `Memory` struct literals live in
+`#[cfg(test)]` code and test files, which `build` does not compile, so the
+first honest signal came only from `cargo test`.
+
 ## 2026-08-06 — Contradiction candidates report their shared entities
 
 ### Added

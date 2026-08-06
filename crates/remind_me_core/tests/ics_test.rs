@@ -47,6 +47,14 @@ fn memory(id: &str, content: &str, remind_at: Option<&str>) -> Memory {
         chunk_index: None,
         remind_at: remind_at.map(str::to_string),
         sensitive: false,
+        // Present so a Memory can round-trip to JSON (#198); the calendar
+        // feed reads none of them.
+        memory_type: None,
+        status: None,
+        node_id: None,
+        client: None,
+        source_capture_id: None,
+        deleted_at: None,
     }
 }
 

@@ -89,6 +89,30 @@ pub struct Memory {
     /// The "don't surface by default" flag. Carried on every memory rather
     /// than only where it is filtered on, so a rendered memory can say so.
     pub sensitive: bool,
+
+    // The six below were stored but never serialised, so a client could not
+    // see them at all (#198). They are `Option` even where the column is NOT
+    // NULL, because this database is shared with `remind_me` and a row that
+    // predates a column's default arrives as NULL; a non-optional `get` would
+    // turn that into a hard error on read rather than a missing value.
+    /// Classification: `decision`, `fact`, `reference`, … or `unclassified`.
+    /// `remind_me_reclassify` writes this, and until #198 nothing could read
+    /// it back.
+    pub memory_type: Option<String>,
+    /// Lifecycle state, `active` unless something archived it.
+    pub status: Option<String>,
+    /// Which node authored the row, for multi-machine sync.
+    pub node_id: Option<String>,
+    /// Which client wrote it — `claude-code`, `claude-desktop`, `unknown`.
+    pub client: Option<String>,
+    /// The capture this memory was distilled out of, if any. Distinct from
+    /// `capture_id`, which the reference keeps separately.
+    pub source_capture_id: Option<String>,
+    /// Tombstone marker. Always null in tool responses, whose queries filter
+    /// `deleted_at IS NULL` — emitted anyway because the reference emits it,
+    /// and a key that appears on one implementation and not the other is the
+    /// divergence this closes.
+    pub deleted_at: Option<String>,
 }
 
 /// Input model for adding a memory.
