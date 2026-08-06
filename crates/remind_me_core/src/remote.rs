@@ -41,6 +41,7 @@
 //! duplicating the reasoning above next to a second copy of the same code.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -387,15 +388,9 @@ fn hash_token(token: &str) -> String {
 pub struct OAuthStateStore {
     path: PathBuf,
     lock: Mutex<()>,
-    /// Set once this process has successfully persisted state to `path` at
-    /// least once (see [`Self::write`]). Lets [`Self::read`] tell "the file
-    /// has genuinely never existed" (fine to read as empty immediately)
-    /// apart from "this process just wrote it and a same-process read is
-    /// transiently not seeing that write yet" (worth a few short retries
-    /// before falling back to empty) — see `read`'s doc for why that
-    /// second case is a real, observed failure mode here, not defensive
-    /// paranoia.
-    has_written: std::sync::atomic::AtomicBool,
+    /// Distinguishes this store's temp files from any other process's when
+    /// several share a directory. See [`Self::temp_path`].
+    temp_counter: std::sync::atomic::AtomicU64,
 }
 
 impl OAuthStateStore {
@@ -403,7 +398,7 @@ impl OAuthStateStore {
         Self {
             path: path.into(),
             lock: Mutex::new(()),
-            has_written: std::sync::atomic::AtomicBool::new(false),
+            temp_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -420,96 +415,104 @@ impl OAuthStateStore {
     /// as empty rather than propagating an error — same tolerance as the
     /// reference's `_read`).
     ///
-    /// If this process has already persisted state here at least once
-    /// ([`Self::has_written`]) and this read comes back missing/corrupt
-    /// anyway, that's retried a handful of times with a short backoff
-    /// before giving up: this was observed, running this crate's own test
-    /// suite under heavy parallel filesystem load, to happen for a file
-    /// this exact process had just written and verified moments earlier —
-    /// a same-process read-after-write becoming transiently invisible,
-    /// which a bare `fs::read_to_string` retry (rather than trusting the
-    /// first miss) reliably resolves. A store that has never successfully
-    /// written skips the retries and reads a missing file as empty
-    /// immediately, matching the reference's own behavior for a brand-new
-    /// state file.
+    /// This used to retry a failed read up to eight times with a backoff,
+    /// because a file this very process had just written and verified could
+    /// transiently read back as missing under parallel test load. That was
+    /// never a filesystem quirk to be waited out: [`Self::write`] truncated
+    /// the real path in place, so a concurrent reader genuinely could catch
+    /// it empty or half-written. Writing to a temp file and renaming makes
+    /// that window not exist — a reader sees the old complete file or the
+    /// new one — so the retries have nothing left to paper over and are
+    /// gone with the cause (issue #160).
     fn read(&self) -> OAuthState {
-        if let Some(state) = self.read_once() {
-            return state;
-        }
-        if self.has_written.load(std::sync::atomic::Ordering::Acquire) {
-            for attempt in 0..8u32 {
-                std::thread::sleep(std::time::Duration::from_millis(1 << attempt.min(5)));
-                if let Some(state) = self.read_once() {
-                    return state;
-                }
-            }
-        }
-        OAuthState::default()
+        self.read_once().unwrap_or_default()
     }
 
-    /// Persist `state`, creating the parent directory if needed and setting
-    /// `0600` permissions on unix. Best-effort: an unwritable path is
-    /// silently dropped after a few immediate retries (mirrors the
-    /// reference logging-and-continuing rather than propagating an
-    /// `OSError`) — callers that already hold the client/token in memory
-    /// (e.g. the in-flight auth code exchange) keep working within this
-    /// process even if the file can't be written. The retry loop exists for
-    /// a real, observed failure mode rather than defensive paranoia: a
-    /// freshly-created parent directory can transiently fail a same-tick
-    /// `create_dir_all`-then-`write` under heavy concurrent filesystem
-    /// activity (seen running this crate's own test suite in parallel,
-    /// each test creating its own state file), and silently losing a just-
-    /// issued token to that race would be a real, hard-to-diagnose bug.
-    fn write(&self, state: &OAuthState) {
-        let Ok(body) = serde_json::to_string_pretty(state) else {
-            return;
-        };
+    /// A sibling temp path in the same directory as the state file.
+    ///
+    /// Same directory, not the system temp dir: `rename` is only atomic
+    /// within one filesystem, and `/tmp` is frequently a different one.
+    /// The name carries the pid and a per-store counter so two processes
+    /// (or two stores in one process) writing concurrently cannot collide
+    /// on it and corrupt each other's in-progress write.
+    fn temp_path(&self) -> PathBuf {
+        let n = self
+            .temp_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stem = self
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "oauth-state.json".to_string());
+        let name = format!(".{stem}.{}.{n}.tmp", std::process::id());
+        match self.path.parent() {
+            Some(parent) => parent.join(name),
+            None => PathBuf::from(name),
+        }
+    }
+
+    /// Persist `state` atomically, creating the parent directory if needed
+    /// and setting `0600` permissions on unix.
+    ///
+    /// Writes a sibling temp file, fsyncs it, then renames it over the real
+    /// path. `rename` is atomic, so a concurrent reader observes either the
+    /// complete old file or the complete new one and never a truncated one
+    /// (issue #160). The previous implementation truncated the real path in
+    /// place, which is what made a reader's "the file is missing" possible
+    /// at all, and what the retry-and-verify loop here was really working
+    /// around.
+    ///
+    /// Permissions are set on the temp file *before* the rename, so the
+    /// state file never exists at its real path with default permissions,
+    /// not even briefly. The old order — write, then chmod — left exactly
+    /// that window on every single write.
+    ///
+    /// **Failures propagate.** They used to be swallowed after a few
+    /// retries, on the reasoning that a caller holding the token in memory
+    /// keeps working. That is the wrong trade for the one caller that
+    /// matters: `issue_tokens` would hand a client a bearer token that was
+    /// never persisted, so the very next authenticated request fails with
+    /// no indication why, on either side. A refused issuance is a worse
+    /// user experience and a far better failure.
+    fn write(&self, state: &OAuthState) -> io::Result<()> {
+        let body = serde_json::to_string_pretty(state)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let body = format!("{body}\n");
-        for attempt in 0..10 {
-            if let Some(parent) = self.path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if Self::write_and_sync(&self.path, body.as_bytes()).is_ok() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
-                }
-                // Read back what was just written rather than trusting a
-                // successful write alone -- observed, under heavy
-                // concurrent filesystem activity, to occasionally return
-                // success for a write a same-process readback then does not
-                // see. Retrying the whole create-dir/write/sync/verify cycle
-                // (rather than trusting the first "successful" write) is
-                // what actually closes that window.
-                if fs::read_to_string(&self.path)
-                    .map(|on_disk| on_disk == body)
-                    .unwrap_or(false)
-                {
-                    self.has_written
-                        .store(true, std::sync::atomic::Ordering::Release);
-                    return;
-                }
-            }
-            if attempt < 9 {
-                std::thread::sleep(std::time::Duration::from_millis(1 << attempt.min(6)));
+
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let tmp = self.temp_path();
+        // Scoped so the handle is closed before the rename: Windows refuses
+        // to rename over a path while a handle to the source is open.
+        let written = (|| -> io::Result<()> {
+            use std::io::Write;
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(body.as_bytes())?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
             }
         }
-    }
 
-    /// Write `bytes` to `path` (create/truncate) and `fsync` before
-    /// returning, then drop the handle explicitly. Plain `fs::write` alone
-    /// was observed, under heavy concurrent filesystem activity in this
-    /// crate's own test suite, to sometimes return success for a write that
-    /// a same-process `fs::read_to_string` moments later did not yet see;
-    /// an explicit `sync_all` closes that window far more reliably than the
-    /// bare convenience function does.
-    fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut file = fs::File::create(path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
+        if let Err(e) = fs::rename(&tmp, &self.path) {
+            // Leaving a stray temp file behind would be a slow leak in the
+            // directory the state file lives in.
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -521,11 +524,16 @@ impl OAuthStateStore {
     }
 
     /// Insert or replace a client registration record.
-    pub fn put_client(&self, client_id: &str, record: Value) {
+    ///
+    /// Returns the write error rather than swallowing it: a registration
+    /// the caller believes succeeded but that never reached disk means the
+    /// client is authenticated for this process's lifetime and a stranger
+    /// after the next restart (issue #160).
+    pub fn put_client(&self, client_id: &str, record: Value) -> io::Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.read();
         state.clients.insert(client_id.to_string(), record);
-        self.write(&state);
+        self.write(&state)
     }
 
     /// Summarise registered clients with live token counts (for
@@ -573,13 +581,19 @@ impl OAuthStateStore {
     /// module's tests and `remind_me_mcp`'s `remind_me_revoke_clients` tool
     /// doc for why an empty `client_id` there means *list*, not *revoke
     /// everything*).
-    pub fn revoke_client(&self, client_id: &str) -> Option<OAuthRevokeSummary> {
+    /// `Ok(None)` when the client was not registered; `Err` when the
+    /// revocation could not be persisted — which must not read as success,
+    /// since the client would still be authenticated after a restart
+    /// (issue #160).
+    pub fn revoke_client(&self, client_id: &str) -> io::Result<Option<OAuthRevokeSummary>> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.read();
-        let record = state.clients.remove(client_id)?;
+        let Some(record) = state.clients.remove(client_id) else {
+            return Ok(None);
+        };
         let counts = state.drop_tokens(client_id);
-        self.write(&state);
-        Some(OAuthRevokeSummary {
+        self.write(&state)?;
+        Ok(Some(OAuthRevokeSummary {
             client_id: client_id.to_string(),
             client_name: record
                 .get("client_name")
@@ -587,17 +601,21 @@ impl OAuthStateStore {
                 .map(str::to_string),
             access_tokens: counts.access_tokens,
             refresh_tokens: counts.refresh_tokens,
-        })
+        }))
     }
 
     // -- tokens -----------------------------------------------------------
 
     /// Store `token`'s hash (never the raw secret) under `kind`.
-    pub fn put_token(&self, kind: TokenKind, token: &str, meta: Value) {
+    ///
+    /// The failure that matters most (issue #160): a token handed to a
+    /// client but never persisted is rejected on its first use, with
+    /// nothing on either side explaining why.
+    pub fn put_token(&self, kind: TokenKind, token: &str, meta: Value) -> io::Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.read();
         state.tokens_mut(kind).insert(hash_token(token), meta);
-        self.write(&state);
+        self.write(&state)
     }
 
     /// Look up a raw token by hash; `None` when unknown.
@@ -606,26 +624,30 @@ impl OAuthStateStore {
     }
 
     /// Forget a raw token (no-op when unknown).
-    pub fn delete_token(&self, kind: TokenKind, token: &str) {
+    ///
+    /// A silently-failed delete is a revocation that did not happen, so
+    /// this reports rather than swallows (issue #160).
+    pub fn delete_token(&self, kind: TokenKind, token: &str) -> io::Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.read();
         let hash = hash_token(token);
         if state.tokens_mut(kind).remove(&hash).is_some() {
-            self.write(&state);
+            return self.write(&state);
         }
+        Ok(())
     }
 
     /// Drop every access/refresh token of `client_id`, keeping the
     /// registration — what RFC 7009 revocation of any one token escalates
     /// to (the reference's `revoke_token`).
-    pub fn delete_tokens_for_client(&self, client_id: &str) -> OAuthTokenCounts {
+    pub fn delete_tokens_for_client(&self, client_id: &str) -> io::Result<OAuthTokenCounts> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.read();
         let counts = state.drop_tokens(client_id);
         if counts.access_tokens > 0 || counts.refresh_tokens > 0 {
-            self.write(&state);
+            self.write(&state)?;
         }
-        counts
+        Ok(counts)
     }
 }
 
@@ -793,7 +815,8 @@ mod tests {
         assert_eq!(status.oauth_clients, 0);
 
         OAuthStateStore::new(&state_file)
-            .put_client("client-1", serde_json::json!({"client_name": "claude.ai"}));
+            .put_client("client-1", serde_json::json!({"client_name": "claude.ai"}))
+            .expect("write");
         assert_eq!(remote_status().oauth_clients, 1);
 
         let _ = fs::remove_dir_all(&dir);
@@ -817,7 +840,7 @@ mod tests {
         let store = OAuthStateStore::new(&path);
         assert_eq!(store.list_clients(), Vec::new());
         assert!(store.get_client("x").is_none());
-        assert!(store.revoke_client("x").is_none());
+        assert!(store.revoke_client("x").unwrap().is_none());
 
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{not json").unwrap();
@@ -835,7 +858,7 @@ mod tests {
             "client_id_issued_at": 1_700_000_000i64,
             "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
         });
-        store.put_client("client-1", record.clone());
+        store.put_client("client-1", record.clone()).expect("write");
 
         assert_eq!(store.get_client("client-1"), Some(record));
         let clients = store.list_clients();
@@ -852,7 +875,9 @@ mod tests {
     fn oauth_store_state_file_has_0600_permissions() {
         let path = temp_state_path("perms");
         let store = OAuthStateStore::new(&path);
-        store.put_client("c1", serde_json::json!({}));
+        store
+            .put_client("c1", serde_json::json!({}))
+            .expect("write");
 
         #[cfg(unix)]
         {
@@ -868,11 +893,13 @@ mod tests {
     fn oauth_store_never_persists_raw_token_values() {
         let path = temp_state_path("hash");
         let store = OAuthStateStore::new(&path);
-        store.put_token(
-            TokenKind::Access,
-            "super-secret-raw-access-token",
-            serde_json::json!({ "client_id": "c1" }),
-        );
+        store
+            .put_token(
+                TokenKind::Access,
+                "super-secret-raw-access-token",
+                serde_json::json!({ "client_id": "c1" }),
+            )
+            .expect("write");
 
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("super-secret-raw-access-token"));
@@ -888,23 +915,29 @@ mod tests {
     fn oauth_store_delete_tokens_for_client_drops_only_the_targeted_clients_tokens() {
         let path = temp_state_path("delete");
         let store = OAuthStateStore::new(&path);
-        store.put_token(
-            TokenKind::Access,
-            "tok-a",
-            serde_json::json!({ "client_id": "c1" }),
-        );
-        store.put_token(
-            TokenKind::Refresh,
-            "tok-r",
-            serde_json::json!({ "client_id": "c1" }),
-        );
-        store.put_token(
-            TokenKind::Access,
-            "tok-b",
-            serde_json::json!({ "client_id": "c2" }),
-        );
+        store
+            .put_token(
+                TokenKind::Access,
+                "tok-a",
+                serde_json::json!({ "client_id": "c1" }),
+            )
+            .expect("write");
+        store
+            .put_token(
+                TokenKind::Refresh,
+                "tok-r",
+                serde_json::json!({ "client_id": "c1" }),
+            )
+            .expect("write");
+        store
+            .put_token(
+                TokenKind::Access,
+                "tok-b",
+                serde_json::json!({ "client_id": "c2" }),
+            )
+            .expect("write");
 
-        let counts = store.delete_tokens_for_client("c1");
+        let counts = store.delete_tokens_for_client("c1").expect("write");
         assert_eq!(counts.access_tokens, 1);
         assert_eq!(counts.refresh_tokens, 1);
         assert!(store.get_token(TokenKind::Access, "tok-a").is_none());
@@ -921,20 +954,31 @@ mod tests {
     ) {
         let path = temp_state_path("revoke");
         let store = OAuthStateStore::new(&path);
-        store.put_client("c1", serde_json::json!({ "client_name": "claude.ai" }));
-        store.put_client("c2", serde_json::json!({ "client_name": "other" }));
-        store.put_token(
-            TokenKind::Access,
-            "tok-a",
-            serde_json::json!({ "client_id": "c1" }),
-        );
-        store.put_token(
-            TokenKind::Refresh,
-            "tok-r",
-            serde_json::json!({ "client_id": "c1" }),
-        );
+        store
+            .put_client("c1", serde_json::json!({ "client_name": "claude.ai" }))
+            .expect("write");
+        store
+            .put_client("c2", serde_json::json!({ "client_name": "other" }))
+            .expect("write");
+        store
+            .put_token(
+                TokenKind::Access,
+                "tok-a",
+                serde_json::json!({ "client_id": "c1" }),
+            )
+            .expect("write");
+        store
+            .put_token(
+                TokenKind::Refresh,
+                "tok-r",
+                serde_json::json!({ "client_id": "c1" }),
+            )
+            .expect("write");
 
-        let summary = store.revoke_client("c1").expect("c1 is registered");
+        let summary = store
+            .revoke_client("c1")
+            .expect("write")
+            .expect("c1 is registered");
         assert_eq!(summary.client_id, "c1");
         assert_eq!(summary.client_name.as_deref(), Some("claude.ai"));
         assert_eq!(summary.access_tokens, 1);
@@ -951,9 +995,164 @@ mod tests {
 
         // Revoking an already-unknown client_id is a no-op that reports None
         // -- not an error, not a silent "revoked everything".
-        assert!(store.revoke_client("c1").is_none());
-        assert!(store.revoke_client("no-such-client").is_none());
+        assert!(store.revoke_client("c1").unwrap().is_none());
+        assert!(store.revoke_client("no-such-client").unwrap().is_none());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- OAuth state durability (issue #160) --------------------------------
+
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    /// A path whose parent is a regular file, so every write fails.
+    ///
+    /// Chosen over a read-only directory because these tests also run as
+    /// root in CI containers, where mode bits are simply bypassed and a
+    /// permission-based injection quietly succeeds instead of failing.
+    fn unwritable_store() -> (OAuthStateStore, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "rrm_oauth_unwritable_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&base, b"not a directory").expect("seed blocker file");
+        let store = OAuthStateStore::new(base.join("nested").join("oauth.json"));
+        (store, base)
+    }
+
+    #[test]
+    fn a_write_that_cannot_land_is_reported_not_swallowed() {
+        let (store, base) = unwritable_store();
+
+        // Every mutator must surface it. Previously all of these returned
+        // (), so a token could be handed to a client that was never stored.
+        assert!(store
+            .put_token(TokenKind::Access, "tok", json!({}))
+            .is_err());
+        assert!(store.put_client("cid", json!({})).is_err());
+
+        let _ = fs::remove_file(&base);
+    }
+
+    #[test]
+    fn a_successful_write_leaves_no_temp_file_behind() {
+        let dir = std::env::temp_dir().join(format!("rrm_oauth_tmp_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = OAuthStateStore::new(dir.join("oauth.json"));
+        store
+            .put_token(TokenKind::Access, "tok", json!({"a": 1}))
+            .unwrap();
+
+        let strays: Vec<_> = fs::read_dir(&dir)
+            .expect("state dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "oauth.json")
+            .collect();
+        assert!(strays.is_empty(), "temp files left behind: {strays:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp_file_behind() {
+        // The rename is what can fail after the temp file exists, so the
+        // cleanup path needs its own check -- otherwise a store on a
+        // failing volume slowly fills its directory with debris.
+        let dir = std::env::temp_dir().join(format!("rrm_oauth_tmpfail_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("dir");
+        // Make the destination a directory: the write succeeds, the rename
+        // onto a non-empty directory does not.
+        let target = dir.join("oauth.json");
+        fs::create_dir_all(target.join("occupied")).expect("blocker dir");
+
+        let store = OAuthStateStore::new(&target);
+        assert!(store
+            .put_token(TokenKind::Access, "tok", json!({}))
+            .is_err());
+
+        let strays: Vec<_> = fs::read_dir(&dir)
+            .expect("state dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "oauth.json")
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "temp files left behind after failure: {strays:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_state_file_is_never_world_readable_even_briefly() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rrm_oauth_perm_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = OAuthStateStore::new(dir.join("oauth.json"));
+        store
+            .put_token(TokenKind::Access, "tok", json!({}))
+            .unwrap();
+
+        let mode = fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "state file mode is {mode:o}, expected 600");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The failure this whole issue is about: a reader must never observe a
+    /// half-written state file.
+    ///
+    /// Under the old truncate-in-place write this raced -- a reader could
+    /// catch the file empty and read it as "no tokens", which is what made
+    /// a just-issued token vanish. With write-temp-then-rename the reader
+    /// sees the old complete file or the new one, so every observation
+    /// must parse and every one must contain the token written before the
+    /// hammering began.
+    #[test]
+    fn concurrent_readers_never_observe_a_torn_write() {
+        let dir = std::env::temp_dir().join(format!("rrm_oauth_torn_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = std::sync::Arc::new(OAuthStateStore::new(dir.join("oauth.json")));
+        store
+            .put_token(TokenKind::Access, "anchor", json!({"n": 0}))
+            .unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (store, stop) = (store.clone(), stop.clone());
+            std::thread::spawn(move || {
+                for n in 1..=200 {
+                    store
+                        .put_token(TokenKind::Access, &format!("t{n}"), json!({"n": n}))
+                        .expect("write");
+                }
+                stop.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+
+        let mut observations = 0u32;
+        while !stop.load(std::sync::atomic::Ordering::Acquire) {
+            // The anchor was durably written before any concurrent writing
+            // started, so it is present in every valid state. Reading it as
+            // absent means a torn or truncated file was observed.
+            assert!(
+                store.get_token(TokenKind::Access, "anchor").is_some(),
+                "observed a state file without the anchor token -- torn write"
+            );
+            observations += 1;
+        }
+        writer.join().expect("writer thread");
+        assert!(observations > 0, "reader never ran");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

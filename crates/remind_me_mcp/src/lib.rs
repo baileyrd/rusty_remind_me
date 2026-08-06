@@ -1405,15 +1405,27 @@ impl McpServer {
                             })
                         } else {
                             match store.revoke_client(client_id) {
-                                Some(summary) => {
+                                Ok(Some(summary)) => {
                                     let mut body =
                                         serde_json::to_value(summary).unwrap_or(json!({}));
                                     body["status"] = json!("revoked");
                                     body
                                 }
-                                None => json!({
+                                Ok(None) => json!({
                                     "status": "error",
                                     "error": format!("Unknown client_id: {}", client_id),
+                                }),
+                                // Distinct from "unknown client": the client
+                                // exists and is STILL AUTHORIZED. Reporting
+                                // it as revoked would be the worst possible
+                                // answer here (issue #160).
+                                Err(e) => json!({
+                                    "status": "error",
+                                    "error": format!(
+                                        "Could not persist revocation for {}: {}. \
+                                         The client remains authorized.",
+                                        client_id, e
+                                    ),
                                 }),
                             }
                         };
@@ -3150,20 +3162,26 @@ mod tests {
         // file a live remote server would read, the same cross-process
         // story the reference's tool relies on.
         let store = remind_me_core::remote::OAuthStateStore::new(&state_file);
-        store.put_client(
-            "client-1",
-            json!({ "client_name": "claude.ai", "redirect_uris": ["https://claude.ai/cb"] }),
-        );
-        store.put_token(
-            remind_me_core::remote::TokenKind::Access,
-            "access-tok",
-            json!({ "client_id": "client-1" }),
-        );
-        store.put_token(
-            remind_me_core::remote::TokenKind::Refresh,
-            "refresh-tok",
-            json!({ "client_id": "client-1" }),
-        );
+        store
+            .put_client(
+                "client-1",
+                json!({ "client_name": "claude.ai", "redirect_uris": ["https://claude.ai/cb"] }),
+            )
+            .expect("write");
+        store
+            .put_token(
+                remind_me_core::remote::TokenKind::Access,
+                "access-tok",
+                json!({ "client_id": "client-1" }),
+            )
+            .expect("write");
+        store
+            .put_token(
+                remind_me_core::remote::TokenKind::Refresh,
+                "refresh-tok",
+                json!({ "client_id": "client-1" }),
+            )
+            .expect("write");
 
         let listed: Value = serde_json::from_str(&text_of(&call(
             &server,

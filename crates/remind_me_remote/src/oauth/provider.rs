@@ -33,6 +33,7 @@
 //! patched in its test suite).
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -158,6 +159,34 @@ pub struct RegistrationError {
     pub error_description: String,
 }
 
+/// Why a registration failed, kept separate because the two cases are not
+/// the same kind of failure and must not share a status code (issue #160).
+///
+/// RFC 7591's error codes describe what the *client* sent wrong, which is a
+/// 400. A registration that was valid but could not be persisted is a 500,
+/// and reporting it as the former would tell an integrator to fix metadata
+/// that was never the problem.
+#[derive(Debug)]
+pub enum RegisterError {
+    /// The submitted metadata was rejected — RFC 7591, HTTP 400.
+    Invalid(RegistrationError),
+    /// The registration was accepted but could not be written to disk.
+    /// HTTP 500: the client is not registered, and must not be told it is.
+    Storage(std::io::Error),
+}
+
+impl From<RegistrationError> for RegisterError {
+    fn from(err: RegistrationError) -> Self {
+        Self::Invalid(err)
+    }
+}
+
+impl From<std::io::Error> for RegisterError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Storage(err)
+    }
+}
+
 /// Single-user OAuth 2.1 provider (FT-07) over [`OAuthStateStore`].
 pub struct Provider {
     owner_token: String,
@@ -204,12 +233,12 @@ impl Provider {
     pub fn register_client(
         &self,
         metadata: ClientMetadata,
-    ) -> Result<ClientInformation, RegistrationError> {
+    ) -> Result<ClientInformation, RegisterError> {
         if metadata.redirect_uris.is_empty() {
-            return Err(RegistrationError {
+            return Err(RegisterError::Invalid(RegistrationError {
                 error: "invalid_client_metadata",
                 error_description: "redirect_uris must contain at least one URI".to_string(),
-            });
+            }));
         }
         if !metadata
             .grant_types
@@ -217,18 +246,18 @@ impl Provider {
             .any(|g| g == "authorization_code")
             || !metadata.grant_types.iter().any(|g| g == "refresh_token")
         {
-            return Err(RegistrationError {
+            return Err(RegisterError::Invalid(RegistrationError {
                 error: "invalid_client_metadata",
                 error_description: "grant_types must be authorization_code and refresh_token"
                     .to_string(),
-            });
+            }));
         }
         if !metadata.response_types.iter().any(|r| r == "code") {
-            return Err(RegistrationError {
+            return Err(RegisterError::Invalid(RegistrationError {
                 error: "invalid_client_metadata",
                 error_description:
                     "response_types must include 'code' for authorization_code grant".to_string(),
-            });
+            }));
         }
 
         let client_id = generate_token();
@@ -246,7 +275,7 @@ impl Provider {
             extra: metadata.extra,
         };
         let record = serde_json::to_value(&info).unwrap_or_else(|_| json!({}));
-        self.store.put_client(&client_id, record);
+        self.store.put_client(&client_id, record)?;
         Ok(info)
     }
 
@@ -374,12 +403,27 @@ impl Provider {
     /// (matches the reference: `exchange_authorization_code` is a separate
     /// step from `load_authorization_code`, only called once every prior
     /// check passed).
-    pub fn exchange_authorization_code(&self, code: &str, now: i64) -> Option<TokenResponse> {
+    ///
+    /// `Ok(None)` means the code did not exist. `Err` means it did, was
+    /// consumed, and the tokens could not be persisted — a distinction the
+    /// caller must keep, since the first is the client's fault and the
+    /// second is ours (issue #160). The code stays consumed either way:
+    /// it is single-use by construction, and re-admitting it after a failed
+    /// write would trade a clear error for a replay window.
+    pub fn exchange_authorization_code(
+        &self,
+        code: &str,
+        now: i64,
+    ) -> io::Result<Option<TokenResponse>> {
         let entry = {
             let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
-            codes.remove(code)?
+            match codes.remove(code) {
+                Some(entry) => entry,
+                None => return Ok(None),
+            }
         };
-        Some(self.issue_tokens(&entry.client_id, entry.scopes, entry.resource, now))
+        self.issue_tokens(&entry.client_id, entry.scopes, entry.resource, now)
+            .map(Some)
     }
 
     // -- refresh grant --------------------------------------------------------
@@ -399,7 +443,12 @@ impl Provider {
         let expires_at = meta.get("expires_at").and_then(Value::as_i64);
         if let Some(exp) = expires_at {
             if exp < now {
-                self.store.delete_token(TokenKind::Refresh, token);
+                // Eviction is opportunistic: the token is expired, so it
+                // reads as absent whether or not the row goes away. This is
+                // the one delete whose failure genuinely does not change
+                // the answer, so it is ignored deliberately rather than
+                // propagated (issue #160).
+                let _ = self.store.delete_token(TokenKind::Refresh, token);
                 return None;
             }
         }
@@ -417,8 +466,11 @@ impl Provider {
         token: &str,
         scopes: Vec<String>,
         now: i64,
-    ) -> TokenResponse {
-        self.store.delete_token(TokenKind::Refresh, token);
+    ) -> io::Result<TokenResponse> {
+        // Retire first, and refuse to issue if that fails: a rotation whose
+        // retirement was lost would leave the presented refresh token live
+        // alongside its replacement (issue #160).
+        self.store.delete_token(TokenKind::Refresh, token)?;
         self.issue_tokens(client_id, scopes, None, now)
     }
 
@@ -441,7 +493,10 @@ impl Provider {
         let expires_at = meta.get("expires_at").and_then(Value::as_i64);
         if let Some(exp) = expires_at {
             if exp < now {
-                self.store.delete_token(TokenKind::Access, token);
+                // Same reasoning as the refresh-token path: the token is
+                // expired, so it reads as absent whether or not the
+                // eviction lands. Ignored deliberately (issue #160).
+                let _ = self.store.delete_token(TokenKind::Access, token);
                 return None;
             }
         }
@@ -459,7 +514,7 @@ impl Provider {
     /// unconditionally here: presenting either half of a client's
     /// credential pair kills every token that client holds (the
     /// registration itself survives, so the client can re-authorize).
-    pub fn revoke_tokens_for_client(&self, client_id: &str) -> OAuthTokenCounts {
+    pub fn revoke_tokens_for_client(&self, client_id: &str) -> io::Result<OAuthTokenCounts> {
         self.store.delete_tokens_for_client(client_id)
     }
 
@@ -471,7 +526,7 @@ impl Provider {
         scopes: Vec<String>,
         resource: Option<String>,
         now: i64,
-    ) -> TokenResponse {
+    ) -> io::Result<TokenResponse> {
         let access_token = generate_token();
         let refresh_token = generate_token();
         self.store.put_token(
@@ -483,7 +538,7 @@ impl Provider {
                 "expires_at": now + ACCESS_TOKEN_TTL,
                 "resource": resource,
             }),
-        );
+        )?;
         self.store.put_token(
             TokenKind::Refresh,
             &refresh_token,
@@ -492,8 +547,10 @@ impl Provider {
                 "scopes": scopes,
                 "expires_at": now + REFRESH_TOKEN_TTL,
             }),
-        );
-        TokenResponse {
+        )?;
+        // Both halves are on disk by the time the pair is handed back, so a
+        // client never holds a token the server will not recognise.
+        Ok(TokenResponse {
             access_token,
             token_type: "Bearer",
             expires_in: Some(ACCESS_TOKEN_TTL),
@@ -503,7 +560,7 @@ impl Provider {
                 Some(scopes.join(" "))
             },
             refresh_token: Some(refresh_token),
-        }
+        })
     }
 }
 
@@ -521,7 +578,6 @@ fn scopes_of(meta: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn temp_store(label: &str) -> OAuthStateStore {
         let dir = std::env::temp_dir().join(format!(
@@ -532,10 +588,25 @@ mod tests {
         OAuthStateStore::new(dir.join("oauth.json"))
     }
 
+    /// Remove the per-test directory holding `store`'s state file.
+    ///
+    /// Refuses to delete the temp root itself. A caller that passes a store
+    /// whose *path* is the directory (rather than the file inside it) would
+    /// otherwise resolve `parent()` one level too high and recursively
+    /// delete `/tmp` — which is exactly what one test here used to do, and
+    /// what made unrelated tests fail roughly one run in eight (issue
+    /// #160). Cheap guard, catastrophic failure mode.
     fn cleanup(store: &OAuthStateStore) {
-        if let Some(parent) = store.path().parent() {
-            let _ = std::fs::remove_dir_all(parent);
+        let Some(parent) = store.path().parent() else {
+            return;
+        };
+        if parent == std::env::temp_dir() || parent.parent().is_none() {
+            panic!(
+                "refusing to remove {} -- that is the temp root, not a test directory",
+                parent.display()
+            );
         }
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     fn params(challenge: &str) -> AuthorizationParams {
@@ -584,7 +655,14 @@ mod tests {
         assert!(info.client_secret.is_none());
         assert!(info.client_secret_expires_at.is_none());
 
-        cleanup(&OAuthStateStore::new(PathBuf::from(path.parent().unwrap())));
+        // Remove this test's own directory directly. This previously read
+        // `cleanup(&OAuthStateStore::new(path.parent()))`, which built a
+        // store *at* the test directory -- so `cleanup`'s own
+        // `store.path().parent()` resolved to the temp root and the test
+        // ran `remove_dir_all("/tmp")`, deleting every concurrently
+        // running test's state directory. That is the 1-in-8 flake issue
+        // #160 opened with, and it was never about the tests it killed.
+        let _ = std::fs::remove_dir_all(path.parent().expect("state dir"));
     }
 
     #[test]
@@ -670,7 +748,10 @@ mod tests {
         let loaded = provider.load_authorization_code(&client_id, &code).unwrap();
         assert_eq!(loaded.code_challenge, "challenge-abc");
 
-        let tokens = provider.exchange_authorization_code(&code, now).unwrap();
+        let tokens = provider
+            .exchange_authorization_code(&code, now)
+            .expect("write")
+            .expect("code exists");
         assert_eq!(tokens.token_type, "Bearer");
         assert_eq!(tokens.expires_in, Some(ACCESS_TOKEN_TTL));
         assert!(tokens.refresh_token.is_some());
@@ -750,7 +831,10 @@ mod tests {
             ConsentOutcome::Approved { code, .. } => code,
             _ => panic!("expected Approved"),
         };
-        let tokens = provider.exchange_authorization_code(&code, now).unwrap();
+        let tokens = provider
+            .exchange_authorization_code(&code, now)
+            .expect("write")
+            .expect("code exists");
         let old_refresh = tokens.refresh_token.unwrap();
 
         let refresh_view = provider
@@ -758,7 +842,9 @@ mod tests {
             .unwrap();
         assert_eq!(refresh_view.client_id, client_id);
 
-        let rotated = provider.exchange_refresh_token(&client_id, &old_refresh, vec![], now);
+        let rotated = provider
+            .exchange_refresh_token(&client_id, &old_refresh, vec![], now)
+            .expect("write");
         assert_ne!(rotated.access_token, tokens.access_token);
         assert_ne!(rotated.refresh_token.as_ref().unwrap(), &old_refresh);
 
@@ -809,9 +895,12 @@ mod tests {
             ConsentOutcome::Approved { code, .. } => code,
             _ => panic!("expected Approved"),
         };
-        let tokens = provider.exchange_authorization_code(&code, now).unwrap();
+        let tokens = provider
+            .exchange_authorization_code(&code, now)
+            .expect("write")
+            .expect("code exists");
 
-        let counts = provider.revoke_tokens_for_client(&a_id);
+        let counts = provider.revoke_tokens_for_client(&a_id).expect("write");
         assert_eq!(counts.access_tokens, 1);
         assert_eq!(counts.refresh_tokens, 1);
         assert!(provider

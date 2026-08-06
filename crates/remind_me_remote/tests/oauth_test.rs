@@ -612,7 +612,10 @@ async fn revoke_clients_semantics_empty_id_lists_nonempty_id_revokes_one_not_all
     assert!(listed.iter().any(|c| c.client_id == b_id));
 
     // Non-empty client_id revokes exactly that one client.
-    let summary = store.revoke_client(&a_id).expect("client-a is registered");
+    let summary = store
+        .revoke_client(&a_id)
+        .expect("write")
+        .expect("client-a is registered");
     assert_eq!(summary.client_id, a_id);
     assert_eq!(summary.access_tokens, 1);
     assert_eq!(summary.refresh_tokens, 1);
@@ -624,7 +627,7 @@ async fn revoke_clients_semantics_empty_id_lists_nonempty_id_revokes_one_not_all
 
     // Revoking an unknown client_id is an error (`None`), not a silent
     // "revoked everything that happened to exist".
-    assert!(store.revoke_client("no-such-client").is_none());
+    assert!(store.revoke_client("no-such-client").unwrap().is_none());
 }
 
 // ---------------------------------------------------------------------------
