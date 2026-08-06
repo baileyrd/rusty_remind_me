@@ -1454,6 +1454,14 @@ pub struct ContradictionSide {
 pub struct ContradictionCandidate {
     pub memory_a: ContradictionSide,
     pub memory_b: ContradictionSide,
+    /// Names of the entities both memories mention, in name order.
+    ///
+    /// This is *why the pair was surfaced at all* — the candidate query joins
+    /// on `memory_entities` — so without it the caller sees two memories and
+    /// no indication of what connects them. Which entity is shared changes how
+    /// the conflict reads, and re-deriving the join caller-side is work the
+    /// producer has already done.
+    pub shared_entities: Vec<String>,
 }
 
 /// A page of candidate pairs.
