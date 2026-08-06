@@ -22,6 +22,21 @@ pub const MAX_PULL_PAGES: usize = 100;
 
 const EPOCH: &str = "1970-01-01T00:00:00+00:00";
 
+/// `sync_log.last_pull_seq` sentinels — the hub-sequence pull cursor.
+///
+/// Three states in one integer rather than a second boolean column, matching
+/// the reference: they are mutually exclusive stages of one lifecycle, and
+/// splitting them would permit nonsense combinations.
+///
+/// Not yet established; the next pull probes the remote.
+pub const SEQ_UNKNOWN: i64 = -1;
+/// The remote does not understand `since_seq` — a peer server, whose SQLite
+/// store has no sequence to expose, or a hub predating the feature. Sticky, so
+/// a peer is not re-probed every cycle forever; [`super::sync_repair`] clears
+/// it back to [`SEQ_UNKNOWN`], which is the documented path after upgrading a
+/// hub.
+pub const SEQ_UNSUPPORTED: i64 = -2;
+
 #[derive(Debug)]
 pub struct PullError(pub String);
 
@@ -76,6 +91,99 @@ fn read_cursor(conn: &Connection, remote_id: &str) -> rusqlite::Result<(String, 
     .map(|opt| opt.unwrap_or_else(|| (EPOCH.to_string(), String::new())))
 }
 
+fn read_seq_cursor(conn: &Connection, remote_id: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT last_pull_seq FROM sync_log WHERE remote_id = ?",
+        params![remote_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|opt| opt.unwrap_or(SEQ_UNKNOWN))
+}
+
+fn persist_seq_cursor(conn: &Connection, remote_id: &str, seq: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO sync_log (remote_id, last_pull_seq) VALUES (?, ?)
+         ON CONFLICT(remote_id) DO UPDATE SET last_pull_seq = excluded.last_pull_seq",
+        params![remote_id, seq],
+    )?;
+    Ok(())
+}
+
+/// Decide whether `remote_id` supports the `since_seq` cursor.
+///
+/// Probes with `since_seq=0&limit=1` and inspects the record that comes back.
+/// The test is **did that record carry a `hub_seq`**, not "did the request
+/// succeed": a remote predating the feature ignores the unknown query
+/// parameter and answers happily from its legacy cursor, so a 200 proves
+/// nothing on its own. Only the field's presence does.
+///
+/// Returns the new state, already persisted:
+///
+/// - `0` when supported — deliberately a full re-walk from the start of the
+///   sequence rather than a seed from the highest `hub_seq` seen so far. The
+///   records this exists to rescue are precisely the ones a legacy cursor has
+///   never returned, so no watermark derived from legacy pulls can be trusted
+///   to sit below them. The re-walk is bounded by [`MAX_PULL_PAGES`] per cycle
+///   and almost entirely no-ops: a record matching the local copy loses
+///   last-write-wins, so it is neither rewritten nor re-embedded.
+/// - [`SEQ_UNSUPPORTED`] otherwise.
+///
+/// A probe that fails outright (network, 5xx) leaves the stored state
+/// untouched and returns [`SEQ_UNKNOWN`], so this cycle falls back to the
+/// legacy cursor and the next one tries again — an unreachable remote must not
+/// be mistaken for one that lacks the feature. An empty result is likewise not
+/// evidence of absence: an empty hub returns no records whichever cursor it
+/// understands.
+fn establish_seq_cursor(
+    conn: &Connection,
+    hub_url: &str,
+    secret: &str,
+    remote_id: &str,
+) -> rusqlite::Result<i64> {
+    let url = format!(
+        "{}/sync/pull?since_seq=0&limit=1",
+        hub_url.trim_end_matches('/')
+    );
+    let Ok((status, body)) = http::get(&url, secret) else {
+        return Ok(SEQ_UNKNOWN);
+    };
+    if !(200..300).contains(&status) {
+        return Ok(SEQ_UNKNOWN);
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(&body) else {
+        return Ok(SEQ_UNKNOWN);
+    };
+    let records = parsed
+        .get("records")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if records.is_empty() {
+        return Ok(SEQ_UNKNOWN);
+    }
+
+    let supported = records
+        .iter()
+        .any(|rec| rec.get("hub_seq").is_some_and(|v| !v.is_null()));
+    let state = if supported { 0 } else { SEQ_UNSUPPORTED };
+    persist_seq_cursor(conn, remote_id, state)?;
+    Ok(state)
+}
+
+/// The greatest `hub_seq` among `records`, ignoring any that lack one or carry
+/// an unparseable value.
+fn max_hub_seq(records: &[&Value]) -> Option<i64> {
+    records
+        .iter()
+        .filter_map(|rec| match rec.get("hub_seq") {
+            Some(Value::Number(n)) => n.as_i64(),
+            Some(Value::String(s)) => s.parse().ok(),
+            _ => None,
+        })
+        .max()
+}
+
 fn persist_cursor(
     conn: &Connection,
     remote_id: &str,
@@ -102,14 +210,31 @@ pub fn pull_remote(
     remote_id: &str,
 ) -> Result<PullReport, PullError> {
     let (mut since, mut since_id) = read_cursor(conn, remote_id)?;
+    let mut since_seq = read_seq_cursor(conn, remote_id)?;
     let mut report = PullReport::default();
 
+    // Establish before pulling, so a node already caught up on the legacy
+    // cursor — the exact state in which stranded records are invisible — still
+    // switches over, instead of waiting for traffic that by definition never
+    // arrives.
+    if since_seq == SEQ_UNKNOWN {
+        since_seq = establish_seq_cursor(conn, hub_url, secret, remote_id)?;
+    }
+
     for _ in 0..MAX_PULL_PAGES {
+        let cursor_params = if since_seq >= 0 {
+            format!("since_seq={}", since_seq)
+        } else {
+            format!(
+                "since={}&since_id={}",
+                urlencode(&since),
+                urlencode(&since_id)
+            )
+        };
         let url = format!(
-            "{}/sync/pull?since={}&since_id={}&exclude_node={}&limit={}",
+            "{}/sync/pull?{}&exclude_node={}&limit={}",
             hub_url.trim_end_matches('/'),
-            urlencode(&since),
-            urlencode(&since_id),
+            cursor_params,
             urlencode(node_id),
             PULL_PAGE_SIZE,
         );
@@ -135,6 +260,16 @@ pub fn pull_remote(
         report.pages += 1;
 
         let mut page_max = (since.clone(), since_id.clone());
+        // Only records that actually applied may move either cursor. That is
+        // this crate's existing rule for the legacy keyset (below), and the
+        // sequence cursor follows it rather than the reference's, which
+        // advances over every record received whether or not it was stored.
+        // Advancing past a record that failed to apply strands it precisely
+        // the way a legacy cursor strands a late push — the bug this whole
+        // cursor exists to fix. The cost is head-of-line blocking on a
+        // permanently-malformed record, which the no-progress check below
+        // turns into a clean stop rather than a spin.
+        let mut applied_records: Vec<&Value> = Vec::new();
         for record_value in &records {
             match serde_json::from_value::<SyncRecord>(record_value.clone()) {
                 Ok(record) => {
@@ -142,6 +277,7 @@ pub fn pull_remote(
                     match upsert_record(conn, &record) {
                         Ok(_outcome) => {
                             report.applied += 1;
+                            applied_records.push(record_value);
                             if (record_ts.clone(), record.id.clone()) > page_max {
                                 page_max = (record_ts, record.id.clone());
                             }
@@ -154,15 +290,28 @@ pub fn pull_remote(
         }
 
         let records_len = records.len();
-        if page_max <= (since.clone(), since_id.clone()) {
-            // No progress: applying this page didn't advance the cursor at
-            // all (every record failed, or the remote keeps replaying the
-            // same page). Stop rather than loop forever on it.
-            break;
+        if since_seq >= 0 {
+            // A record without a usable `hub_seq` cannot move this cursor:
+            // skipping it would strand it.
+            match max_hub_seq(&applied_records) {
+                Some(page_seq) if page_seq > since_seq => {
+                    since_seq = page_seq;
+                    persist_seq_cursor(conn, remote_id, since_seq)?;
+                }
+                // No progress — stop rather than re-request the same page.
+                _ => break,
+            }
+        } else {
+            if page_max <= (since.clone(), since_id.clone()) {
+                // No progress: applying this page didn't advance the cursor at
+                // all (every record failed, or the remote keeps replaying the
+                // same page). Stop rather than loop forever on it.
+                break;
+            }
+            since = page_max.0;
+            since_id = page_max.1;
+            persist_cursor(conn, remote_id, &since, &since_id)?;
         }
-        since = page_max.0;
-        since_id = page_max.1;
-        persist_cursor(conn, remote_id, &since, &since_id)?;
 
         if records_len < PULL_PAGE_SIZE {
             break;

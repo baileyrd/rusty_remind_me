@@ -668,14 +668,25 @@ const V27_COLUMNS: &[(&str, &str, &str)] = &[
 
 #[test]
 fn the_schema_version_is_the_references_current_one() {
-    // Not a tautology against the dump: `remind_me` v1.54.0 reports
-    // `_SCHEMA_VERSION = 27` (db.py:462), and a database this crate creates is
+    // Not a tautology against the dump: `remind_me` reports
+    // `_SCHEMA_VERSION = 29` (db.py:462), and a database this crate creates is
     // only readable by it if the stamp matches the schema actually present.
-    assert_eq!(SCHEMA_VERSION, 27);
+    //
+    // 27 -> 29 covers the reference's v28 (`sync_log.last_pull_seq`, the only
+    // DDL change of the pair) and v29 (the `reference` refiling, data-only).
+    // This literal is the guard that catches the port drifting behind: it is
+    // what failed when the schema was regenerated, and it should keep being
+    // updated by hand rather than derived from the dump.
+    assert_eq!(SCHEMA_VERSION, 29);
 }
 
 #[test]
 fn the_generated_schema_carries_every_v27_object() {
+    // Still named v27 at schema 29 on purpose, not by oversight: the
+    // reference's v28 adds a *column* (`sync_log.last_pull_seq`) and its v29
+    // is data-only, so neither contributes a table or index this inventory
+    // could list. The column itself is covered by the whole-DDL comparison in
+    // `every_table_matches_the_generated_schema`.
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
 
@@ -758,7 +769,7 @@ fn the_read_amplification_guard_survived_regeneration() {
 }
 
 #[test]
-fn a_v19_database_with_rows_reconciles_to_v27() {
+fn a_v19_database_with_rows_reconciles_to_the_current_version() {
     let tmp = TempDb::new("v19_to_v27");
 
     // A database written by this crate at v19: the shipped schema with
@@ -819,7 +830,10 @@ fn a_v19_database_with_rows_reconciles_to_v27() {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 27, "the stamp must advance with the schema");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "the stamp must advance with the schema"
+    );
 
     let content: String = conn
         .query_row(

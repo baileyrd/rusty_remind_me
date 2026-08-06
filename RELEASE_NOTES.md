@@ -2,6 +2,48 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — Schema 29: the `reference` memory_type and the client sequence cursor
+
+Closes the parity drift that opened when `remind_me` merged its issues #167
+and #220. `SCHEMA_VERSION` moves 27 → 29; the schema SQL is regenerated from
+the reference rather than hand-edited, per ADR-0007.
+
+### Added
+- **A `reference` memory_type**, with `get_decay_rate("reference") = 0.03` and
+  `get_type_prior("reference") = 0.95`. This mattered more here than upstream:
+  the two implementations share a database by design (ARCHITECTURE.md Tenet
+  3), so before this a `reference` row written by `remind_me` and read by this
+  crate fell through the decay table's catch-all and aged at 0.10 — over three
+  times the intended rate — silently, in a store both sides are supposed to
+  read identically.
+- **The v28 → v29 refiling**, moving memory-palace imports off `fact`. It is
+  the one step in the reconciler that is version-gated rather than idempotent,
+  and deliberately so: every other phase converges on re-run by construction,
+  but this is a *reclassification*, and a user who moves one of these rows
+  back to `fact` must not have it silently refiled on the next open. The
+  reference gets that for free by replaying a ladder once; this crate
+  reconciles on every open, so the guard is explicit.
+- **The client half of the hub-sequence pull cursor** (`sync_log.last_pull_seq`,
+  schema v28). The hub has served `since_seq` since the sequence column
+  existed, but nothing sent it, so the bug it exists for stayed live: a node
+  back online after a fortnight pushes records still stamped with old
+  `updated_at` values, which sort *behind* every other node's already-advanced
+  cursor and are permanently invisible. `pull_remote` now probes each remote
+  once and then pulls by sequence. `sync_repair` clears the verdict, which is
+  the documented path after upgrading a hub.
+
+### Changed
+- One deliberate divergence from the reference: only records that **actually
+  applied** may advance the sequence cursor. The reference advances over every
+  record received, stored or not. Advancing past a record that failed to apply
+  strands it precisely the way a legacy cursor strands a late push — the bug
+  this cursor exists to fix — and this crate's legacy path already had the
+  stricter rule.
+- `REFERENCE_DECAY_RATE` has a single definition. The reference must duplicate
+  the constant, because its `vitality` imports `db` and importing back is a
+  cycle, and it guards the copy with a drift test; between modules of one
+  crate there is nothing to guard.
+
 ## 2026-08-06 — OAuth state is written atomically, and failures are reported
 
 ### Fixed
