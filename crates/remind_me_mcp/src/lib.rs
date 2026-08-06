@@ -1375,10 +1375,16 @@ impl McpServer {
                         }
                     }
                     "remind_me_watch_status" => {
-                        let report = match watcher::Watcher::from_env() {
+                        let mut report = match watcher::Watcher::from_env() {
                             Some(w) => w.status(),
                             None => watcher::disabled_status(),
                         };
+                        // Added by the tool rather than the watcher, matching
+                        // the reference: the count is a property of the wiki,
+                        // not of the folder scan, and the watcher has no
+                        // connection to ask.
+                        report.pending_wiki_compile =
+                            remind_me_core::wiki_fs::pending_compile_count(&conn).unwrap_or(0);
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
                     }
                     "remind_me_check_update" => {

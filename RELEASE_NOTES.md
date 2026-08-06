@@ -2,6 +2,35 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — Response envelopes match the reference across six tools
+
+### Fixed
+- **`remind_me_list` reports `count`** (#201) — this page's size, alongside
+  `total`, which is how many exist behind it. The reference's shared list
+  envelope is `{count, memories, total}` and a client written against it reads
+  `count`.
+- **`remind_me_annotate` reports `annotated`**, so "did that work?" does not
+  require measuring an array.
+- **`remind_me_export_memories` reports `status`** (`"ok"` on the success path).
+- **`remind_me_sync_reconcile` emits `hint` rather than `reason`** on the
+  unavailable branch. A wire rename only — the field keeps the name that
+  describes what it holds.
+- **`remind_me_watch_status` reports `running` and `pending_wiki_compile`.**
+
+### Known limitation, now visible rather than implied
+`running` is **always `false`**, and that is the truth rather than a
+placeholder: `Watcher::scan_once` is implemented and tested but nothing in the
+binary drives it, so `enabled: true` meant "directories are configured", never
+"files are being ingested". Until #203 lands, `scans` and the file counters are
+structurally zero. Reporting that plainly is the point.
+
+### Also noted
+`MemoryListInput::default()` derives `limit: 0`, which `list_memories` clamps to
+`LIST_LIMIT_MIN`, while serde's default for an omitted `limit` is 20 — the same
+struct answers "what is the default limit?" two different ways depending on how
+it was constructed. Out of scope here; recorded so it is not rediscovered as a
+mystery.
+
 ## 2026-08-06 — Search reports its token budget instead of trimming in silence
 
 ### Fixed
