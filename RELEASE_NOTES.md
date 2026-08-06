@@ -2,6 +2,39 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — Search reports its token budget instead of trimming in silence
+
+### Fixed
+- **`remind_me_search` now returns `total_candidates`, `returned`, `trimmed`,
+  `tokens_used` and `budget`** (#200). The port already implemented token
+  budgeting — `MemorySearchInput::token_budget` and `trim_by_token_budget` —
+  and then discarded every number it computed, so a search that dropped half
+  its results was indistinguishable from one that returned everything. A caller
+  inferring "this is everything that matched" was silently wrong, with no
+  signal available to tell it otherwise. That is worse than not having the
+  feature: an absent feature is visible, a silent one is not.
+- `trimmed` is a **count**, matching the reference, not a boolean. "Three were
+  cut" and "something was cut" are different answers, and only one tells a
+  caller whether raising the budget is worth it.
+
+### Changed
+- `trim_by_token_budget` returns a `TrimOutcome` carrying the counts.
+  `search_memories_with_embedder` became a thin wrapper that drops them, so the
+  ten existing call sites that want a plain `Vec` are untouched.
+
+### Not ported, deliberately
+- `tier_breakdown` needs the reference's hybrid-search tier model, which this
+  crate does not have, and `dormant_excluded` would need a second count query
+  on every search — the dormancy filter is a SQL predicate here, so the
+  excluded rows are never materialised. Both are recorded in #200 rather than
+  approximated.
+- The token estimate keeps this crate's `.max(1)` per result. The reference
+  uses a bare `len / 4`, which estimates **zero** for content under four
+  characters, so an unbounded number of very short memories can enter a
+  budgeted response there. That divergence changes which memories come back
+  rather than only the reported number, so it was left alone rather than folded
+  into a reporting fix.
+
 ## 2026-08-06 — Memory JSON carries the six fields it was dropping
 
 ### Fixed

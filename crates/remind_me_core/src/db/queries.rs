@@ -725,6 +725,17 @@ pub fn search_memories(
     )
 }
 
+/// The plain-`Vec` form, for the many callers that want results and not the
+/// budget accounting. Kept so #200 did not have to churn ten call sites to
+/// report five numbers.
+pub fn search_memories_with_embedder(
+    conn: &Connection,
+    input: &MemorySearchInput,
+    embedder: Option<&dyn crate::embedder::Embedder>,
+) -> Result<Vec<MemorySearchResult>> {
+    Ok(search_memories_budgeted(conn, input, embedder)?.results)
+}
+
 /// Search with a caller-supplied embedder, or none.
 ///
 /// [`Embedder`](crate::embedder::Embedder) exists as a trait so "a future
@@ -741,11 +752,13 @@ pub fn search_memories(
 /// the wrong one where reproducibility is the requirement. Passing `None` — or a
 /// deterministic in-process embedder — makes that choice at the call site rather
 /// than leaving it to whether a probe happened to succeed.
-pub fn search_memories_with_embedder(
+/// [`search_memories_with_embedder`], but keeping the token-budget counts
+/// instead of discarding them (#200).
+pub fn search_memories_budgeted(
     conn: &Connection,
     input: &MemorySearchInput,
     embedder: Option<&dyn crate::embedder::Embedder>,
-) -> Result<Vec<MemorySearchResult>> {
+) -> Result<crate::retrieval::TrimOutcome> {
     let weights = choose_rrf_weights(&input.query, input.strategy);
 
     // Raw user text is not a valid FTS5 MATCH expression — ordinary punctuation
@@ -754,7 +767,7 @@ pub fn search_memories_with_embedder(
     // searchable; MATCH on an empty string is itself an error.
     let match_expr = sanitize_fts_query(&input.query);
     if match_expr.is_empty() {
-        return Ok(Vec::new());
+        return Ok(trim_by_token_budget(Vec::new(), input.token_budget));
     }
 
     // Derived from MEMORY_COLUMNS rather than spelled out, so adding a column
@@ -869,8 +882,7 @@ pub fn search_memories_with_embedder(
     let mut ranked = crate::reranker::maybe_rerank(&input.query, ranked);
     ranked.truncate(input.limit);
 
-    let final_results = trim_by_token_budget(ranked, input.token_budget);
-    Ok(final_results)
+    Ok(trim_by_token_budget(ranked, input.token_budget))
 }
 
 /// Category/tag conditions shared by both branches of [`search_paginated`].
@@ -1054,7 +1066,15 @@ pub fn search_with_expansions(
     conn: &Connection,
     input: &MemorySearchInput,
 ) -> Result<MemorySearchResponse> {
-    let memories = search_memories(conn, input)?;
+    let configured = crate::embedder::available_embedder();
+    let outcome = search_memories_budgeted(
+        conn,
+        input,
+        configured
+            .as_ref()
+            .map(|e| e as &dyn crate::embedder::Embedder),
+    )?;
+    let memories = outcome.results;
     let ids: Vec<String> = memories.iter().map(|r| r.memory.id.clone()).collect();
 
     expansion::record_co_retrieval(conn, &ids)?;
@@ -1083,6 +1103,11 @@ pub fn search_with_expansions(
             None
         },
         memories,
+        total_candidates: outcome.total_candidates,
+        returned: outcome.returned,
+        trimmed: outcome.trimmed,
+        tokens_used: outcome.tokens_used,
+        budget: input.token_budget,
     };
 
     crate::vitality::record_accesses(conn, &ids)?;
