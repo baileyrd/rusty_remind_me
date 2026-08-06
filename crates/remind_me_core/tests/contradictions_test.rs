@@ -275,6 +275,106 @@ fn an_empty_store_is_an_empty_batch() {
 }
 
 // ---------------------------------------------------------------------------
+// shared_entities (#196)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_pair_reports_the_entity_that_connects_it() {
+    // The field is the answer to "why am I being shown these two?" — the
+    // candidate query joins on memory_entities, so without it the caller has
+    // to re-derive the join the producer already did.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(&conn, "I moved to Boston", "general", &["Boston"], None);
+    add(&conn, "I live in Seattle now", "general", &["Boston"], None);
+
+    let result = candidates(&conn, 20, None).unwrap();
+
+    assert_eq!(result.candidates.len(), 1);
+    assert_eq!(result.candidates[0].shared_entities, vec!["Boston"]);
+}
+
+#[test]
+fn every_shared_entity_is_reported_in_name_order() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    // Deliberately inserted out of alphabetical order, so a test that passes
+    // is testing the ORDER BY rather than the insertion order.
+    add(
+        &conn,
+        "the Zebra project runs on Postgres",
+        "general",
+        &["Zebra", "Postgres", "Anvil"],
+        None,
+    );
+    add(
+        &conn,
+        "the Zebra project runs on SQLite",
+        "general",
+        &["Zebra", "Postgres", "Anvil"],
+        None,
+    );
+
+    let result = candidates(&conn, 20, None).unwrap();
+
+    assert_eq!(result.candidates.len(), 1);
+    assert_eq!(
+        result.candidates[0].shared_entities,
+        vec!["Anvil", "Postgres", "Zebra"],
+        "all three, alphabetically"
+    );
+}
+
+#[test]
+fn an_entity_only_one_side_mentions_is_not_reported_as_shared() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(
+        &conn,
+        "Bailey works on Zebra",
+        "general",
+        &["Bailey", "Zebra"],
+        None,
+    );
+    add(
+        &conn,
+        "Bailey is on holiday",
+        "general",
+        &["Bailey", "Holiday"],
+        None,
+    );
+
+    let result = candidates(&conn, 20, None).unwrap();
+
+    assert_eq!(result.candidates.len(), 1);
+    assert_eq!(
+        result.candidates[0].shared_entities,
+        vec!["Bailey"],
+        "only the overlap, not the union"
+    );
+}
+
+#[test]
+fn shared_entities_survives_serialisation() {
+    // The field only reaches a caller through the tool's JSON, so a struct
+    // field that never serialises would pass every test above and change
+    // nothing observable.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(&conn, "I moved to Boston", "general", &["Boston"], None);
+    add(&conn, "I live in Seattle now", "general", &["Boston"], None);
+
+    let result = candidates(&conn, 20, None).unwrap();
+    let json = serde_json::to_value(&result.candidates[0]).unwrap();
+
+    assert_eq!(
+        json.get("shared_entities").and_then(|v| v.as_array()),
+        Some(&vec![serde_json::Value::String("Boston".into())]),
+        "the field must appear in the serialised response"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Keyset pagination (reference issue #219)
 // ---------------------------------------------------------------------------
 

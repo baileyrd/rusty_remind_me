@@ -2,6 +2,22 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — Contradiction candidates report their shared entities
+
+### Added
+- **`shared_entities` on each candidate pair** (#196), matching the reference.
+  The field is the answer to "why am I being shown these two?" — the candidate
+  query joins on `memory_entities`, so the entity overlap *is* the reason the
+  pair surfaced. Without it a caller saw two memories and no indication of what
+  connected them, and had to re-derive the join the producer had already done.
+  Which entity is shared changes how the conflict reads.
+
+Not part of the 27 → 29 drift: this came in with the reference's FT-30 and was
+missed at the time, because the parity sweep compared tool *names* and route
+lists rather than response field sets. Nothing has yet diffed response fields
+between the two implementations, which is why it sat unnoticed — that sweep is
+a larger piece of work and is recorded in #196 rather than done here.
+
 ## 2026-08-06 — CI fails when the schema version drifts from the reference
 
 ### Added

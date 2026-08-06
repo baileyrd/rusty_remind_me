@@ -127,6 +127,29 @@ pub fn candidate_count(conn: &Connection) -> Result<i64> {
     )
 }
 
+/// The entity names both memories mention, in name order.
+///
+/// `DISTINCT` because an entity can be linked to the same memory more than
+/// once through different mention rows, and the caller wants the set of shared
+/// entities rather than a mention count.
+///
+/// Ordered by name so two calls return the same list in the same order — the
+/// pair itself is stable across pages, and a field that reshuffled between
+/// identical requests would make responses gratuitously un-diffable.
+fn shared_entities(conn: &Connection, id_a: &str, id_b: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT e.name FROM memory_entities me1
+           JOIN memory_entities me2 ON me2.entity_id = me1.entity_id
+           JOIN entities e ON e.id = me1.entity_id
+          WHERE me1.memory_id = ? AND me2.memory_id = ?
+          ORDER BY e.name",
+    )?;
+    let names = stmt
+        .query_map(params![id_a, id_b], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(names)
+}
+
 /// A page of candidate pairs, optionally starting after `cursor`.
 ///
 /// # Why a keyset and not an `OFFSET`
@@ -202,6 +225,7 @@ pub fn candidates(
     let mut candidates = Vec::with_capacity(ids.len());
     for (id_a, id_b) in ids {
         candidates.push(ContradictionCandidate {
+            shared_entities: shared_entities(conn, &id_a, &id_b)?,
             memory_a: side(conn, &id_a)?,
             memory_b: side(conn, &id_b)?,
         });
