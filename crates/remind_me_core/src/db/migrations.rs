@@ -46,7 +46,7 @@ use rusqlite::{Connection, Result};
 /// to choose: `remind_me` reads it on open and skips migrating anything already
 /// at its own target, so claiming a version the schema does not match is what
 /// makes a database silently unreadable to it.
-pub const SCHEMA_VERSION: i32 = 27;
+pub const SCHEMA_VERSION: i32 = 29;
 
 const SCHEMA_TABLES: &str = include_str!("schema_tables.sql");
 const SCHEMA_INDEXES: &str = include_str!("schema_indexes.sql");
@@ -416,6 +416,61 @@ fn backfill_derived(conn: &Connection, force_fts_rebuild: bool) -> Result<()> {
     Ok(())
 }
 
+/// Refile bulk-imported reference material off `fact` — the reference's v28 →
+/// v29 step (its issue #220).
+///
+/// **The one step in this module that is version-gated rather than
+/// idempotent**, and the exception is the whole point. Every other phase here
+/// converges on re-run by construction: creating a table that exists is a
+/// no-op, and a backfill guarded on emptiness stops firing once it is full.
+/// This one does not have that shape. It is a *reclassification*, and a user
+/// who deliberately moves one of these rows back to `fact` after upgrading
+/// must not have it silently refiled on the next open. The reference gets this
+/// for free because it replays a migration ladder once; this crate reconciles
+/// on every open, so the guard has to be explicit.
+///
+/// Hence `version_on_open`: read before the first write and compared against
+/// the version that introduced the step, not against [`SCHEMA_VERSION`]. A
+/// database already at 29 has had it, and a brand-new one (version 0) runs it
+/// against an empty `memories` and matches nothing.
+///
+/// Deliberately narrow, matching the reference exactly: only rows whose
+/// `source` marks them as a memory-palace import *and* that are currently
+/// `fact`. A broader "looks like code" heuristic would be guessing at content
+/// the user classified on purpose, and a wrong guess is a silent
+/// reclassification of someone's real facts.
+///
+/// `decay_rate` moves with the type — it is stored per row, so changing
+/// `memory_type` alone would leave these decaying at `fact`'s 0.05 forever and
+/// the new type would be cosmetic. `updated_at` moves too, so the change
+/// reaches other nodes: `memory_type` is a synced column, and a node upgrading
+/// later would otherwise push its stale `fact` back over an upgraded node's
+/// `reference` under last-write-wins. Writing `updated_at` is also exactly
+/// what fires `memories_outbox_au`, so propagation needs nothing else.
+///
+/// The timestamp is SQLite's own `strftime`, the same expression the outbox
+/// triggers use, rather than a Rust-formatted `Utc::now()`. The two agree
+/// today; using the one the schema already commits to means they cannot
+/// disagree tomorrow.
+const REFERENCE_REFILE_VERSION: i32 = 29;
+
+fn refile_reference_imports(conn: &Connection, version_on_open: i32) -> Result<()> {
+    if version_on_open >= REFERENCE_REFILE_VERSION {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE memories
+            SET memory_type = 'reference',
+                decay_rate  = ?1,
+                updated_at  = strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00'
+          WHERE memory_type = 'fact'
+            AND deleted_at IS NULL
+            AND (source = 'mempalace_import' OR source LIKE 'mempalace:%')",
+        rusqlite::params![crate::vitality::REFERENCE_DECAY_RATE],
+    )?;
+    Ok(())
+}
+
 /// Create and reconcile the schema, then stamp the version.
 ///
 /// The version is written last, so a database only ever claims
@@ -424,6 +479,10 @@ pub fn apply(conn: &Connection) -> Result<()> {
     // Before anything below mutates the database: a snapshot only reflects
     // the pre-migration state if it is taken before the first write.
     snapshot_before_migration(conn)?;
+
+    // Read before any write, because the refiling step below is gated on it
+    // and the last statement of this function overwrites it.
+    let version_on_open: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
     conn.execute_batch(SCHEMA_TABLES)?;
 
@@ -454,6 +513,9 @@ pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_TRIGGERS)?;
 
     backfill_derived(conn, rebuilt_any)?;
+
+    // After the triggers exist, so the refiling reaches the outbox.
+    refile_reference_imports(conn, version_on_open)?;
 
     // After the tables exist and before the version is stamped: entity ids are
     // content-derived, and this crate used to derive them differently from the

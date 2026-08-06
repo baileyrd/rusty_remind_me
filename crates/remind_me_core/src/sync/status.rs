@@ -220,9 +220,15 @@ pub fn sync_status(conn: &Connection) -> Result<SyncStatus> {
 pub fn sync_repair(conn: &Connection, remote_id: &str) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE sync_log
-            SET last_pull = ?, last_pull_id = ''
+            SET last_pull = ?, last_pull_id = '', last_pull_seq = ?
           WHERE remote_id = ?",
-        params![EPOCH, remote_id],
+        // Back to SEQ_UNKNOWN, not to 0: this must also undo a stuck
+        // SEQ_UNSUPPORTED, which is how a hub upgraded past the `hub_seq`
+        // feature gets picked up. Resetting to 0 would instead assert support
+        // that was never established, and a remote that genuinely lacks it
+        // would then be pulled with a cursor it ignores — silently back on the
+        // legacy path with no record of why.
+        params![EPOCH, super::pull::SEQ_UNKNOWN, remote_id],
     )?;
     Ok(affected > 0)
 }

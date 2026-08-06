@@ -4,6 +4,16 @@ use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
+/// Decay rate for the `reference` memory_type.
+///
+/// Named rather than inlined because the v29 migration in [`crate::db`] has to
+/// stamp the same number onto the rows it refiles. The reference repo has to
+/// duplicate this constant — its `vitality` imports `db`, so importing back is
+/// a cycle — and guards the copy with a drift test. Rust has no such problem
+/// between modules of one crate, so there is exactly one definition and drift
+/// is unrepresentable rather than merely tested for.
+pub const REFERENCE_DECAY_RATE: f64 = 0.03;
+
 pub const VITALITY_FLOOR: f64 = 0.05;
 pub const BRIDGE_THRESHOLD: i64 = 10;
 pub const BRIDGE_MULTIPLIER: f64 = 0.5;
@@ -17,6 +27,11 @@ pub fn get_decay_rate(category_or_type: &str) -> f64 {
         "learning" => 0.08,
         "blocker" => 0.15,
         "action_item" => 0.20,
+        // Below `fact`'s 0.05 because time alone does not stale a snippet the
+        // way it stales a claim about current state, but above `decision`'s
+        // 0.02 because the artefact a reference mirrors — a file — changes
+        // rather more often than a decision is reversed.
+        "reference" => REFERENCE_DECAY_RATE,
         _ => 0.10,
     }
 }
@@ -29,6 +44,11 @@ pub fn get_type_prior(category_or_type: &str) -> f64 {
         "preference" => 1.1,
         "learning" => 1.05,
         "action_item" | "unclassified" => 1.0,
+        // Slightly below neutral: reference material arrives in bulk (the
+        // import that prompted the type added ~740 memories in one pass) and
+        // is something you look up deliberately, not something that should
+        // crowd a real decision out of an unprompted recall.
+        "reference" => 0.95,
         _ => 1.0,
     }
 }
