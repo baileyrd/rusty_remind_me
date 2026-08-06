@@ -771,6 +771,14 @@ mod tests {
             chunk_index: None,
             remind_at: None,
             sensitive: false,
+            // These ranking tests care only about vitality; the fields exist
+            // so a `Memory` can round-trip to JSON (#198).
+            memory_type: None,
+            status: None,
+            node_id: None,
+            client: None,
+            source_capture_id: None,
+            deleted_at: None,
         }
     }
 

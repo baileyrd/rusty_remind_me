@@ -22,9 +22,16 @@ use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, Result, Row};
 
 /// Columns selected wherever a full [`Memory`] is parsed via [`parse_memory_row`].
+///
+/// This list must stay a superset of what [`parse_memory_row`] reads, and the
+/// serialised [`Memory`] must in turn cover every column of `memories` — see
+/// `memory_json_test.rs`, which asserts exactly that against the live schema.
+/// A column added to the schema but not here silently vanished from every
+/// tool response before #198.
 pub const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata, created_at, \
      updated_at, capture_id, subject, predicate, object, superseded_by, decay_rate, vitality, \
-     base_weight, access_count, accessed_at, doc_id, chunk_index, remind_at, sensitive";
+     base_weight, access_count, accessed_at, doc_id, chunk_index, remind_at, sensitive, \
+     memory_type, status, node_id, client, source_capture_id, deleted_at";
 
 /// [`MEMORY_COLUMNS`] with each name qualified by `alias`, for queries that join.
 pub fn prefixed_memory_columns(alias: &str) -> String {
@@ -75,6 +82,16 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
         // SQLite has no boolean type and the column is nullable, so this
         // arrives as 0/1/NULL. Same shape trap as `SyncRecord::sensitive`.
         sensitive: row.get::<_, Option<i64>>("sensitive")?.unwrap_or(0) != 0,
+        // Read as Option even where the column is NOT NULL: this database is
+        // shared with `remind_me`, and a row written before a column gained
+        // its default arrives as NULL. A non-optional get would fail the whole
+        // read rather than report a missing value.
+        memory_type: row.get("memory_type")?,
+        status: row.get("status")?,
+        node_id: row.get("node_id")?,
+        client: row.get("client")?,
+        source_capture_id: row.get("source_capture_id")?,
+        deleted_at: row.get("deleted_at")?,
     })
 }
 
