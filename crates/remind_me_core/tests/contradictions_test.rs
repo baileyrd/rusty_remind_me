@@ -52,7 +52,7 @@ fn add(
 }
 
 fn total(conn: &Connection) -> i64 {
-    candidates(conn, 100).unwrap().total_candidates
+    candidates(conn, 100, None).unwrap().total_candidates
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn two_memories_sharing_an_entity_are_a_candidate_pair() {
     add(&conn, "I moved to Boston", "general", &["Boston"], None);
     add(&conn, "I live in Seattle now", "general", &["Boston"], None);
 
-    let result = candidates(&conn, 20).unwrap();
+    let result = candidates(&conn, 20, None).unwrap();
 
     assert_eq!(result.total_candidates, 1);
     assert_eq!(result.candidates.len(), 1);
@@ -254,7 +254,7 @@ fn total_counts_past_the_limit() {
         add(&conn, &format!("note {}", i), "general", &["Topic"], None);
     }
 
-    let result = candidates(&conn, 3).unwrap();
+    let result = candidates(&conn, 3, None).unwrap();
 
     // 5 memories on one entity is 10 pairs. The count tells a caller how much
     // is behind the page, so it must not be derived from the page.
@@ -266,8 +266,172 @@ fn total_counts_past_the_limit() {
 fn an_empty_store_is_an_empty_batch() {
     let db = Database::open_in_memory().unwrap();
 
-    let result = candidates(&db.conn(), 20).unwrap();
+    let result = candidates(&db.conn(), 20, None).unwrap();
 
     assert!(result.candidates.is_empty());
     assert_eq!(result.total_candidates, 0);
+    assert!(!result.has_more);
+    assert!(result.next_after_a.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Keyset pagination (reference issue #219)
+// ---------------------------------------------------------------------------
+
+/// Both ids of a candidate pair, in the order the query sorts by.
+fn pair_keys(
+    result: &remind_me_core::models::ContradictionCandidatesResult,
+) -> Vec<(String, String)> {
+    result
+        .candidates
+        .iter()
+        .map(|c| (c.memory_a.id.clone(), c.memory_b.id.clone()))
+        .collect()
+}
+
+#[test]
+fn a_second_page_returns_different_pairs_than_the_first() {
+    // The bug, at its smallest: without a cursor the second call re-served the
+    // identical first page, so only `limit` rows of the queue were ever
+    // reachable.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    for i in 0..5 {
+        add(&conn, &format!("note {}", i), "general", &["Topic"], None);
+    }
+
+    let first = candidates(&conn, 3, None).unwrap();
+    assert_eq!(first.candidates.len(), 3);
+    assert!(first.has_more);
+
+    let cursor = (
+        first.next_after_a.clone().unwrap(),
+        first.next_after_b.clone().unwrap(),
+    );
+    let second = candidates(&conn, 3, Some((&cursor.0, &cursor.1))).unwrap();
+
+    assert!(!second.candidates.is_empty(), "the second page must exist");
+    let overlap: Vec<_> = pair_keys(&second)
+        .into_iter()
+        .filter(|k| pair_keys(&first).contains(k))
+        .collect();
+    assert!(
+        overlap.is_empty(),
+        "the second page repeated pairs from the first: {overlap:?}"
+    );
+}
+
+#[test]
+fn paging_reaches_every_pair_exactly_once() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    for i in 0..5 {
+        add(&conn, &format!("note {}", i), "general", &["Topic"], None);
+    }
+    let total = candidates(&conn, 100, None).unwrap().total_candidates as usize;
+    assert_eq!(total, 10, "5 memories on one entity is 10 pairs");
+
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut cursor: Option<(String, String)> = None;
+    // A BOUNDED loop, not `loop {}`. Against a cursor that fails to advance a
+    // `while` here does not fail — it HANGS, and a hung test reports a CI
+    // timeout with no failing assertion to read. `total + 5` is generous
+    // enough that a correct implementation never reaches it.
+    let mut pages = 0;
+    for _ in 0..(total + 5) {
+        let page = match &cursor {
+            Some((a, b)) => candidates(&conn, 3, Some((a, b))).unwrap(),
+            None => candidates(&conn, 3, None).unwrap(),
+        };
+        pages += 1;
+        seen.extend(pair_keys(&page));
+        assert_eq!(
+            page.total_candidates as usize, total,
+            "total_candidates describes the whole queue, so it must not shrink as we page"
+        );
+        if !page.has_more {
+            break;
+        }
+        cursor = Some((
+            page.next_after_a.clone().unwrap(),
+            page.next_after_b.clone().unwrap(),
+        ));
+    }
+    assert!(pages < total + 5, "paging did not terminate");
+
+    let mut deduped = seen.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(deduped.len(), seen.len(), "a pair was served twice");
+    assert_eq!(seen.len(), total, "paging did not reach every pair");
+}
+
+#[test]
+fn a_short_page_reports_no_more_and_carries_no_cursor() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(&conn, "I moved to Boston", "general", &["Boston"], None);
+    add(&conn, "I live in Seattle now", "general", &["Boston"], None);
+
+    let result = candidates(&conn, 20, None).unwrap();
+
+    assert_eq!(result.candidates.len(), 1);
+    assert!(!result.has_more);
+    assert!(result.next_after_a.is_none() && result.next_after_b.is_none());
+}
+
+#[test]
+fn a_cursor_past_the_end_returns_an_empty_page_not_the_first_one() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(&conn, "I moved to Boston", "general", &["Boston"], None);
+    add(&conn, "I live in Seattle now", "general", &["Boston"], None);
+
+    // A cursor sorting after every real pair.
+    let result = candidates(&conn, 20, Some(("zzzz", "zzzz"))).unwrap();
+
+    assert!(
+        result.candidates.is_empty(),
+        "an exhausted cursor must not wrap back to the start"
+    );
+    assert_eq!(
+        result.total_candidates, 1,
+        "but the queue size is still reported"
+    );
+}
+
+#[test]
+fn half_a_cursor_is_refused_rather_than_ignored() {
+    use remind_me_core::models::ContradictionCandidatesInput;
+
+    // Ignoring it would page from the start while the caller believed it was
+    // resuming — the same invisible no-progress failure, now with the caller
+    // passing something.
+    let only_a = ContradictionCandidatesInput {
+        limit: 20,
+        after_a: Some("mem_a".into()),
+        after_b: None,
+    };
+    assert!(only_a.cursor().is_err(), "after_a alone must be refused");
+
+    let only_b = ContradictionCandidatesInput {
+        limit: 20,
+        after_a: None,
+        after_b: Some("mem_b".into()),
+    };
+    assert!(only_b.cursor().is_err(), "after_b alone must be refused");
+
+    let neither = ContradictionCandidatesInput {
+        limit: 20,
+        after_a: None,
+        after_b: None,
+    };
+    assert_eq!(neither.cursor().unwrap(), None);
+
+    let both = ContradictionCandidatesInput {
+        limit: 20,
+        after_a: Some("mem_a".into()),
+        after_b: Some("mem_b".into()),
+    };
+    assert_eq!(both.cursor().unwrap(), Some(("mem_a", "mem_b")));
 }

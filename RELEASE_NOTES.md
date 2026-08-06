@@ -43,6 +43,20 @@ the reference rather than hand-edited, per ADR-0007.
   the constant, because its `vitality` imports `db` and importing back is a
   cycle, and it guards the copy with a drift test; between modules of one
   crate there is nothing to guard.
+- **`remind_me_contradiction_candidates` can page past the first result.** The
+  query ordered by `(id_a, id_b)` but took no cursor, so every call returned
+  the same first page and a queue of tens of thousands of pairs had exactly
+  `limit` reachable rows. It now accepts an `(after_a, after_b)` keyset and
+  returns `next_after_a`/`next_after_b`/`has_more`. A keyset rather than an
+  offset because the pair set is derived from live memories, so an edit between
+  calls shifts an offset's window and silently skips or repeats rows. Half a
+  cursor is refused rather than ignored — silently paging from the start while
+  the caller believes it is resuming is the same invisible no-progress failure,
+  only harder to spot.
+- `gap-analysis.md`'s headline table said the schema versions matched at 27.
+  They did when it was written; they had not since the reference merged its
+  #167. The row now reads 29/29 and a new section records the drift and how it
+  was closed.
 
 ## 2026-08-06 — OAuth state is written atomically, and failures are reported
 

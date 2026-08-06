@@ -127,21 +127,77 @@ pub fn candidate_count(conn: &Connection) -> Result<i64> {
     )
 }
 
-pub fn candidates(conn: &Connection, limit: usize) -> Result<ContradictionCandidatesResult> {
+/// A page of candidate pairs, optionally starting after `cursor`.
+///
+/// # Why a keyset and not an `OFFSET`
+///
+/// The pair set is *derived* from live memories, so a memory edited or deleted
+/// between two calls changes it. An offset would then silently skip or repeat
+/// rows around the edit. A keyset asks "after this pair" and is stable under
+/// both.
+///
+/// Without any cursor every call re-served the identical first page, so a
+/// queue of tens of thousands of pairs had exactly `limit` reachable rows and
+/// a worker looping this tool made no progress at all.
+///
+/// Of the three approaches the reference's issue floated, this is the only one
+/// that keeps the module read-only. Excluding already-reviewed pairs needs
+/// somewhere to record a review, and there is deliberately no apply/resolve
+/// tool here; ordering by `updated_at` fails outright, since most pairs are
+/// correctly judged *not* to conflict, so reviewing them changes nothing and
+/// they would be re-served forever — the very bug being fixed.
+pub fn candidates(
+    conn: &Connection,
+    limit: usize,
+    cursor: Option<(&str, &str)>,
+) -> Result<ContradictionCandidatesResult> {
     let pairs = pairs_sql();
 
+    // The whole queue, deliberately not narrowed by the cursor: a caller
+    // watching this number shrink as it pages would be watching the backlog
+    // it has left to review, which is not what "how big is the backlog" means
+    // to the maintenance nudge that also reads it.
     let total: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM ({}) p", pairs), [], |r| {
         r.get(0)
     })?;
 
-    let mut stmt = conn.prepare(&format!(
-        "SELECT id_a, id_b FROM ({}) ORDER BY id_a, id_b LIMIT ?",
-        pairs
-    ))?;
-    let ids: Vec<(String, String)> = stmt
-        .query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<Result<Vec<_>>>()?;
+    let cursor_clause = if cursor.is_some() {
+        "WHERE (id_a > ?1 OR (id_a = ?1 AND id_b > ?2))"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT id_a, id_b FROM ({}) {} ORDER BY id_a, id_b LIMIT ?3",
+        pairs, cursor_clause
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let ids: Vec<(String, String)> = match cursor {
+        Some((after_a, after_b)) => stmt
+            .query_map(params![after_a, after_b, limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<Result<Vec<_>>>()?,
+        // Bind the unused cursor slots to NULL rather than building a second
+        // statement: the clause referencing them is not in the SQL at all, so
+        // the values are never evaluated.
+        None => stmt
+            .query_map(
+                params![Option::<&str>::None, Option::<&str>::None, limit as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<Result<Vec<_>>>()?,
+    };
     drop(stmt);
+
+    // Null on a short page, which is the queue being exhausted. A full page
+    // whose last row happens to be the final one costs the caller one extra
+    // request returning nothing, which is the standard keyset trade and beats
+    // over-reading by a row on every page.
+    let next = if ids.len() == limit { ids.last() } else { None };
+    let (next_after_a, next_after_b) = match next {
+        Some((a, b)) => (Some(a.clone()), Some(b.clone())),
+        None => (None, None),
+    };
 
     let mut candidates = Vec::with_capacity(ids.len());
     for (id_a, id_b) in ids {
@@ -154,5 +210,8 @@ pub fn candidates(conn: &Connection, limit: usize) -> Result<ContradictionCandid
     Ok(ContradictionCandidatesResult {
         candidates,
         total_candidates: total,
+        has_more: next_after_a.is_some(),
+        next_after_a,
+        next_after_b,
     })
 }

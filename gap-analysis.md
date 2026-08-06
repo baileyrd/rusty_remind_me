@@ -1,6 +1,6 @@
 # Gap Analysis — `rusty_remind_me` vs. `remind_me`
 
-**Run date:** 2026-08-05
+**Run date:** 2026-08-05, schema row and drift section updated 2026-08-06
 **Target:** `baileyrd/rusty_remind_me` @ `1fecc54`, 5 crates
 **Reference (pinned):** `baileyrd/remind_me` @ `caad798` — **v1.54.0**
 **Previous run:** 2026-08-03 against target `a2cce8b` / reference `935eb98`.
@@ -20,7 +20,7 @@ codebases, rather than carried forward.
 | MCP tools | 61 | 61 + 1 target-only | **100%** |
 | HTTP API routes | 25 | 25 | **100%** |
 | Peer-server routes | 7 | 7 | **100%** |
-| SQLite schema version | 27 | 27 | **match** |
+| SQLite schema version | 29 | 29 | **match** |
 | SQLite tables / indexes / triggers | — | no missing object | **100%** |
 | Import formats | 12 extensions | 12 | **100%** |
 
@@ -47,6 +47,36 @@ The reference advanced 5 commits past `935eb98`. Two are substantive, and
 | `ebf555e` | `server_status` stops reporting a recovered sync as failing | present — `sync/worker.rs` `superseded_error`, with `sync_error_supersession_test.rs` |
 
 The remaining three are a lint fix and two merge commits.
+
+### Drift absorbed on 2026-08-06
+
+The reference then merged three changes of its own, which put the port two
+schema versions behind for the first time since this document was written.
+All three are now ported; the schema row above reads 29/29 as a result.
+
+| Reference issue | What | Schema | Port |
+| --- | --- | --- | --- |
+| #167 | the client sends the hub's `since_seq` cursor | v27 → v28 (`sync_log.last_pull_seq`) | `sync/pull.rs`, with `sync_seq_cursor_test.rs` |
+| #220 | a `reference` memory_type, and refiling for it | v28 → v29 (data only) | `vitality.rs` + `db/migrations.rs`, with `reference_memory_type_test.rs` |
+| #219 | keyset pagination for contradiction candidates | none | `contradictions.rs` |
+
+Two of these were worse on the port than on the reference, which is worth
+recording because it is the general shape of this kind of drift:
+
+- **#220 crosses the shared database.** Tenet 3 means both implementations read
+  the same file, so a `reference` row written by `remind_me` and read here fell
+  through the decay table's catch-all and aged at 0.10 rather than 0.03 —
+  silently, with nothing on either side reporting a disagreement.
+- **#167 was half-built here.** `remind_me_hub` already *served* `since_seq`;
+  only the client never asked for it. The port therefore shipped the fix and
+  could not use it.
+
+Regenerating the schema for this also surfaced a real bug in the reference:
+`_ensure_schema` had come to require `row_factory = sqlite3.Row`, which its own
+contract does not ask for, so `scripts/regenerate_schema.py` — the ADR-0007
+method — could not run at all. Fixed upstream in `remind_me` #228. Its whole
+test suite was blind to it because every caller sets the factory a line before
+calling in.
 
 ---
 

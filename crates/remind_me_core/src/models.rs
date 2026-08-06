@@ -1460,7 +1460,15 @@ pub struct ContradictionCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContradictionCandidatesResult {
     pub candidates: Vec<ContradictionCandidate>,
+    /// The size of the WHOLE queue, not of what remains after the cursor.
     pub total_candidates: i64,
+    /// Cursor to pass back as `after_a`/`after_b` for the next page. Null on a
+    /// short page, which is the queue being exhausted — callers loop until it
+    /// is null rather than comparing counts against `total_candidates`, which
+    /// does not shrink as they page.
+    pub next_after_a: Option<String>,
+    pub next_after_b: Option<String>,
+    pub has_more: bool,
 }
 
 /// Request for a batch of contradiction candidates.
@@ -1468,6 +1476,33 @@ pub struct ContradictionCandidatesResult {
 pub struct ContradictionCandidatesInput {
     #[serde(default = "default_contradiction_limit")]
     pub limit: usize,
+    /// Keyset cursor on the `(id_a, id_b)` the query already orders by. Both
+    /// or neither — see [`ContradictionCandidatesInput::cursor`].
+    #[serde(default)]
+    pub after_a: Option<String>,
+    #[serde(default)]
+    pub after_b: Option<String>,
+}
+
+impl ContradictionCandidatesInput {
+    /// The validated cursor: `Ok(Some(..))` for both set, `Ok(None)` for
+    /// neither, `Err` for exactly one.
+    ///
+    /// Half a cursor is rejected rather than ignored. Silently dropping it
+    /// would page from the *start* while the caller believed it was paging
+    /// from where it left off — the same "every call returns the same first
+    /// page" failure this cursor exists to fix, only now invisible because the
+    /// caller is passing something.
+    pub fn cursor(&self) -> std::result::Result<Option<(&str, &str)>, &'static str> {
+        match (&self.after_a, &self.after_b) {
+            (Some(a), Some(b)) => Ok(Some((a.as_str(), b.as_str()))),
+            (None, None) => Ok(None),
+            _ => Err(
+                "after_a and after_b must be passed together — a half cursor \
+                      would silently page from the start",
+            ),
+        }
+    }
 }
 
 fn default_contradiction_limit() -> usize {

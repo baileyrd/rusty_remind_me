@@ -710,11 +710,13 @@ impl McpServer {
                             },
                             {
                                 "name": "remind_me_contradiction_candidates",
-                                "description": "Surface pairs of memories that might assert incompatible things but were never caught by exact-triple supersession — two pieces of prose that conflict without either carrying a formal subject/predicate/object. Read-only: these are pairs that MIGHT conflict, and most turn out merely topically similar. Read both before acting; fix a real one with remind_me_update, remind_me_delete, or remind_me_add carrying an explicit triple.",
+                                "description": "Surface pairs of memories that might assert incompatible things but were never caught by exact-triple supersession — two pieces of prose that conflict without either carrying a formal subject/predicate/object. Read-only: these are pairs that MIGHT conflict, and most turn out merely topically similar. Read both before acting; fix a real one with remind_me_update, remind_me_delete, or remind_me_add carrying an explicit triple. Paginate by passing the next_after_a/next_after_b from one response as after_a/after_b on the next call, and stop when has_more is false — without a cursor every call returns the same first page, so a large queue has only `limit` reachable rows.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "limit": { "type": "integer", "default": 20, "minimum": CONTRADICTION_LIMIT_MIN, "maximum": CONTRADICTION_LIMIT_MAX }
+                                        "limit": { "type": "integer", "default": 20, "minimum": CONTRADICTION_LIMIT_MIN, "maximum": CONTRADICTION_LIMIT_MAX },
+                                        "after_a": { "type": "string", "description": "Keyset cursor: next_after_a from the previous response. Must be passed together with after_b." },
+                                        "after_b": { "type": "string", "description": "Keyset cursor: next_after_b from the previous response. Must be passed together with after_a." }
                                     }
                                 }
                             },
@@ -1856,16 +1858,31 @@ impl McpServer {
                     }
                     "remind_me_contradiction_candidates" => {
                         let mut input: ContradictionCandidatesInput = serde_json::from_value(args)
-                            .unwrap_or(ContradictionCandidatesInput { limit: 20 });
+                            .unwrap_or(ContradictionCandidatesInput {
+                                limit: 20,
+                                after_a: None,
+                                after_b: None,
+                            });
                         input.limit = input
                             .limit
                             .clamp(CONTRADICTION_LIMIT_MIN, CONTRADICTION_LIMIT_MAX);
-                        match contradictions::candidates(&conn, input.limit) {
-                            Ok(result) => {
-                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                        match input.cursor() {
+                            // A half cursor is refused, not ignored: paging
+                            // from the start while the caller believes it is
+                            // resuming is the same invisible-no-progress
+                            // failure the cursor exists to fix.
+                            Err(message) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": message }] })
                             }
-                            Err(e) => {
-                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Contradiction candidates error: {}", e) }] })
+                            Ok(cursor) => {
+                                match contradictions::candidates(&conn, input.limit, cursor) {
+                                    Ok(result) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Contradiction candidates error: {}", e) }] })
+                                    }
+                                }
                             }
                         }
                     }
