@@ -49,8 +49,10 @@ fn list_reports_count_alongside_total() {
     let conn = db.conn();
     seed(&conn, 5);
 
-    let mut input = MemoryListInput::default();
-    input.limit = 2;
+    let input = MemoryListInput {
+        limit: 2,
+        ..Default::default()
+    };
     let page = queries::list_memories(&conn, &input).unwrap();
     let json: Value = serde_json::to_value(&page).unwrap();
 
@@ -73,8 +75,10 @@ fn list_count_and_total_agree_when_a_page_holds_everything() {
     // `list_memories` clamps to LIST_LIMIT_MIN, while serde's default for an
     // omitted `limit` is 20. Same struct, two different defaults — not this
     // test's subject, so it does not rely on either.
-    let mut input = MemoryListInput::default();
-    input.limit = 10;
+    let input = MemoryListInput {
+        limit: 10,
+        ..Default::default()
+    };
     let page = queries::list_memories(&conn, &input).unwrap();
     let json: Value = serde_json::to_value(&page).unwrap();
 

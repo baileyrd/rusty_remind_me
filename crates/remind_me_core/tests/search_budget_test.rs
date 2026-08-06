@@ -38,10 +38,12 @@ fn add_sized(conn: &Connection, tag: &str, chars: usize) -> String {
 }
 
 fn search(conn: &Connection, budget: usize) -> remind_me_core::expansion::MemorySearchResponse {
-    let mut input = MemorySearchInput::default();
-    input.query = "quokka".into();
-    input.limit = 50;
-    input.token_budget = budget;
+    let input = MemorySearchInput {
+        query: "quokka".into(),
+        limit: 50,
+        token_budget: budget,
+        ..Default::default()
+    };
     queries::search_with_expansions(conn, &input).unwrap()
 }
 
@@ -139,9 +141,11 @@ fn an_empty_result_set_reports_zeroes_rather_than_omitting_the_envelope() {
     let conn = db.conn();
     add_sized(&conn, "unrelated", 40);
 
-    let mut input = MemorySearchInput::default();
-    input.query = "nothingmatchesthis".into();
-    input.token_budget = 500;
+    let input = MemorySearchInput {
+        query: "nothingmatchesthis".into(),
+        token_budget: 500,
+        ..Default::default()
+    };
     let res = queries::search_with_expansions(&conn, &input).unwrap();
 
     assert!(res.memories.is_empty());
