@@ -53,7 +53,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::issuer::Issuer;
-use super::provider::{now_unix, AuthorizationParams, ConsentOutcome, Provider, CONSENT_PATH};
+use super::provider::{
+    now_unix, AuthorizationParams, ConsentOutcome, Provider, RegisterError, CONSENT_PATH,
+};
 use super::types::ClientMetadata;
 
 const AUTHORIZATION_PATH: &str = "/authorize";
@@ -638,12 +640,24 @@ async fn token(State(state): State<OAuthAppState>, Form(form): Form<TokenForm>) 
                 Err(resp) => return resp,
             };
             match tokens {
-                Some(tokens) => token_success(tokens),
-                None => token_error(
+                Ok(Some(tokens)) => token_success(tokens),
+                Ok(None) => token_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_grant",
                     "authorization code does not exist",
                 ),
+                // The code was valid and is now spent, but the tokens never
+                // reached disk. 500, not 400: nothing the client sent was
+                // wrong, and handing back a token the next request would
+                // reject is the outcome issue #160 exists to prevent.
+                Err(e) => {
+                    eprintln!("oauth: could not persist issued tokens: {e}");
+                    token_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        "issued tokens could not be persisted",
+                    )
+                }
             }
         }
         "refresh_token" => {
@@ -694,7 +708,17 @@ async fn token(State(state): State<OAuthAppState>, Form(form): Form<TokenForm>) 
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            token_success(tokens)
+            match tokens {
+                Ok(tokens) => token_success(tokens),
+                Err(e) => {
+                    eprintln!("oauth: could not persist rotated tokens: {e}");
+                    token_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        "rotated tokens could not be persisted",
+                    )
+                }
+            }
         }
         other => token_error(
             StatusCode::BAD_REQUEST,
@@ -719,11 +743,25 @@ async fn register(
     };
     match result {
         Ok(info) => (StatusCode::CREATED, Json(info)).into_response(),
-        Err(err) => (
+        Err(RegisterError::Invalid(err)) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": err.error, "error_description": err.error_description })),
         )
             .into_response(),
+        // A valid registration that could not be stored is a server fault.
+        // Reporting it as invalid_client_metadata would send an integrator
+        // to debug metadata that was never the problem (issue #160).
+        Err(RegisterError::Storage(e)) => {
+            eprintln!("oauth: could not persist client registration: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "server_error",
+                    "error_description": "registration could not be persisted",
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -790,8 +828,25 @@ async fn revoke(State(state): State<OAuthAppState>, Form(form): Form<RevokeForm>
     if owning_client.as_deref() == Some(form.client_id.as_str()) {
         let provider = Arc::clone(&state.provider);
         let cid = form.client_id.clone();
-        if let Err(resp) = run_blocking(move || provider.revoke_tokens_for_client(&cid)).await {
-            return resp;
+        match run_blocking(move || provider.revoke_tokens_for_client(&cid)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                // RFC 7009 says a revocation endpoint returns 200 even for a
+                // token it does not know -- but that is about unknown tokens,
+                // not about a revocation this server failed to carry out.
+                // Reporting success here would tell the caller a live token
+                // is dead (issue #160).
+                eprintln!("oauth: could not persist token revocation: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "server_error",
+                        "error_description": "revocation could not be persisted",
+                    })),
+                )
+                    .into_response();
+            }
+            Err(resp) => return resp,
         }
     }
 

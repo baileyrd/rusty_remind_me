@@ -2,6 +2,39 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — OAuth state is written atomically, and failures are reported
+
+### Fixed
+- **`OAuthStateStore` writes atomically** (#160). It truncated the real path
+  in place, so a concurrent reader could observe an empty or half-written
+  file — which is how a just-issued token could read back as absent. Now it
+  writes a sibling temp file, fsyncs, and renames: a reader sees the complete
+  old file or the complete new one.
+- **Write failures propagate instead of being swallowed.** Every mutator
+  returns `io::Result`, and `issue_tokens` refuses to hand back a token pair
+  it could not persist. A client holding a bearer token the server will reject
+  is a worse failure than a refused issuance, and far harder to diagnose.
+- **A test was running `remove_dir_all("/tmp")` on every run.** This is what
+  actually caused #160's reported ~1-in-8 flake: `cleanup()` takes
+  `store.path().parent()`, and one caller passed a store built *at* the test
+  directory, so the parent resolved to the temp root and the test deleted
+  every concurrently-running test's state directory. `cleanup` now refuses to
+  remove the temp root.
+
+### Changed
+- Permissions are set on the temp file **before** the rename, so the state
+  file never exists at its real path with default permissions, not even
+  briefly. The old write-then-chmod order left that window on every write.
+- The read path's eight-attempt retry loop and the write path's ten-attempt
+  retry-and-verify loop are **gone**. Both existed to paper over the torn
+  writes above; with an atomic rename there is nothing left to wait out.
+
+### Notes
+- Verified rather than assumed. The torn-write test fails with
+  `observed a state file without the anchor token` when the write is reverted
+  to truncate-in-place, and the previously-flaky suite now passes **30 of 30**
+  consecutive runs against a reported 1-in-8.
+
 ## 2026-08-05 — `configure` writes the sync environment
 
 ### Added
