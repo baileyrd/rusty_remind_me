@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The schema-drift job compares this repo against another one, so it can go
+  # from green to red with nothing here changing. A daily run is what turns
+  # that from "discovered by hand, a day late" into a notification.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,6 +21,20 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Cheap and independent of the Rust toolchain, so it reports in seconds
+  # rather than behind a 15-minute build.
+  schema-drift:
+    name: schema version vs. remind_me
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `remind_me` is public, so this needs no token. It clones inside the
+      # script rather than using a second actions/checkout so the same command
+      # works locally, where there is no Actions context to borrow.
+      - name: Compare SCHEMA_VERSION against the reference
+        run: scripts/check_schema_drift.sh
+
   check:
     name: build / test / clippy / fmt
     runs-on: ubuntu-latest

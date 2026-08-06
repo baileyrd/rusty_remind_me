@@ -71,6 +71,16 @@ recording because it is the general shape of this kind of drift:
   only the client never asked for it. The port therefore shipped the fix and
   could not use it.
 
+**This drift is now checked automatically.** `scripts/check_schema_drift.sh`
+compares this repo's `SCHEMA_VERSION` against the reference's
+`_SCHEMA_VERSION` on `remind_me`'s default branch, and CI runs it on every PR
+plus daily on a schedule — daily because the job compares against *another
+repository*, so it can turn red with nothing here changing, which is exactly
+how this drift opened. It distinguishes "the versions differ" (exit 1) from
+"the check could not determine them" (exit 2) and never treats a failed
+extraction as a pass; the previous state of the world was that a manual read
+was the only signal, and it arrived a day late.
+
 Regenerating the schema for this also surfaced a real bug in the reference:
 `_ensure_schema` had come to require `row_factory = sqlite3.Row`, which its own
 contract does not ask for, so `scripts/regenerate_schema.py` — the ADR-0007
