@@ -87,6 +87,19 @@ impl RelatedMemory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchResponse {
     pub memories: Vec<MemorySearchResult>,
+    // The token-budget envelope (#200). The trimming already happened; before
+    // this, nothing said so, and a response cut in half was indistinguishable
+    // from a complete one.
+    /// How many candidates were ranked before the budget was applied.
+    pub total_candidates: usize,
+    /// How many survived it.
+    pub returned: usize,
+    /// How many were dropped — a count, as in the reference.
+    pub trimmed: usize,
+    /// Estimated tokens across `memories`.
+    pub tokens_used: usize,
+    /// The budget that was in force. `0` means unlimited.
+    pub budget: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub related_via_entities: Option<Vec<RelatedMemory>>,
     #[serde(skip_serializing_if = "Option::is_none")]

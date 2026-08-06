@@ -548,27 +548,74 @@ pub fn rank_rrf(
     ranked
 }
 
-pub fn trim_by_token_budget(
-    results: Vec<MemorySearchResult>,
-    token_budget: usize,
-) -> Vec<MemorySearchResult> {
+/// What a token-budget trim kept, and what it cost.
+///
+/// The counts were always computed and then discarded, so a search that
+/// dropped half its results looked identical to one that returned everything
+/// (#200). Reporting them is the difference between "this is everything that
+/// matched" being a safe inference and a wrong one.
+#[derive(Debug, Clone)]
+pub struct TrimOutcome {
+    pub results: Vec<MemorySearchResult>,
+    /// How many were ranked before the budget was applied.
+    pub total_candidates: usize,
+    /// How many survived it — `results.len()`, named for the response.
+    pub returned: usize,
+    /// How many were dropped. A **count**, matching the reference, not a
+    /// boolean: "3 were cut" and "something was cut" are different answers,
+    /// and only one of them tells a caller whether to raise the budget.
+    pub trimmed: usize,
+    /// Estimated tokens across what was kept.
+    pub tokens_used: usize,
+}
+
+/// Estimated token cost of one result.
+///
+/// `.max(1)` is this crate's existing behaviour and is deliberately kept: the
+/// reference uses a bare `len / 4`, which estimates zero for content under
+/// four characters, so an unbounded number of very short memories can enter a
+/// budgeted response. That divergence changes *which memories come back*, not
+/// just the reported number, so it is left alone here rather than folded into
+/// a reporting fix — see the note in #200.
+fn estimated_tokens(result: &MemorySearchResult) -> usize {
+    (result.memory.content.len() / 4).max(1)
+}
+
+pub fn trim_by_token_budget(results: Vec<MemorySearchResult>, token_budget: usize) -> TrimOutcome {
+    let total_candidates = results.len();
+
     if token_budget == 0 {
-        return results;
+        // Unlimited. The tokens are still counted, because "how big was this
+        // response" is a fair question even when nothing was cut.
+        let tokens_used = results.iter().map(estimated_tokens).sum();
+        return TrimOutcome {
+            returned: total_candidates,
+            trimmed: 0,
+            tokens_used,
+            total_candidates,
+            results,
+        };
     }
 
-    let mut accum_tokens = 0;
-    let mut trimmed = Vec::new();
+    let mut tokens_used = 0;
+    let mut kept = Vec::new();
 
     for res in results {
-        let est_tokens = (res.memory.content.len() / 4).max(1);
-        if accum_tokens + est_tokens > token_budget && !trimmed.is_empty() {
+        let est_tokens = estimated_tokens(&res);
+        if tokens_used + est_tokens > token_budget && !kept.is_empty() {
             break;
         }
-        accum_tokens += est_tokens;
-        trimmed.push(res);
+        tokens_used += est_tokens;
+        kept.push(res);
     }
 
-    trimmed
+    TrimOutcome {
+        returned: kept.len(),
+        trimmed: total_candidates - kept.len(),
+        tokens_used,
+        total_candidates,
+        results: kept,
+    }
 }
 
 #[cfg(test)]
