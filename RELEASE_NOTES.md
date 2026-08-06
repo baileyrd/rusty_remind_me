@@ -2,6 +2,36 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — CI fails when the schema version drifts from the reference
+
+### Added
+- **`scripts/check_schema_drift.sh`**, run by a new `schema-drift` CI job.
+  Compares this repo's `SCHEMA_VERSION` against `remind_me`'s
+  `_SCHEMA_VERSION` on its default branch. Nothing previously failed when the
+  reference bumped and the port did not: every test here compared the port
+  against *itself*, so the 27 → 29 drift was found by hand, a day late.
+- **A daily schedule**, plus `workflow_dispatch`. The job compares against
+  another repository, so unlike every other job here it can go red with
+  nothing in this repo changing — which is precisely how the drift opened, and
+  a PR-only trigger would only notice the next time someone happened to open
+  one.
+
+### Changed
+- The check distinguishes **"the versions differ" (exit 1)** from **"the check
+  could not determine them" (exit 2)**, and never treats a failed extraction as
+  agreement. Both constants are matched with line-anchored patterns, and it
+  refuses to proceed unless each matched *exactly one* line — a renamed or
+  reformatted constant fails loudly rather than comparing two empty strings,
+  finding them equal, and reporting parity. All six paths are verified: in
+  parity, drifted, constant renamed on either side, two definitions, and
+  reference file missing.
+
+Two bugs were caught in the check itself before it landed, both of which would
+have made it report the wrong answer: the version extraction pulled the `32`
+out of `i32` rather than the value after the `=`, and the `cleanup` EXIT trap's
+`&&` chain returned 1 when there was nothing to clean, overwriting the script's
+exit status — so it failed CI on the *in-parity* path.
+
 ## 2026-08-06 — Schema 29: the `reference` memory_type and the client sequence cursor
 
 Closes the parity drift that opened when `remind_me` merged its issues #167
