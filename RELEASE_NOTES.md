@@ -21,6 +21,42 @@ Dated entries, newest first. One entry per merged pull request.
   documentation makes and no caller was told it could rely on. Adding the
   guarantee is a separate decision from fixing a test that assumed one.
 
+## 2026-08-07 — The Rust toolchain is pinned, so local and CI lint identically
+
+### Added
+- **`rust-toolchain.toml` pinning 1.97.0** with `clippy` and `rustfmt`. CI
+  resolved Rust with `dtolnay/rust-toolchain@stable` and a developer used
+  whatever they had; those drift, and the drift is invisible until CI fails.
+  In the container that produced #211, clippy **0.1.94** locally and **1.97.0**
+  in CI disagreed about `useless_borrows_in_formatting`, which does not exist
+  in 1.94 — a clean local run and a red CI run were both accurate reports of
+  different compilers (#213).
+- `rust-version = "1.94"` on the workspace. Deliberately the oldest toolchain
+  this workspace has been *observed* to build and test with, not a bisected
+  minimum; the true floor is probably lower, and claiming a number nobody has
+  run would be worse than a slightly conservative one. Distinct from
+  `rust-toolchain.toml`, which says what we build with rather than what a
+  consumer needs.
+
+### Changed
+- Both CI jobs install via `rustup toolchain install`, which reads the
+  toolchain file, replacing `dtolnay/rust-toolchain@stable`. One source of
+  truth rather than a workflow and a developer's machine guessing separately.
+
+### Verified
+The pin was checked by demonstrating it changes the verdict, not merely that
+it installs: a probe containing exactly #211's redundant borrow **passes**
+clippy with the file removed (1.94) and **fails** with it restored (1.97).
+That is the blind spot, reproduced and closed.
+
+The whole gate — fmt, build, test, clippy, `--features pdf`,
+`--features cloud-backup`, schema-drift — passes under 1.97, so the pin
+uncovered no latent lint debt.
+
+Upgrades are now deliberate: bump `channel`, open a PR, and its CI run is the
+test. That is the point — a toolchain change becomes something visible in a
+diff and revertible, rather than arriving on whoever opens the next PR.
+
 ## 2026-08-07 — Markdown is available from twelve more tools, JSON stays the default
 
 ### Added
