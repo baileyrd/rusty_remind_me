@@ -8,6 +8,37 @@
 // restructuring is the better answer once it is closer to sixty.
 #![recursion_limit = "512"]
 
+pub mod render;
+
+/// The response format a call asked for, defaulting to **JSON** (#206).
+///
+/// Read from the raw arguments rather than added as a field to twelve separate
+/// input models — four of those tools have no input model at all, so there is
+/// nowhere to put it, and the remaining eight would each need a bespoke
+/// `#[serde(default)]` that disagreed with `ResponseFormat`'s own crate-wide
+/// Markdown default.
+///
+/// JSON is the default because JSON is what these twelve already returned.
+/// Every existing caller keeps working and Markdown is purely additive; the
+/// reference's own default is Markdown, so the *defaults* still differ, but
+/// flipping this would break every current caller in order to imitate a
+/// limitation.
+///
+/// Anything unrecognised falls through to JSON rather than erroring: an
+/// unknown format is a caller mistake that should still return their data,
+/// not a failed call.
+///
+/// Tools that already carry `response_format` in their own input model —
+/// `remind_me_history`, `remind_me_list`, `remind_me_search` — keep parsing it
+/// there, with their existing defaults. This value is only consulted by arms
+/// that had no choice before.
+fn requested_format(args: &serde_json::Value) -> ResponseFormat {
+    match args.get("response_format").and_then(|v| v.as_str()) {
+        Some("markdown") => ResponseFormat::Markdown,
+        _ => ResponseFormat::Json,
+    }
+}
+
 use remind_me_core::{
     backup, capture,
     consolidation::consolidate,
@@ -333,6 +364,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "content": { "type": "string" },
                                         "category": { "type": "string", "default": "general" },
                                         "tags": { "type": "array", "items": { "type": "string" } },
@@ -378,6 +410,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "memory_id": { "type": "string" },
                                         "content": { "type": "string" },
                                         "category": { "type": "string" },
@@ -506,7 +539,7 @@ impl McpServer {
                             {
                                 "name": "remind_me_check_update",
                                 "description": "Check whether this checkout is behind origin/main. Read-only: fetches from the remote and compares commits, never modifies anything.",
-                                "inputSchema": { "type": "object", "properties": {} }
+                                "inputSchema": { "type": "object", "properties": { "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." } } }
                             },
                             {
                                 "name": "remind_me_self_update",
@@ -531,7 +564,7 @@ impl McpServer {
                             {
                                 "name": "remind_me_reindex",
                                 "description": "Rebuild vector embeddings for every memory that doesn't have one yet. Existing embeddings are preserved; only missing ones are generated. Run this after configuring REMIND_ME_EMBEDDING_BACKEND, or after a bulk import that ran before an embedder was available. Reports 'degraded' when no embedder is configured or reachable, rather than silently doing nothing.",
-                                "inputSchema": { "type": "object", "properties": {} }
+                                "inputSchema": { "type": "object", "properties": { "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." } } }
                             },
                             {
                                 "name": "remind_me_webhook_status",
@@ -546,7 +579,7 @@ impl McpServer {
                             {
                                 "name": "remind_me_server_status",
                                 "description": "Report where the data lives and what is running: database path and size, schema version against what this build expects, memory count, backup inventory, and which subsystems are active. Subsystems this crate does not implement are named with a reason rather than reported as stopped.",
-                                "inputSchema": { "type": "object", "properties": {} }
+                                "inputSchema": { "type": "object", "properties": { "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." } } }
                             },
                             {
                                 "name": "remind_me_export_memories",
@@ -594,6 +627,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "conversation": { "type": "string", "minLength": 1, "maxLength": 500000, "description": "The verbatim exchange" },
                                         "summary": { "type": "string", "minLength": 1, "maxLength": 50000, "description": "A concise distillation of it" },
                                         "title": { "type": "string", "maxLength": 200, "description": "Defaults to the summary's first line" },
@@ -664,6 +698,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "memory_id": { "type": "string", "description": "The memory to set or clear a reminder on" },
                                         "remind_at": { "type": ["string", "null"], "description": "ISO-8601 timestamp for when to surface this memory. Must be in the future. Omit or null to clear." }
                                     },
@@ -739,6 +774,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "memory_id": { "type": "string" },
                                         "revision_id": { "type": "integer", "description": "A revision id from remind_me_history for this same memory" },
                                         "reason": { "type": "string", "description": "Optional note recorded on the revision this revert creates" }
@@ -752,6 +788,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "name": { "type": "string", "description": "Unique name for this saved search" },
                                         "query": { "type": "string", "description": "The search query to store and later re-run" },
                                         "category": { "type": "string", "description": "Optional category filter" },
@@ -765,7 +802,7 @@ impl McpServer {
                             {
                                 "name": "remind_me_list_saved_searches",
                                 "description": "List every saved search, alphabetical by name, with its stored query, filters and watch flag.",
-                                "inputSchema": { "type": "object", "properties": {} }
+                                "inputSchema": { "type": "object", "properties": { "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." } } }
                             },
                             {
                                 "name": "remind_me_run_saved_search",
@@ -851,6 +888,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "slug": { "type": "string" }
                                     },
                                     "required": ["slug"]
@@ -958,6 +996,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default) returns the structured record; markdown returns a human-readable summary." },
                                         "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 },
                                         "mark_integrated": { "type": "boolean", "default": false }
                                     }
@@ -1120,6 +1159,8 @@ impl McpServer {
                 let params = req.get("params")?;
                 let tool_name = params.get("name")?.as_str()?;
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                // Read before `args` is moved into any tool's input model.
+                let format = requested_format(&args);
                 let conn = self.db.conn();
                 // Hidden means gone, not merely undocumented: a model that
                 // guessed the name would otherwise still reach it, and a
@@ -1163,7 +1204,10 @@ impl McpServer {
                         match input {
                             Ok(add_input) => match queries::add_memory(&conn, add_input) {
                                 Ok(mem) => {
-                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] })
+                                    json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&mem).unwrap(),
+    ResponseFormat::Markdown => render::memory_stored(&mem),
+} }] })
                                 }
                                 Err(e) => {
                                     json!({ "isError": true, "content": [{ "type": "text", "text": format!("Database error: {}", e) }] })
@@ -1210,7 +1254,10 @@ impl McpServer {
                             Ok(update_input) => {
                                 match queries::update_memory(&conn, &update_input) {
                                     Ok(UpdateOutcome::Updated(mem)) => {
-                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] })
+                                        json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&mem).unwrap(),
+    ResponseFormat::Markdown => render::memory_updated(&mem),
+} }] })
                                     }
                                     Ok(UpdateOutcome::NotFound) => {
                                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("Memory `{}` not found", update_input.memory_id) }] })
@@ -1396,7 +1443,10 @@ impl McpServer {
                     }
                     "remind_me_check_update" => {
                         let status = updater::check_for_update();
-                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&status).unwrap() }] })
+                        json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&status).unwrap(),
+    ResponseFormat::Markdown => render::update_status(&status),
+} }] })
                     }
                     "remind_me_self_update" => {
                         let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1448,7 +1498,10 @@ impl McpServer {
                     }
                     "remind_me_reindex" => match vectors::reindex(&conn) {
                         Ok(result) => {
-                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                            json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&result).unwrap(),
+    ResponseFormat::Markdown => render::reindex_result(&result),
+} }] })
                         }
                         Err(e) => {
                             json!({ "isError": true, "content": [{ "type": "text", "text": format!("Reindex error: {}", e) }] })
@@ -1565,7 +1618,15 @@ impl McpServer {
                                 })
                                 .unwrap_or(json!({})),
                             };
-                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                            {
+                                let text = match format {
+                                    ResponseFormat::Json => {
+                                        serde_json::to_string_pretty(&report).unwrap()
+                                    }
+                                    ResponseFormat::Markdown => render::server_status(&report),
+                                };
+                                json!({ "content": [{ "type": "text", "text": text }] })
+                            }
                         }
                         Err(e) => {
                             json!({ "isError": true, "content": [{ "type": "text", "text": format!("Server status error: {}", e) }] })
@@ -1627,7 +1688,10 @@ impl McpServer {
                             Ok(capture_input) => {
                                 match capture::auto_capture(&conn, &capture_input) {
                                     Ok(result) => {
-                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                        json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&result).unwrap(),
+    ResponseFormat::Markdown => render::capture_result(&result),
+} }] })
                                     }
                                     Err(e) => {
                                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("Auto capture error: {}", e) }] })
@@ -1780,7 +1844,10 @@ impl McpServer {
                                 input.remind_at.as_deref(),
                             ) {
                                 Ok(outcome) => {
-                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                                    json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&outcome).unwrap(),
+    ResponseFormat::Markdown => render::set_reminder_outcome(&outcome),
+} }] })
                                 }
                                 Err(e) => {
                                     json!({ "isError": true, "content": [{ "type": "text", "text": format!("Set reminder error: {}", e) }] })
@@ -1948,7 +2015,10 @@ impl McpServer {
                             input.reason.as_deref(),
                         ) {
                             Ok(outcome) => {
-                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                                json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&outcome).unwrap(),
+    ResponseFormat::Markdown => render::revert_outcome(&outcome),
+} }] })
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Revert error: {}", e) }] })
@@ -1962,7 +2032,10 @@ impl McpServer {
                         match serde_json::from_value::<SaveSearchInput>(args) {
                             Ok(input) => match saved_searches::save_search(&conn, &input) {
                                 Ok(saved) => {
-                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&saved).unwrap() }] })
+                                    json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&saved).unwrap(),
+    ResponseFormat::Markdown => render::saved_search(&saved),
+} }] })
                                 }
                                 Err(e) => {
                                     json!({ "isError": true, "content": [{ "type": "text", "text": format!("Save search error: {}", e) }] })
@@ -1976,7 +2049,10 @@ impl McpServer {
                     "remind_me_list_saved_searches" => {
                         match saved_searches::list_saved_searches(&conn) {
                             Ok(searches) => {
-                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&searches).unwrap() }] })
+                                json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&searches).unwrap(),
+    ResponseFormat::Markdown => render::saved_search_list(&searches),
+} }] })
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("List saved searches error: {}", e) }] })
@@ -2145,7 +2221,10 @@ impl McpServer {
                         let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
                         match self.wiki.read_page(&conn, slug) {
                             Ok(Some(page)) => {
-                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
+                                json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&page).unwrap(),
+    ResponseFormat::Markdown => render::wiki_page(&page),
+} }] })
                             }
                             Ok(None) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": "Wiki page not found" }] })
@@ -2333,7 +2412,10 @@ impl McpServer {
                             .unwrap_or(false);
                         match self.wiki.compile(&conn, limit, mark_integrated) {
                             Ok(outcome) => {
-                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome).unwrap() }] })
+                                json!({ "content": [{ "type": "text", "text": match format {
+    ResponseFormat::Json => serde_json::to_string_pretty(&outcome).unwrap(),
+    ResponseFormat::Markdown => render::wiki_compile(&outcome),
+} }] })
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki compile error: {}", e) }] })
@@ -3127,10 +3209,14 @@ mod tests {
             .iter()
             .find(|t| t["name"] == "remind_me_check_update")
             .expect("remind_me_check_update not in tools/list");
-        assert!(check["inputSchema"]["properties"]
-            .as_object()
-            .unwrap()
-            .is_empty());
+        // See the note on remind_me_reindex: `response_format` is the only
+        // property, and it is presentational (#206).
+        let props = check["inputSchema"]["properties"].as_object().unwrap();
+        assert_eq!(
+            props.keys().collect::<Vec<_>>(),
+            vec!["response_format"],
+            "remind_me_check_update should take no operational arguments"
+        );
 
         let self_update = tools
             .iter()
@@ -3274,10 +3360,17 @@ mod tests {
             .iter()
             .find(|t| t["name"] == "remind_me_reindex")
             .expect("remind_me_reindex not in tools/list");
-        assert!(tool["inputSchema"]["properties"]
-            .as_object()
-            .unwrap()
-            .is_empty());
+        // Exactly one property, and it is presentational. The original
+        // assertion was `is_empty()`, meaning "this tool takes no arguments";
+        // that intent survives #206, which added `response_format` and nothing
+        // else. Naming the key keeps the guard as strict as it was rather than
+        // loosening it to "some properties".
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert_eq!(
+            props.keys().collect::<Vec<_>>(),
+            vec!["response_format"],
+            "remind_me_reindex should take no operational arguments"
+        );
 
         let report: Value =
             serde_json::from_str(&text_of(&call(&server, "remind_me_reindex", json!({})))).unwrap();

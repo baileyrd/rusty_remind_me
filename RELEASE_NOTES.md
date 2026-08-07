@@ -2,6 +2,38 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-07 — Markdown is available from twelve more tools, JSON stays the default
+
+### Added
+- **`response_format` on twelve tools that previously had no choice** (#206):
+  `add`, `update`, `revert`, `set_reminder`, `save_search`,
+  `list_saved_searches`, `server_status`, `check_update`, `reindex`,
+  `auto_capture`, `wiki_compile`, `wiki_read`. The reference returns Markdown
+  from these and offers no JSON — ten have no `response_format` field at all
+  and four take no parameters whatsoever. This port returned JSON and offered
+  no Markdown. Both were half a surface.
+- A `render` module holding the Markdown formatters. Presentation only: each
+  takes an already-computed response, so a rendering bug can misreport but
+  cannot corrupt.
+
+### Changed
+- **Nothing, for existing callers.** `response_format` defaults to `json`,
+  which is what these twelve already returned. Markdown is purely additive.
+  The reference's own default is Markdown, so the *defaults* still differ —
+  flipping this would break every current caller to imitate a limitation.
+- `remind_me_history` is deliberately untouched: it already offered both and
+  already defaulted to Markdown, so a JSON default would be the one regression
+  in a change that is otherwise a pure addition.
+- `render::server_status` takes the **enriched** status value rather than the
+  bare `ServerStatus`. The dispatch layer overwrites `webhook`, `sync_peer`,
+  `sync` and `remote` with live state the core crate cannot see, so rendering
+  from the struct would have made Markdown report less than JSON for the same
+  call.
+- Two existing tests asserted these tools' schemas had *no* properties. Updated
+  to assert the properties are exactly `["response_format"]` — the original
+  intent was "takes no arguments", and naming the key keeps the guard as strict
+  rather than loosening it to "some properties".
+
 ## 2026-08-06 — The folder watcher actually runs
 
 ### Fixed
