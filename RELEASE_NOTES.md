@@ -2,6 +2,61 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-07 — Both implementations can finally find the same database
+
+### Changed
+- **The default database is now `~/.remind-me/memory.db`** (#218), matching the
+  reference. It was `remind_me.db` *relative to the current working directory*,
+  so the same command run from two directories was two separate stores — and
+  neither was the file `remind_me` opens. **This is the breaking part of this
+  change**: an existing store sitting in a working directory will no longer be
+  found. Point `REMIND_ME_DB_PATH` at it, or move it to the new default.
+- **`REMIND_ME_MCP_DIR` is now honoured**, resolving `$REMIND_ME_MCP_DIR/memory.db`
+  exactly as `config.py:122` does. This is the reference's own variable, so one
+  setting now aims both implementations at one file.
+- `REMIND_ME_DB_PATH` still works and still wins when both are set. It names a
+  file rather than a directory, so it is strictly more specific — and every MCP
+  client entry `configure` has ever written sets it, so dropping it would have
+  relocated those installs.
+- `configure` no longer writes a third path of its own. It defaulted to
+  `~/.remind_me/remind_me.db` — underscore, and a filename neither the runtime
+  default nor the reference used — so a configured client and a bare
+  `rusty-remind-me` opened different databases. Both now call one resolver.
+- A leading `~` is expanded in both variables, as the reference's `expanduser`
+  does. Not cosmetic: `configure` writes these into MCP client JSON, where no
+  shell expands anything, and a literal `~` would create a directory named `~`.
+- A blank variable counts as unset, which is how "unset" arrives from many
+  process managers. Previously `REMIND_ME_MCP_DIR=""` would have resolved to the
+  relative path `memory.db` — a store in the working directory that looks empty
+  rather than misplaced.
+
+### Why this was worth a breaking default
+Tenet 3 promises drop-in interoperability, and the schema delivered it — both
+sides already read and write each other's rows in one v29 file without either
+migrating it. Locating the file was the part that did not work, and it failed
+*silently*: setting the port's variable against the reference is ignored, so
+both commands succeed, print sensible output, and operate on different
+databases. That is how a test write landed in a real memory store while this was
+being investigated.
+
+### Verified
+Not by comparing resolved paths. The reference wrote a memory with only
+`REMIND_ME_MCP_DIR` set; the port listed it back through the same variable, wrote
+its own row, and the reference read both — schema still 29. Separately, the same
+unconfigured command run from two different directories now reaches one store and
+leaves no stray database in either.
+
+Each guard was checked against the pre-fix behaviour: dropping `MCP_DIR` support,
+restoring the underscore directory, reversing the precedence, treating blank as
+set, and removing tilde expansion each fail the suite (exit 101), with every
+sabotage asserting its own substitution count so a regex that matched nothing
+could not pass as a verified guard.
+
+### Also
+`cloud_backup_test.rs` set `REMIND_ME_MCP_DIR` against code that never read it —
+`backup::backup_dir` derives from the open database's own path. Removed rather
+than left decorative, now that the variable means something.
+
 ## 2026-08-07 — The event test stops asserting an order nothing promises
 
 ### Fixed
