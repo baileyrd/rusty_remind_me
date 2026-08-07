@@ -2,6 +2,45 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-07 — Two id formats in one database, now on purpose
+
+### Added
+- **`docs/adr/0016`: memory ids are opaque** (#217). `remind_me` writes
+  `sha256(content + timestamp)[:12]`; this crate writes `mem_` plus a uuid4.
+  Both land in the same `memories.id` column of the same shared database, and
+  each side reads the other's fine — `id` is opaque `TEXT` with no length
+  constraint and no parsing anywhere. The ADR states the rule that was only
+  ever implicit: the `mem_` prefix is not a contract, length is not a contract,
+  ids are not derivable, and nothing may branch on any of it.
+- **`id_format_test.rs`**, which drives reference-shaped ids through the real
+  read, update, delete and list paths rather than inspecting the generator — a
+  generator test would keep passing if `get_memory_by_id` started assuming a
+  prefix. Includes a row whose id is neither hex nor prefixed nor 12
+  characters, because that is what breaks first if anything starts pattern
+  matching.
+
+### Not changed
+- **Neither scheme.** Adopting the reference's was the obvious candidate and is
+  rejected on the merits: its id is a function of content plus a timestamp, so
+  two identical memories added in the same timestamp resolution collide on
+  exactly the inputs a duplicate shares. uuid4 cannot. It would also fix
+  nothing retroactively — every `mem_` row already written keeps its id — so
+  the database would still hold two formats, bought at the price of a collision
+  mode in a column nothing parses.
+- **Entity and relation ids are deliberately outside this rule** and continue
+  to match the reference byte for byte: `sha256(normalized_name)[:12]` and
+  `sha256("subject|relation|object")[:12]`. There the determinism *is* the
+  mechanism — it is how two peers agree on one entity without coordinating — so
+  a divergence would split an entity in two across a sync. A test now pins
+  three of those values against output computed by `remind_me` v1.54.0 itself.
+
+### Verified
+Three sabotages, each failing the suite (exit 101): making `get_memory_by_id`
+require a `mem_` prefix, switching id generation to the content-derived scheme,
+and dropping normalisation from `entity_id`. The first of them initially failed
+to apply at all — the substitution-count assertion caught the bad regex rather
+than letting a no-op masquerade as a verified guard.
+
 ## 2026-08-07 — `add` and `search` stop eating their own flags
 
 ### Fixed
