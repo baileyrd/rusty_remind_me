@@ -1,8 +1,9 @@
 # Gap Analysis — `rusty_remind_me` vs. `remind_me`
 
-**Run date:** 2026-08-05, schema row and drift section updated 2026-08-06
-**Target:** `baileyrd/rusty_remind_me` @ `1fecc54`, 5 crates
-**Reference (pinned):** `baileyrd/remind_me` @ `caad798` — **v1.54.0**
+**Run date:** 2026-08-07 (surface counts re-derived; earlier revisions
+2026-08-05 and 2026-08-06)
+**Target:** `baileyrd/rusty_remind_me` @ `68ae0a9`, 6 crates
+**Reference (pinned):** `baileyrd/remind_me` @ `f199a11` — **v1.54.0**
 **Previous run:** 2026-08-03 against target `a2cce8b` / reference `935eb98`.
 That analysis is superseded in full: its entire gap table was worked to
 completion (issues #100–#122, PRs #123–#166), and every headline number it
@@ -10,14 +11,14 @@ reported has moved.
 
 ---
 
-## Headline: the port has reached surface parity
+## Headline: surface parity holds — and surface was never the whole claim
 
-Every number below was re-derived independently for this run, from both
+Every number below was re-derived independently for this revision, from both
 codebases, rather than carried forward.
 
 | Surface | `remind_me` v1.54.0 | `rusty_remind_me` | Covered |
 | --- | --- | --- | --- |
-| MCP tools | 61 | 61 + 1 target-only | **100%** |
+| MCP tools | 61 | 61 + **2** target-only | **100%** |
 | HTTP API routes | 25 | 25 | **100%** |
 | Peer-server routes | 7 | 7 | **100%** |
 | SQLite schema version | 29 | 29 | **match** |
@@ -26,6 +27,35 @@ codebases, rather than carried forward.
 
 The previous run reported 70% tool coverage, 80% routes, 83% tables, and a
 schema 8 steps behind. All of it closed.
+
+Two corrections to the 2026-08-05 numbers, both found by re-deriving rather
+than re-reading:
+
+- **Target-only tools are 2, not 1** — `remind_me_entity_upsert` and
+  `remind_me_wiki_import`. The earlier count missed one.
+- The route comparison needs care: `/api/reminders/{token}.ics` has no matching
+  string literal in the target, because it is served by prefix dispatch
+  (`api_reminders_ics`). A naive literal diff reports it missing. It is not.
+
+### The caveat this table earned
+
+**A 100% here means names and paths match. It has never meant the responses
+do.** This document said "the port has reached surface parity" on 2026-08-05
+and was correct. The sweep that followed (issues #196–#205) then found roughly
+forty divergent *response fields* behind those matching tool names — missing
+`count`, `annotated`, `status`, `shared_entities`, and six `Memory` fields.
+
+The same shape recurred twice more:
+
+- **#167 closed the missing `list` subcommand and left the missing flags** on
+  the two subcommands that already existed. `add` and `search` silently folded
+  `--category`, `--tags`, `--limit` and `--json` into their positional text
+  (#216, fixed in #220).
+- **The drop-in claim was true for data and false for configuration** — the two
+  implementations could not be pointed at one file (#218, fixed in #219).
+
+Read the table as *coverage of the enumerable surface*, and assume nothing
+about behaviour behind it that is not separately tested.
 
 **Method.** The two codebases share no structurally diffable surface (Python
 package vs. Cargo workspace), so `cargo public-api` does not apply — the
@@ -88,6 +118,38 @@ method — could not run at all. Fixed upstream in `remind_me` #228. Its whole
 test suite was blind to it because every caller sets the factory a line before
 calling in.
 
+### Drop-in verified against a live database, 2026-08-07
+
+The schema table above says the two implementations *can* share a file. That had
+never actually been done. It has now: a real `remind_me`-created v29 database was
+copied, opened by the port, written to, and handed back.
+
+| Step | Result |
+| --- | --- |
+| port reads the reference's rows | all present, metadata and timestamps intact |
+| port writes a row | ok |
+| schema version after the port touched it | **29 — no migration fired** |
+| reference re-opens and reads the port's row | every column sane |
+| reference writes again afterward | ok |
+
+**Drop-in on the data is real.** Three divergences turned up in the doing, none
+of which any amount of reading had surfaced:
+
+| Issue | What | Status |
+| --- | --- | --- |
+| [#216](https://github.com/baileyrd/rusty_remind_me/issues/216) | `add`/`search` swallowed the reference's CLI flags into their positional text — silently, because a `join` cannot reject an unknown flag the way `argparse` does | closed, [#220](https://github.com/baileyrd/rusty_remind_me/pull/220) |
+| [#218](https://github.com/baileyrd/rusty_remind_me/issues/218) | The two could not be aimed at one file: different variables (`REMIND_ME_DB_PATH` vs `REMIND_ME_MCP_DIR`) *and* different defaults, the port's relative to the working directory | closed, [#219](https://github.com/baileyrd/rusty_remind_me/pull/219) |
+| [#217](https://github.com/baileyrd/rusty_remind_me/issues/217) | Memory ids diverge in format (`sha256(content+ts)[:12]` vs `mem_` + uuid4) in a shared column | closed, [#221](https://github.com/baileyrd/rusty_remind_me/pull/221) — documented and pinned, **not changed**; see `docs/adr/0016` |
+
+#218 is the one worth remembering. Setting the port's variable against the
+reference is *ignored* — both commands succeed, print sensible output, and
+operate on different databases. That is how a test write ended up in a real
+memory store during this very investigation.
+
+**Method note.** Every one of these came from running the two implementations
+against one file. None came from reading either codebase, and the preceding two
+revisions of this document did not find them.
+
 ---
 
 ## Scope definition
@@ -99,10 +161,22 @@ definition of parity:
 > **Data Parity with `remind-me`**: Identical SQLite schema and JSON tool
 > signatures for drop-in interoperability.
 
-**That tenet is now fully satisfied.** Schema version, every schema object,
-every tool name, and every route match. What follows is the residue: things
-the reference has that the port does not, which sit *outside* the tenet's
-letter but inside "this is the successor."
+**That tenet is satisfied to its letter.** Schema version, every schema object,
+every tool name, and every route match, and as of 2026-08-07 the drop-in claim
+has been executed against a live reference database rather than inferred from
+the schema.
+
+Its letter is narrower than it reads, though, and the three findings of
+2026-08-07 all landed in the margin. "Identical JSON tool signatures" says
+nothing about the *fields in the response*, which is where forty divergences
+sat (#196–#205). "Drop-in interoperability" says nothing about *finding the
+same file*, which took two differently-named variables and did not work by
+default (#218). Neither omission is a failure of the tenet — it is a scope
+statement, not a test suite — but treating it as the definition of parity means
+the definition stops short of what a user would call parity.
+
+What follows is the residue: things the reference has that the port does not,
+which sit outside the tenet's letter but inside "this is the successor."
 
 `remind_me`'s `BACKLOG.md` is the reference's own improvement backlog, not a
 roadmap for the port, and is again deliberately **not** used as the scope
@@ -128,6 +202,13 @@ The reference dispatches `add`/`search`/`list`; the target dispatched
 `add`/`search` and ten others, but not `list`. The tool logic
 (`remind_me_list`, `queries::list_memories`) already existed — only the
 command-line route was missing.
+
+**Incompletely closed, and worth recording as the pattern.** #167 built `list`
+a real flag parser and stopped there, because this row named a missing
+*subcommand*. The missing *flags* on `add` and `search` — the two subcommands
+that already existed — were never in scope and survived another five months of
+"100% CLI coverage" (#216, closed by #220). A gap defined by the wrong unit
+closes at the wrong boundary.
 
 ### D1 — the stuck-call watchdog
 
@@ -207,6 +288,48 @@ Postgres rather than by reading it.
 
 ---
 
+## Deliberate divergences
+
+Places the port knowingly differs. Each is a decision, not a gap, and is listed
+here so "parity" is never read as "identical".
+
+| What | Port | Reference | Why |
+| --- | --- | --- | --- |
+| `response_format` default | JSON | Markdown | Flipping it would break every existing caller to imitate a limitation. Markdown is opt-in and fully available (#206, #211). **The defaults still differ.** |
+| CLI `search` output | Markdown, `--json` opts in | same | Matched deliberately in #220 — and it means `search` output changed for existing scripts. |
+| Memory id format | `mem_` + uuid4 | `sha256(content+ts)[:12]` | The reference's collides on identical content within one timestamp resolution. `docs/adr/0016` |
+| Vector store | `vec_embeddings` + Rust cosine scan | `vec0` virtual table | No loadable `sqlite-vec` available to this crate. Neither side reads the other's vectors; the shared `vec_chunks` rowid map matches exactly. `docs/adr/0002` |
+| Sync pull cursor | advances only over records that **applied** | advances over every record received | The reference can skip a record it failed to apply and never see it again. |
+| Hub legacy migration | keeps trailing zeros | regex strips them | A real bug in the reference: `.500000` → `.5` sorts *before* the client's own value under `COLLATE "C"`, corrupting both the pull cursor and LWW resolution. `docs/adr/0015` |
+| `estimated_tokens` | `(len / 4).max(1)` | `len / 4` | Bare division estimates zero tokens for content under 4 characters. |
+| Sidecar teardown, Unix abnormal exit | orphans | orphans | Matched deliberately. The reference's job-object guarantee is Windows-only; closing the Unix case would overshoot. `docs/adr/0013` |
+
+Entity and relation ids are deliberately **not** on this list: they are
+content-addressed in both, byte for byte, because the determinism is how two
+peers agree on one entity without coordinating. Pinned by
+`id_format_test.rs` against values computed by the reference itself.
+
+---
+
+## What is guarded, and what is only true
+
+Worth separating, because the difference is where the next surprise comes from.
+
+**Guarded automatically:** the schema version, by
+`scripts/check_schema_drift.sh` on every PR and daily on a schedule — daily
+because it compares against *another repository* and can turn red with nothing
+here changing.
+
+**True, but only checked when someone re-runs this analysis by hand:** the tool
+list, the route lists, response field sets, and CLI flag sets. Every one of the
+three 2026-08-07 findings lived in that second category. Nothing currently
+notices if the reference adds a tool, changes a response field, or adds a flag.
+
+That is the standing hole in "parity is structurally guaranteed", and it is
+larger than any specific unported feature.
+
+---
+
 ## Verified as *not* gaps
 
 Recorded because each looked like one:
@@ -267,3 +390,35 @@ last, and its answer landed in [#189](https://github.com/baileyrd/rusty_remind_m
 
 All three filed gaps are independent — no ordering constraint. They were
 worked C1 → D1 → E5, smallest first.
+
+---
+
+## Standing state, 2026-08-07
+
+**The gap table is empty.** C1, D1 and E5 are closed; E1 was decided and ported.
+All three stop-and-ask items were put to a human, answered, and done. The
+reference has no commits past `f199a11` to absorb, and the schema is in parity
+at v29.
+
+**Open issues are not parity gaps.** #207 (symbolic compression), #208
+(refinement ladder), #209 (provider abstraction beyond Ollama) and #212 (raw
+envelope retention) are all `enhancement`, and none traces to `remind_me`'s
+`BACKLOG.md` — which this analysis deliberately does not use as a scope source
+anyway. Working them moves the port *ahead* of the reference rather than toward
+it, which is a different decision.
+
+**What would find the next gap.** Not another read of both codebases — two
+revisions of this document did that and missed all three of the 2026-08-07
+findings. Running the two implementations against one database found them in an
+afternoon. The next revision should start there.
+
+Two smaller things noticed in passing and deliberately not filed, recorded so
+they are not re-discovered as novel:
+
+- `MemoryListInput` derives `Default`, which yields `limit: 0` — the
+  `#[serde(default = "default_list_limit")]` attribute applies only when
+  deserializing. Anything constructing the struct in Rust rather than from JSON
+  silently gets a zero limit.
+- `remind_me_search` in the MCP dispatch layer always returns JSON and ignores
+  `response_format` entirely, unlike the twelve tools fixed in #211. The
+  reference honours it there and defaults to Markdown.
