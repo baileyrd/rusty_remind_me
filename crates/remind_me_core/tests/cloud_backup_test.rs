@@ -175,8 +175,14 @@ fn a_refused_upload_does_not_stop_the_local_backup() {
     let dir = std::env::temp_dir().join(format!("rrm_cloud_backup_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::env::set_var("REMIND_ME_MCP_DIR", &dir);
 
+    // No REMIND_ME_MCP_DIR here. This test used to set it, which read as though
+    // it steered the backup location -- it never did. `backup::backup_dir`
+    // derives the directory from the *open database's own path*, so passing the
+    // path to `Database::open` below is what actually places the backup, and
+    // the env var was inert. Now that the variable is genuinely honoured for
+    // database resolution (#218), leaving a decorative set_var here would be
+    // actively misleading rather than merely unused.
     let db = remind_me_core::Database::open(dir.join("memories.db")).unwrap();
     let outcome = remind_me_core::backup::create_backup(&db.conn(), "test").unwrap();
 
@@ -189,7 +195,6 @@ fn a_refused_upload_does_not_stop_the_local_backup() {
         outcome.upload
     );
 
-    std::env::remove_var("REMIND_ME_MCP_DIR");
     let _ = std::fs::remove_dir_all(&dir);
     clear();
 }
