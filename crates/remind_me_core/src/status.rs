@@ -163,10 +163,11 @@ pub fn server_status(conn: &Connection) -> Result<ServerStatus> {
         sync: SubsystemStatus::missing(
             "no sync engine in this crate; the outbox is written and pruned, never drained",
         ),
-        watcher: match crate::watcher::Watcher::from_env() {
-            Some(w) => w.status(),
-            None => crate::watcher::disabled_status(),
-        },
+        // Same precedence as the tool surface: a running loop knows more than
+        // a freshly-built one, which has never scanned anything (#203).
+        watcher: crate::watcher::live_status()
+            .or_else(|| crate::watcher::Watcher::from_env().map(|w| w.status()))
+            .unwrap_or_else(crate::watcher::disabled_status),
         watchdog: crate::watchdog::status(),
     })
 }

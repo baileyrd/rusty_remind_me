@@ -78,16 +78,15 @@ pub struct RejectedDir {
 pub struct WatchStatus {
     /// Whether any watch directory is configured at all.
     pub enabled: bool,
-    /// Whether a scan loop is actually running.
+    /// Whether a scan loop is actually running (#203).
     ///
-    /// **Always `false` in this crate, and that is not a placeholder.**
-    /// `Watcher::scan_once` is implemented and tested, but nothing in the
-    /// binary drives it — there is no loop and no scheduler, so the watcher
-    /// scans only when a test calls it. `enabled: true` therefore means
-    /// "directories are configured", not "files are being ingested", and
-    /// without this field the two were indistinguishable.
+    /// Distinct from `enabled`, which only says directories are configured.
+    /// The two were indistinguishable until the loop existed, and every
+    /// counter below was structurally zero because the status surface built a
+    /// fresh `Watcher` to report on rather than reaching the running one.
     ///
-    /// See #203. When a driver lands, this becomes a real liveness check.
+    /// `true` only when [`live_status`] answered — that is, when this process
+    /// holds a registered loop whose thread has not been joined.
     pub running: bool,
     pub watch_dirs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -394,10 +393,13 @@ impl Watcher {
     }
 
     /// A status snapshot.
+    ///
+    /// `running` is `false` here and set by [`live_status`] for the watcher
+    /// that is actually looping — a `Watcher` built to be inspected is not
+    /// running by virtue of existing, which is the distinction #203 was about.
     pub fn status(&self) -> WatchStatus {
         WatchStatus {
             enabled: true,
-            // Nothing drives scan_once in the binary; see the field docs.
             running: false,
             pending_wiki_compile: 0,
             watch_dirs: self
@@ -494,4 +496,139 @@ fn now_seconds() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// The scan loop
+// ---------------------------------------------------------------------------
+
+/// The watcher this process is running, if any.
+///
+/// A process-global rather than state threaded through `McpServer`, because
+/// `remind_me_watch_status` is dispatched deep inside the tool match with no
+/// route back to whatever `main` is holding. The alternative — plumbing a
+/// handle through the server, the dispatcher and every tool arm — would touch
+/// far more code to serve one status surface.
+///
+/// `Mutex<Option<..>>` rather than `OnceLock`, because a stopped watcher must
+/// be able to clear itself: a `running: true` that outlived its thread would
+/// be exactly the misreport this whole change exists to remove.
+static LIVE: std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<Watcher>>>> =
+    std::sync::Mutex::new(None);
+
+/// Handle to a running scan loop. Dropping it does **not** stop the thread;
+/// call [`WatcherHandle::stop`], which joins, so an in-flight scan cannot
+/// still be writing while the caller tears the database down underneath it.
+///
+/// Same shape as [`crate::scheduler::SchedulerHandle`], deliberately: two
+/// background loops in one process should not have two different lifecycles.
+pub struct WatcherHandle {
+    stop: std::sync::Arc<crate::scheduler::Stop>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WatcherHandle {
+    pub fn stop(mut self) {
+        self.stop.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        // Cleared after the join, not before: until the thread has actually
+        // finished, it is still running and the status surface should say so.
+        *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Where this connection's database lives, or `None` for an in-memory one.
+fn database_path(conn: &Connection) -> Option<PathBuf> {
+    let path: String = conn
+        .query_row("PRAGMA database_list", [], |row| row.get(2))
+        .ok()?;
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// Start the folder-watch loop for the database `conn` is attached to.
+///
+/// Returns `None` when there is nothing to run: no watch directories
+/// configured (or none usable), or an in-memory database. The in-memory case
+/// matters for the same reason it does for the scheduler — the loop's thread
+/// opens its own connection by path, and `:memory:` would give it a
+/// *different*, empty database, so it would scan files into a store nobody
+/// can read.
+///
+/// Conditional, unlike the scheduler: the watcher has an explicit enable
+/// switch in `REMIND_ME_WATCH_DIRS`, and a watcher with no directories is not
+/// a feature to run.
+pub fn start_watcher_for(conn: &Connection) -> Option<WatcherHandle> {
+    let watcher = Watcher::from_env()?;
+    let db_path = database_path(conn)?;
+    Some(start_watcher(watcher, db_path))
+}
+
+fn start_watcher(watcher: Watcher, db_path: PathBuf) -> WatcherHandle {
+    let interval = std::time::Duration::from_secs(watcher.interval().max(1));
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(watcher));
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::clone(&shared));
+
+    let stop = std::sync::Arc::new(crate::scheduler::Stop::new());
+    let loop_stop = std::sync::Arc::clone(&stop);
+    let loop_shared = std::sync::Arc::clone(&shared);
+
+    let thread = std::thread::Builder::new()
+        .name("folder-watcher".to_string())
+        .spawn(move || {
+            // Its own connection, by path: `rusqlite::Connection` is not
+            // `Sync`, so sharing the caller's would trade a compile error for
+            // a runtime serialisation problem.
+            let conn = match Connection::open(&db_path) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("folder watcher: cannot open {:?}: {}", db_path, e);
+                    // Clear the registration rather than leave a `running:
+                    // true` behind a thread that is about to exit.
+                    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    return;
+                }
+            };
+            while !loop_stop.is_stopped() {
+                {
+                    // Scoped so the lock is released before the sleep — a
+                    // status call must not block for a whole interval.
+                    let mut guard = loop_shared.lock().unwrap_or_else(|e| e.into_inner());
+                    let counts = guard.scan_once(&conn);
+                    if counts.ingested > 0 || counts.superseded > 0 {
+                        eprintln!(
+                            "folder watcher: ingested {}, superseded {}",
+                            counts.ingested, counts.superseded
+                        );
+                    }
+                }
+                loop_stop.wait(interval);
+            }
+        })
+        .expect("spawning the folder watcher thread");
+
+    WatcherHandle {
+        stop,
+        thread: Some(thread),
+    }
+}
+
+/// The running watcher's status, or `None` when no loop is running.
+///
+/// This is what makes `running` mean something. Before it, the status surface
+/// built a *fresh* `Watcher::from_env()` and reported on an object that had
+/// never scanned anything, so `scans` and the file counters were structurally
+/// zero while `enabled: true` read like a working feature.
+pub fn live_status() -> Option<WatchStatus> {
+    let live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let shared = live.as_ref()?;
+    let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let mut status = guard.status();
+    status.running = true;
+    Some(status)
 }

@@ -176,8 +176,9 @@ fn an_unreachable_reconcile_reports_hint_not_reason() {
 #[test]
 fn watch_status_distinguishes_configured_from_running() {
     // The point of `running`. `enabled` says directories are configured;
-    // before this, nothing said whether anything was actually scanning them,
-    // and in this crate nothing is — `scan_once` has no driver (#203).
+    // nothing said whether anything was actually scanning them until #203
+    // added the loop, and `disabled_status()` describes a watcher that is
+    // neither.
     let status = watcher::disabled_status();
     let json: Value = serde_json::to_value(&status).unwrap();
 
@@ -193,11 +194,13 @@ fn watch_status_distinguishes_configured_from_running() {
 }
 
 #[test]
-fn watch_status_reports_running_false_even_when_configured() {
-    // Deliberately pinned. `scan_once` is implemented and tested but nothing
-    // in the binary drives it, so a configured watcher still is not running.
-    // If a driver ever lands, this test should fail and be updated — that is
-    // the point of asserting it rather than leaving it undefined.
+fn a_watcher_that_is_configured_but_not_looping_reports_running_false() {
+    // Updated when the driver landed (#203), as its predecessor said it should
+    // be. It no longer pins "the watcher never runs" — it pins the narrower
+    // and still-true claim that `enabled` and `running` are independent: a
+    // `WatchStatus` describing a configured watcher with no loop behind it
+    // reports `running: false`. `watcher_driver_test.rs` covers the other
+    // half, where a real loop reports `true`.
     let status = watcher::WatchStatus {
         enabled: true,
         running: false,

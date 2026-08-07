@@ -2,6 +2,37 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-06 — The folder watcher actually runs
+
+### Fixed
+- **`Watcher::scan_once` now has a driver** (#203). It was implemented and
+  covered by tests, and nothing in the binary called it — no loop, no thread.
+  Watched directories were configured, reported as `enabled`, and never
+  scanned. `remind_me_watch_status` compounded it by building a *fresh*
+  `Watcher::from_env()` to report on, so `scans` and every file counter read
+  zero from an object created microseconds earlier.
+
+### Added
+- `watcher::start_watcher_for`, returning a `WatcherHandle` whose `stop()`
+  joins — the same shape as `scheduler::SchedulerHandle`, deliberately, so two
+  background loops in one process do not have two different lifecycles. Started
+  in `main` beside the scheduler and stopped before the database is torn down,
+  so an in-flight scan cannot still be writing.
+- `watcher::live_status`, which both status surfaces now consult **before**
+  falling back to a freshly built watcher. This is what makes `running` mean
+  something rather than being a constant.
+
+### Notes
+- Conditional, unlike the scheduler: the watcher has an explicit enable switch,
+  so no directories means no thread. An in-memory database also declines — the
+  loop opens its own connection by path, and `:memory:` would hand it a
+  different, empty store.
+- `Stop` moved to `pub(crate)` and is shared with the scheduler rather than
+  duplicated; both need "sleep for an interval, wake immediately on shutdown".
+- The registry is cleared **after** the join, not before: until the thread has
+  finished it really is still running, and a `running: true` outliving its
+  thread would be the same misreport in a new place.
+
 ## 2026-08-06 — Response envelopes match the reference across six tools
 
 ### Fixed
