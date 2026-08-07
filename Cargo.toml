@@ -12,6 +12,16 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# The oldest toolchain this workspace has actually been observed to build and
+# test with — not a bisected minimum. 1.94 is what this repo was developed
+# against before `rust-toolchain.toml` pinned 1.97, so it is a floor that has
+# been demonstrated rather than assumed. The true minimum is probably lower;
+# claiming a number nobody has run would be worse than claiming a slightly
+# conservative one.
+#
+# Distinct from `rust-toolchain.toml`, which pins what CI and developers
+# *build* with. This says what a consumer needs.
+rust-version = "1.94"
 license = "MIT"
 authors = ["rusty_remind_me contributors"]
 
