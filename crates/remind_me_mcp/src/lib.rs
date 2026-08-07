@@ -1375,9 +1375,16 @@ impl McpServer {
                         }
                     }
                     "remind_me_watch_status" => {
-                        let mut report = match watcher::Watcher::from_env() {
-                            Some(w) => w.status(),
-                            None => watcher::disabled_status(),
+                        // The running loop first (#203). Falling straight to
+                        // `from_env()` would report on a Watcher constructed
+                        // microseconds ago that has never scanned, so every
+                        // counter would read zero while a real loop was busy.
+                        let mut report = match watcher::live_status() {
+                            Some(live) => live,
+                            None => match watcher::Watcher::from_env() {
+                                Some(w) => w.status(),
+                                None => watcher::disabled_status(),
+                            },
                         };
                         // Added by the tool rather than the watcher, matching
                         // the reference: the count is a property of the wiki,

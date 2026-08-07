@@ -140,14 +140,17 @@ pub fn poll_once_with(conn: &Connection, deliver: &mut dyn FnMut(&Memory)) -> Re
 /// A condvar rather than `thread::sleep`: shutdown has to interrupt the wait,
 /// or stopping the server would block for up to a full poll interval on a
 /// thread that has nothing left to do.
-struct Stop {
+/// Shared with [`crate::watcher`], which needs the same "sleep for an interval
+/// but wake immediately on shutdown" primitive. Kept here, where it was first
+/// written, rather than moved to a new module for two users.
+pub(crate) struct Stop {
     stopped: AtomicBool,
     waker: Mutex<()>,
     condvar: Condvar,
 }
 
 impl Stop {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             stopped: AtomicBool::new(false),
             waker: Mutex::new(()),
@@ -155,18 +158,18 @@ impl Stop {
         }
     }
 
-    fn is_stopped(&self) -> bool {
+    pub(crate) fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
 
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         let _guard = self.waker.lock().unwrap();
         self.condvar.notify_all();
     }
 
     /// Sleep for `interval`, waking early if stopped.
-    fn wait(&self, interval: Duration) {
+    pub(crate) fn wait(&self, interval: Duration) {
         let guard = self.waker.lock().unwrap();
         if self.is_stopped() {
             return;

@@ -357,12 +357,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // code nothing ever runs, and a reminder would only ever fire if
         // someone happened to call a tool.
         let scheduler = remind_me_core::scheduler::start_scheduler_for(&db.conn());
+        // Conditional, unlike the scheduler: the watcher has an explicit
+        // enable switch, so this is `None` unless REMIND_ME_WATCH_DIRS names a
+        // usable directory. Until #203 this call did not exist at all, and
+        // `scan_once` ran only when a test invoked it — the status surface
+        // reported a configured watcher that was never going to scan anything.
+        let watcher = remind_me_core::watcher::start_watcher_for(&db.conn());
         let server = McpServer::new(db);
         let result = server.run_stdio_loop();
-        // Joined before the database goes out of scope, so an in-flight poll
-        // cannot still be writing while the handle is torn down underneath it.
+        // Both joined before the database goes out of scope, so an in-flight
+        // poll or scan cannot still be writing while the handle is torn down
+        // underneath it.
         if let Some(scheduler) = scheduler {
             scheduler.stop();
+        }
+        if let Some(watcher) = watcher {
+            watcher.stop();
         }
         result?;
     } else {
