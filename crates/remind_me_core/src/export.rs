@@ -404,6 +404,7 @@ pub fn export_memories(
     let exported = records.len() - entities - links - relations;
 
     let mut result = ExportResult {
+        status: "ok",
         exported,
         format: input.format,
         entities: input.include_graph.then_some(entities),

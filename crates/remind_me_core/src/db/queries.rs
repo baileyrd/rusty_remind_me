@@ -247,6 +247,7 @@ pub fn list_memories(conn: &Connection, input: &MemoryListInput) -> Result<Memor
     }
 
     Ok(MemoryListResult {
+        count: memories.len(),
         memories,
         total: total.max(0) as usize,
         limit,
@@ -582,7 +583,11 @@ pub fn annotate_memories(conn: &Connection, input: &AnnotateInput) -> Result<Ann
         });
     }
 
-    Ok(AnnotateResult { results, errors })
+    Ok(AnnotateResult {
+        annotated: results.len(),
+        results,
+        errors,
+    })
 }
 
 /// Apply memory-type classifications, updating the decay rate to match.

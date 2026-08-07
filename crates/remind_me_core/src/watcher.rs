@@ -78,6 +78,17 @@ pub struct RejectedDir {
 pub struct WatchStatus {
     /// Whether any watch directory is configured at all.
     pub enabled: bool,
+    /// Whether a scan loop is actually running.
+    ///
+    /// **Always `false` in this crate, and that is not a placeholder.**
+    /// `Watcher::scan_once` is implemented and tested, but nothing in the
+    /// binary drives it — there is no loop and no scheduler, so the watcher
+    /// scans only when a test calls it. `enabled: true` therefore means
+    /// "directories are configured", not "files are being ingested", and
+    /// without this field the two were indistinguishable.
+    ///
+    /// See #203. When a driver lands, this becomes a real liveness check.
+    pub running: bool,
     pub watch_dirs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rejected_dirs: Vec<RejectedDir>,
@@ -91,6 +102,9 @@ pub struct WatchStatus {
     pub memories_superseded: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_errors: Vec<String>,
+    /// Memories not yet folded into the wiki. Filled in by the tool layer,
+    /// which has the connection; the watcher itself does not (#201).
+    pub pending_wiki_compile: usize,
     /// Says what to configure when nothing is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
@@ -383,6 +397,9 @@ impl Watcher {
     pub fn status(&self) -> WatchStatus {
         WatchStatus {
             enabled: true,
+            // Nothing drives scan_once in the binary; see the field docs.
+            running: false,
+            pending_wiki_compile: 0,
             watch_dirs: self
                 .watch_dirs
                 .iter()
@@ -412,6 +429,8 @@ pub fn disabled_status() -> WatchStatus {
     let (_, rejected) = validate_watch_dirs(&configured);
     WatchStatus {
         enabled: false,
+        running: false,
+        pending_wiki_compile: 0,
         watch_dirs: Vec::new(),
         rejected_dirs: rejected,
         interval_seconds: env_seconds(WATCH_INTERVAL_ENV, DEFAULT_INTERVAL_SECONDS),

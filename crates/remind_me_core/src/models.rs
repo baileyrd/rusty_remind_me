@@ -275,6 +275,13 @@ pub const LIST_LIMIT_MAX: usize = 100;
 /// callers can paginate without a second round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryListResult {
+    /// How many are in `memories` — this page, not the whole set (#201).
+    ///
+    /// Redundant against `memories.len()` and emitted anyway, because the
+    /// reference's shared list envelope is `{count, memories, total}` and a
+    /// client written against it reads `count`. `total` answers a different
+    /// question: how many exist behind the page.
+    pub count: usize,
     pub memories: Vec<Memory>,
     pub total: usize,
     pub limit: usize,
@@ -378,6 +385,10 @@ pub struct AnnotationError {
 /// `errors` and continues.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnnotateResult {
+    /// How many annotations were applied — `results.len()`, emitted because
+    /// the reference emits it (#201) and a caller checking "did that work?"
+    /// should not have to measure an array to find out.
+    pub annotated: usize,
     pub results: Vec<AnnotationApplied>,
     pub errors: Vec<AnnotationError>,
 }
@@ -872,6 +883,10 @@ fn default_include_graph() -> bool {
 /// Outcome of an export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportResult {
+    /// Always `"ok"` on this path — an export that failed returns an error
+    /// rather than this struct. Emitted because the reference emits it (#201),
+    /// so a client branching on `status` has something to branch on.
+    pub status: &'static str,
     /// Memory records only; the graph counts are reported separately.
     pub exported: usize,
     pub format: ExportFormat,
@@ -1760,7 +1775,14 @@ pub enum ReconcileVerdict {
 pub enum ReconcileReport {
     /// The remote could not be reached, or sync is not configured. A verdict
     /// here would be a guess, so the reachability problem is the answer.
-    Unavailable { reason: String },
+    Unavailable {
+        /// Serialised as `hint`, matching the reference (#201). The field
+        /// keeps the name that describes what it holds; only the wire key is
+        /// aligned, because a client written against `remind_me` reads `hint`
+        /// and found nothing here.
+        #[serde(rename = "hint")]
+        reason: String,
+    },
     Compared {
         remote_id: String,
         remote_role: String,
