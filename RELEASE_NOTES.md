@@ -2,6 +2,25 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-07 — The event test stops asserting an order nothing promises
+
+### Fixed
+- **`each_mutation_kind_emits_its_own_event` compares a multiset, not a
+  sequence** (#210). `events::emit` posts each event on its own thread, so
+  three mutations in a row race to the socket; the test read three messages
+  and asserted they arrived `created, updated, deleted`. That held almost
+  always — each thread is spawned a little after the last — and stopped
+  holding on a loaded machine, which is exactly when a test suite should be
+  trusted least. Sorting before the comparison drops the ordering claim and
+  keeps every claim the test was actually there to make: each mutation emits
+  one event, of the right kind, with no extras.
+
+### Not changed
+- **Delivery is still unordered.** Serialising it behind a single queue would
+  make the old assertion true, but ordered webhook delivery is a promise no
+  documentation makes and no caller was told it could rely on. Adding the
+  guarantee is a separate decision from fixing a test that assumed one.
+
 ## 2026-08-07 — Markdown is available from twelve more tools, JSON stays the default
 
 ### Added

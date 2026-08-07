@@ -136,11 +136,23 @@ fn each_mutation_kind_emits_its_own_event() {
     remind_me_core::db::queries::delete_memory(&conn, &id).unwrap();
     events::drain();
 
-    let kinds: Vec<String> = (0..3)
+    let mut kinds: Vec<String> = (0..3)
         .map(|_| received(&rx)["event"].as_str().unwrap().to_string())
         .collect();
 
-    assert_eq!(kinds, vec!["created", "updated", "deleted"]);
+    // Compared as a multiset, not a sequence (#210). `emit` posts each event on
+    // its own thread, so three mutations in a row race to the socket and the
+    // arrival order is whatever the scheduler picks — sorting drops a claim the
+    // system never made while keeping the one it did: each mutation emits
+    // exactly one event, of the right kind, and no extras. Sorting rather than
+    // de-duplicating is load-bearing; a build that emitted "created" twice and
+    // "updated" never would still have to fail here.
+    //
+    // Making delivery ordered instead would be a behaviour change, and worth it
+    // only alongside a documented promise that consumers may rely on the order.
+    // Nothing currently makes one.
+    kinds.sort();
+    assert_eq!(kinds, vec!["created", "deleted", "updated"]);
     std::env::remove_var(events::EVENT_WEBHOOK_URL_ENV);
 }
 
