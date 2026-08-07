@@ -1,0 +1,253 @@
+//! Markdown renderings for tools that previously had only a JSON response (#206).
+//!
+//! # Why these exist, and why JSON stays the default
+//!
+//! The reference returns Markdown from these thirteen tools and offers no JSON
+//! at all — ten of them have no `response_format` field, and four take no
+//! parameters whatsoever. This port returned JSON and offered no Markdown. Both
+//! are half a surface.
+//!
+//! Adding Markdown here rather than replacing JSON is deliberate: JSON was
+//! already this port's observable behaviour, so **`response_format` defaults to
+//! `json` for these tools and Markdown is opt-in**. Every existing caller keeps
+//! working unchanged, and the capability gap against the reference closes.
+//!
+//! That does mean the *default* output still differs from the reference's. The
+//! alternative — flipping the default to Markdown for parity — would break
+//! every current caller to imitate a limitation, which is a bad trade.
+//!
+//! `remind_me_history` is deliberately untouched: it already offers both and
+//! already defaults to Markdown, so changing its default is the one place where
+//! "JSON by default" would be a regression rather than a no-op.
+//!
+//! # These are presentation only
+//!
+//! Nothing here reads the database or changes a value. Each function takes an
+//! already-computed response and formats it, so a rendering bug can misreport
+//! but cannot corrupt.
+
+use remind_me_core::models::{
+    CaptureResult, Memory, RevertOutcome, SavedSearch, SetReminderOutcome,
+};
+use remind_me_core::updater::UpdateStatus;
+use remind_me_core::vectors::ReindexResult;
+use remind_me_core::wiki::WikiPage;
+use remind_me_core::wiki_fs::WikiCompile;
+
+/// Truncate for a one-line summary, on a character boundary.
+fn preview(text: &str, chars: usize) -> String {
+    let mut out: String = text.chars().take(chars).collect();
+    if text.chars().count() > chars {
+        out.push('…');
+    }
+    out
+}
+
+pub fn memory_stored(memory: &Memory) -> String {
+    format!(
+        "✓ Memory stored with id `{}` in category '{}'.",
+        memory.id, memory.category
+    )
+}
+
+pub fn memory_updated(memory: &Memory) -> String {
+    format!(
+        "✓ Memory `{}` updated.\n\n{}",
+        memory.id,
+        preview(&memory.content, 200)
+    )
+}
+
+pub fn revert_outcome(outcome: &RevertOutcome) -> String {
+    // Four variants, four different things to tell a caller. "No change" in
+    // particular is a success that did nothing, which a generic ✓ would hide.
+    match outcome {
+        RevertOutcome::Reverted { revision_id } => {
+            format!("✓ Reverted to revision {revision_id}.")
+        }
+        RevertOutcome::NoChange => {
+            "No change — the memory already holds that revision's values.".to_string()
+        }
+        RevertOutcome::MemoryNotFound => "Memory not found.".to_string(),
+        RevertOutcome::RevisionNotFound => "Revision not found.".to_string(),
+    }
+}
+
+pub fn set_reminder_outcome(outcome: &SetReminderOutcome) -> String {
+    // Every variant gets its own line rather than a generic "done": clearing a
+    // reminder, rejecting an unparseable time and setting one are three
+    // different things a caller may need to react to differently.
+    match outcome {
+        SetReminderOutcome::Set {
+            memory_id,
+            remind_at,
+        } => format!("✓ Reminder set on `{memory_id}` for {remind_at}."),
+        SetReminderOutcome::Cleared { memory_id } => {
+            format!("✓ Reminder cleared on `{memory_id}`.")
+        }
+        SetReminderOutcome::NotFound { memory_id } => {
+            format!("Memory `{memory_id}` not found.")
+        }
+        SetReminderOutcome::Rejected { reason } => format!("Reminder rejected: {reason}"),
+    }
+}
+
+pub fn saved_search(search: &SavedSearch) -> String {
+    format!(
+        "✓ Saved search '{}' stored for query `{}`.",
+        search.name, search.query
+    )
+}
+
+pub fn saved_search_list(searches: &[SavedSearch]) -> String {
+    if searches.is_empty() {
+        return "_No saved searches._".to_string();
+    }
+    let mut out = format!("**{} saved search(es)**\n", searches.len());
+    for s in searches {
+        out.push_str(&format!("\n- **{}** — `{}`", s.name, s.query));
+    }
+    out
+}
+
+pub fn reindex_result(result: &ReindexResult) -> String {
+    let mut out = format!(
+        "✓ Reindexed: {} missing, {} embedded, {} chunks created.",
+        result.missing, result.embedded, result.chunks_created
+    );
+    if result.degraded {
+        // Surfaced rather than folded into the counts: a degraded run looks
+        // like a successful one from the numbers alone.
+        out.push_str("\n\n**Degraded** — some embeddings could not be produced.");
+    }
+    out
+}
+
+pub fn update_status(status: &UpdateStatus) -> String {
+    if let Some(error) = &status.error {
+        return format!("Could not check for updates: {error}");
+    }
+    if status.update_available {
+        format!(
+            "**Update available** — {} commit(s) behind.\n\ninstalled {} ({} → {})",
+            status.commits_behind,
+            status.installed_version,
+            status.local_commit,
+            status.remote_commit
+        )
+    } else {
+        format!(
+            "Up to date at {} ({}).",
+            status.installed_version, status.local_commit
+        )
+    }
+}
+
+pub fn capture_result(result: &CaptureResult) -> String {
+    let mut out = format!(
+        "✓ Captured `{}` — \"{}\" in category '{}'.",
+        result.capture_id, result.title, result.category
+    );
+    if !result.tags.is_empty() {
+        out.push_str(&format!("\n\ntags: {}", result.tags.join(", ")));
+    }
+    out
+}
+
+pub fn wiki_compile(outcome: &WikiCompile) -> String {
+    // The three variants are three phases, not degrees of success: a brief is
+    // work still to do, integrated is work finished, noop is nothing pending.
+    match outcome {
+        WikiCompile::Brief {
+            pending,
+            watermark,
+            brief,
+        } => format!("**{pending} pending** (watermark {watermark})\n\n{brief}"),
+        WikiCompile::Integrated {
+            sources_marked,
+            watermark,
+        } => format!("✓ Integrated {sources_marked} source(s); watermark now {watermark}."),
+        WikiCompile::Noop { reason, watermark } => {
+            format!("Nothing to compile: {reason} (watermark {watermark})")
+        }
+    }
+}
+
+pub fn wiki_page(page: &WikiPage) -> String {
+    format!("# {}\n\n{}", page.title, page.content)
+}
+
+/// Renders the **enriched** status value, not the bare `ServerStatus`.
+///
+/// The dispatch layer overwrites `webhook`, `sync_peer`, `sync` and `remote`
+/// with live state the core crate cannot see. Rendering from the struct would
+/// silently omit exactly those four, so Markdown would report less than JSON
+/// for the same call.
+pub fn server_status(report: &serde_json::Value) -> String {
+    let s = |k: &str| -> String {
+        report
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string()
+    };
+    let n = |k: &str| -> i64 { report.get(k).and_then(|v| v.as_i64()).unwrap_or(0) };
+    // Subsystems serialise as a tagged object; `state` is the tag.
+    let sub = |k: &str| -> String {
+        report
+            .get(k)
+            .and_then(|v| v.get("state"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string()
+    };
+
+    let mut out = format!("**rusty-remind-me {}**\n", s("version"));
+    out.push_str(&format!(
+        "\n- database: {}",
+        report
+            .get("database_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(in memory, no file)")
+    ));
+    out.push_str(&format!("\n- memories: {}", n("memory_count")));
+    let current = report
+        .get("schema_current")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    out.push_str(&format!(
+        "\n- schema: v{} (expected v{}){}",
+        n("schema_version"),
+        n("expected_schema_version"),
+        if current { "" } else { " — **MISMATCH**" }
+    ));
+    out.push_str(&format!("\n- backups: {}", n("backup_count")));
+    for key in [
+        "mcp",
+        "dashboard",
+        "embeddings",
+        "sync",
+        "webhook",
+        "remote",
+    ] {
+        out.push_str(&format!("\n- {key}: {}", sub(key)));
+    }
+    let watcher = report.get("watcher");
+    let flag = |k: &str| -> bool {
+        watcher
+            .and_then(|w| w.get(k))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    out.push_str(&format!(
+        "\n- watcher: {}",
+        if flag("running") {
+            "running"
+        } else if flag("enabled") {
+            "configured, not running"
+        } else {
+            "disabled"
+        }
+    ));
+    out
+}
