@@ -103,7 +103,7 @@ fn json_is_the_default_for_every_tool_that_had_no_choice() {
         assert!(
             is_json(&text),
             "{name} must default to JSON, got: {}",
-            &text.chars().take(120).collect::<String>()
+            text.chars().take(120).collect::<String>()
         );
     }
 }
@@ -127,7 +127,7 @@ fn markdown_is_reachable_for_every_tool() {
         assert!(
             !is_json(&text),
             "{name} still returned JSON when markdown was asked for: {}",
-            &text.chars().take(120).collect::<String>()
+            text.chars().take(120).collect::<String>()
         );
     }
 }
@@ -204,6 +204,6 @@ fn history_keeps_its_markdown_default() {
     assert!(
         !is_json(&text),
         "remind_me_history must keep defaulting to markdown, got JSON: {}",
-        &text.chars().take(120).collect::<String>()
+        text.chars().take(120).collect::<String>()
     );
 }
