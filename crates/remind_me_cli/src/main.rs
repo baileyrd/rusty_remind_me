@@ -168,10 +168,12 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs, String> {
 fn configure_mcp_clients(parsed: &ConfigureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let current_exe = env::current_exe()?;
     let exe_str = current_exe.to_string_lossy().to_string();
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let db_path = match &parsed.db_path {
         Some(p) => PathBuf::from(p),
-        None => home.join(".remind_me").join("remind_me.db"),
+        // Was `~/.remind_me/remind_me.db` -- underscore, and a filename neither
+        // the runtime path nor the reference used. Now the one resolver, so a
+        // client configured here and a bare `rusty-remind-me` open one file.
+        None => remind_me_core::db::resolve_db_path(),
     };
 
     if let Some(parent) = db_path.parent() {
@@ -512,7 +514,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     remind_me_core::watchdog::install_stack_dump_hook();
 
     let args: Vec<String> = env::args().collect();
-    let db_path = env::var("REMIND_ME_DB_PATH").unwrap_or_else(|_| "remind_me.db".to_string());
+    // Resolution lives in the core crate so `configure` below writes the same
+    // path this opens. They disagreed before: this defaulted to `remind_me.db`
+    // in the *current directory*, so the same command from two directories was
+    // two databases, while `configure` wrote `~/.remind_me/remind_me.db` -- and
+    // the reference used `~/.remind-me/memory.db`, a third answer (#218).
+    let db_path = remind_me_core::db::resolve_db_path();
+    if let Some(parent) = db_path.parent() {
+        // The default now lives under a home-directory folder that need not
+        // exist yet. Without this, a first run fails to open rather than
+        // creating the store, which the old cwd-relative default never hit.
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
 
     let db = Database::open(&db_path)?;
 

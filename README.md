@@ -70,6 +70,21 @@ Each setup option safely merges the `"rusty-remind-me"` MCP server configuration
 
 ---
 
+## Database Location
+
+By default the store is `~/.remind-me/memory.db` — the same path [`remind_me`](https://github.com/baileyrd/remind_me) uses, so an unconfigured install of either one opens the same database.
+
+Two environment variables override it, most specific first:
+
+| Variable | Names a | Notes |
+| --- | --- | --- |
+| `REMIND_ME_DB_PATH` | database **file** | Wins if both are set. Specific to this implementation. |
+| `REMIND_ME_MCP_DIR` | **directory** holding `memory.db` | Shared with `remind_me`. Set this to point both implementations at one store. |
+
+A leading `~` is expanded in either. A variable set to the empty string counts as unset.
+
+To share a database with `remind_me`, set `REMIND_ME_MCP_DIR` only — `REMIND_ME_DB_PATH` has no meaning to `remind_me` and setting it there is silently ignored.
+
 ## Command Line Interface (CLI)
 
 The compiled binary `rusty-remind-me` provides subcommands for interactive management, MCP stdio protocol hosting, and REST API daemon mode:
