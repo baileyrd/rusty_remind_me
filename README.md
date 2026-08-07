@@ -98,13 +98,19 @@ rusty-remind-me api 8080
 Stores a new memory note, fact, or preference in SQLite with automatic FTS5 indexing:
 ```bash
 rusty-remind-me add "User prefers dark mode and Rust for low-level server development"
+rusty-remind-me add "Deploy runbook lives in the ops wiki" --category engineering --tags ops,runbook
 ```
+
+`--category` defaults to `general`; `--tags` is comma-separated and drops blanks. Use `--` before content that starts with dashes.
 
 ### 5. Searching Memories
 Executes an FTS5 BM25 search with RRF rank fusion and ACT-R vitality scoring:
 ```bash
 rusty-remind-me search "dark mode Rust"
+rusty-remind-me search "dark mode Rust" --limit 5 --json
 ```
+
+Output is Markdown by default — the same rendering `list` uses — with `--json` returning the full results including scores.
 
 ### 6. Fetching Memory by ID
 Retrieves a specific memory record by its primary key:
