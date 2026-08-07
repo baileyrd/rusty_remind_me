@@ -335,6 +335,176 @@ fn parse_list_args(args: &[String]) -> Result<ListArgs, String> {
 
 const LIST_USAGE: &str = "Usage: rusty-remind-me list [--limit N] [--category CATEGORY] [--json]";
 
+const ADD_USAGE: &str = "Usage: rusty-remind-me add <content> [--category CATEGORY] [--tags a,b,c]";
+
+const SEARCH_USAGE: &str = "Usage: rusty-remind-me search <query> [--limit N] [--json]";
+
+/// Parsed form of `rusty-remind-me add <content> [--category C] [--tags a,b]`.
+///
+/// Same principle as [`ListArgs`]: the flag set is the reference's `add_p`, not
+/// [`MemoryAddInput`]'s full field list. The tool input also carries `subject`,
+/// `predicate`, `object`, `entities`, `metadata` and `sensitive`; the reference
+/// exposes none of them from the command line, and accepting flags it rejects
+/// would be the drop-in divergence running the other way.
+#[derive(Debug, PartialEq, Eq)]
+struct AddArgs {
+    content: String,
+    category: String,
+    tags: Vec<String>,
+}
+
+/// Parsed form of `rusty-remind-me search <query> [--limit N] [--json]`.
+#[derive(Debug, PartialEq, Eq)]
+struct SearchArgs {
+    query: String,
+    limit: usize,
+    as_json: bool,
+}
+
+/// Split a `--tags` value the way the reference's `_split_tags` does.
+///
+/// Comma-separated, trimmed, blanks dropped — so `--tags ""` is an empty list
+/// rather than one empty tag, matching `MemoryAddInput.tags`'s own default.
+fn split_tags(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Collect the positional words of a subcommand, rejecting unknown flags.
+///
+/// # Why this exists at all
+///
+/// `add` and `search` previously did `args[2..].join(" ")` — every argument,
+/// flags included, became the content or the query. `argparse` rejects an
+/// unknown flag; a `join` cannot, because every argument is valid text. So
+/// `add "note" --category engineering` stored the *string*
+/// `"note --category engineering"` in category `general`, exited 0, and printed
+/// a success line. The only way to see the bug was to read the row back (#216).
+///
+/// # Multiple positionals
+///
+/// The reference declares a single positional, so `add one two` is an error
+/// there. Here the words are joined, which is what this CLI already did and
+/// what unquoted shell input produces. That is a deliberate superset: it keeps
+/// working input working, while the flag handling below closes the actual gap.
+///
+/// `--` ends flag parsing, so content that genuinely starts with `--` is still
+/// expressible.
+fn collect_positional<F>(
+    args: &[String],
+    usage: &'static str,
+    mut on_flag: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str, &[String], &mut usize) -> Result<bool, String>,
+{
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0;
+    let mut flags_done = false;
+    while i < args.len() {
+        let arg = &args[i];
+        if flags_done || !arg.starts_with("--") {
+            words.push(arg.clone());
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            flags_done = true;
+            i += 1;
+            continue;
+        }
+        if !on_flag(arg, args, &mut i)? {
+            return Err(format!("Error: unknown flag {:?}.\n{}", arg, usage));
+        }
+    }
+    if words.is_empty() {
+        return Err(usage.to_string());
+    }
+    Ok(words.join(" "))
+}
+
+/// Read the value following a flag, or explain what was missing.
+fn flag_value(
+    args: &[String],
+    i: usize,
+    flag: &str,
+    usage: &'static str,
+) -> Result<String, String> {
+    args.get(i + 1)
+        .cloned()
+        .ok_or_else(|| format!("Error: {} expects a value.\n{}", flag, usage))
+}
+
+fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
+    // Matches `add_p.add_argument("--category", default="general")` and
+    // `--tags` defaulting to "" -> [].
+    let mut category = "general".to_string();
+    let mut tags: Vec<String> = Vec::new();
+
+    let content = collect_positional(args, ADD_USAGE, |flag, args, i| match flag {
+        "--category" => {
+            category = flag_value(args, *i, flag, ADD_USAGE)?;
+            *i += 2;
+            Ok(true)
+        }
+        "--tags" => {
+            tags = split_tags(&flag_value(args, *i, flag, ADD_USAGE)?);
+            *i += 2;
+            Ok(true)
+        }
+        _ => Ok(false),
+    })?;
+
+    Ok(AddArgs {
+        content,
+        category,
+        tags,
+    })
+}
+
+fn parse_search_args(args: &[String]) -> Result<SearchArgs, String> {
+    // `search_p.add_argument("--limit", type=int, default=20)`.
+    let mut limit = 20usize;
+    let mut as_json = false;
+
+    let query = collect_positional(args, SEARCH_USAGE, |flag, args, i| match flag {
+        "--json" => {
+            as_json = true;
+            *i += 1;
+            Ok(true)
+        }
+        "--limit" => {
+            let raw = flag_value(args, *i, flag, SEARCH_USAGE)?;
+            let n: usize = raw
+                .parse()
+                .map_err(|_| format!("Error: --limit expects a number, got {:?}.", raw))?;
+            // Bounded like `list`'s, and for the same reason: `search_memories`
+            // would otherwise clamp silently, and a caller who asked for 500
+            // should be told they got 100 rather than handed a short page and
+            // left to assume the vault is small.
+            if !(LIST_LIMIT_MIN..=LIST_LIMIT_MAX).contains(&n) {
+                return Err(format!(
+                    "Error: --limit must be between {} and {}, got {}.",
+                    LIST_LIMIT_MIN, LIST_LIMIT_MAX, n
+                ));
+            }
+            limit = n;
+            *i += 2;
+            Ok(true)
+        }
+        _ => Ok(false),
+    })?;
+
+    Ok(SearchArgs {
+        query,
+        limit,
+        as_json,
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // First, before argv or the database. The slow-call watchdog dumps thread
     // stacks by re-executing this binary as a tracer child, and everything
@@ -470,20 +640,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 remind_me_remote::run_blocking(server)?;
             }
             "search" => {
-                if args.len() < 3 {
-                    eprintln!("Usage: rusty-remind-me search <query>");
-                    std::process::exit(1);
-                }
-                let query = args[2..].join(" ");
+                let search_args = match parse_search_args(&args[2..]) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        eprintln!("{}", message);
+                        std::process::exit(1);
+                    }
+                };
                 let search_input = MemorySearchInput {
                     strategy: Default::default(),
                     include_sensitive: false,
-                    query,
+                    query: search_args.query,
                     category: None,
                     tags: None,
-                    limit: 20,
+                    limit: search_args.limit,
                     token_budget: 800,
-                    response_format: Default::default(),
+                    response_format: if search_args.as_json {
+                        ResponseFormat::Json
+                    } else {
+                        ResponseFormat::Markdown
+                    },
                     include_dormant: false,
                     min_vitality: 0.0,
                     verbose: false,
@@ -493,19 +669,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let conn = db.conn();
                 let results = queries::search_memories(&conn, &search_input)?;
-                println!("{}", serde_json::to_string_pretty(&results)?);
+                match search_input.response_format {
+                    // JSON keeps the whole result -- scores, per-signal
+                    // components, the lot -- because that is what a script
+                    // piping this wants.
+                    ResponseFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&results)?)
+                    }
+                    // The reference renders search hits through the same
+                    // `_fmt_memories` it uses for `list`, which drops the
+                    // scores. Matching that rather than inventing a richer
+                    // layout: this text is what a person reads, and `list` and
+                    // `search` looking different in the same binary would be a
+                    // divergence invented here.
+                    ResponseFormat::Markdown => {
+                        let memories: Vec<_> = results.into_iter().map(|r| r.memory).collect();
+                        println!("{}", reminders::render_memories_markdown(&memories))
+                    }
+                }
             }
             "add" => {
-                if args.len() < 3 {
-                    eprintln!("Usage: rusty-remind-me add <content>");
-                    std::process::exit(1);
-                }
-                let content = args[2..].join(" ");
+                let add_args = match parse_add_args(&args[2..]) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        eprintln!("{}", message);
+                        std::process::exit(1);
+                    }
+                };
                 let add_input = MemoryAddInput {
                     sensitive: false,
-                    content,
-                    category: "general".to_string(),
-                    tags: vec![],
+                    content: add_args.content,
+                    category: add_args.category,
+                    tags: add_args.tags,
                     source: "cli".to_string(),
                     metadata: serde_json::json!({}),
                     subject: None,
@@ -721,6 +916,164 @@ mod tests {
     fn an_unknown_flag_is_rejected() {
         let err = parse_list_args(&args(&["--tags", "work"])).unwrap_err();
         assert!(err.contains("unknown flag"), "got: {}", err);
+    }
+
+    // ---------------------------------------------------------------------
+    // add (#216)
+    //
+    // The bug these exist for was silent: `args[2..].join(" ")` made every
+    // argument content, so a flag became text and the memory was stored in the
+    // wrong category with exit code 0 and a success line printed. So these
+    // assert the *parsed values*, never merely that parsing succeeded.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn add_without_flags_matches_the_reference_defaults() {
+        let parsed = parse_add_args(&args(&["a note"])).unwrap();
+        assert_eq!(parsed.content, "a note");
+        // `add_p.add_argument("--category", default="general")`.
+        assert_eq!(parsed.category, "general");
+        assert!(parsed.tags.is_empty());
+    }
+
+    #[test]
+    fn the_exact_invocation_from_the_issue_no_longer_swallows_its_flag() {
+        // Verbatim from #216. Before: content became
+        // "written by the rust port --category engineering", category "general".
+        let parsed = parse_add_args(&args(&[
+            "written by the rust port",
+            "--category",
+            "engineering",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.content, "written by the rust port");
+        assert_eq!(parsed.category, "engineering");
+        assert!(
+            !parsed.content.contains("--category"),
+            "the flag leaked into the content: {:?}",
+            parsed.content
+        );
+    }
+
+    #[test]
+    fn add_parses_tags_the_way_the_reference_splits_them() {
+        let parsed = parse_add_args(&args(&["note", "--tags", " work , important ,"])).unwrap();
+        // `_split_tags`: comma-separated, trimmed, blanks dropped -- so the
+        // trailing comma is not an empty tag.
+        assert_eq!(parsed.tags, vec!["work", "important"]);
+    }
+
+    #[test]
+    fn an_empty_tags_value_is_no_tags_rather_than_one_blank_tag() {
+        let parsed = parse_add_args(&args(&["note", "--tags", ""])).unwrap();
+        assert!(parsed.tags.is_empty());
+    }
+
+    #[test]
+    fn add_accepts_flags_before_the_content() {
+        let parsed = parse_add_args(&args(&["--category", "work", "the note"])).unwrap();
+        assert_eq!(parsed.content, "the note");
+        assert_eq!(parsed.category, "work");
+    }
+
+    #[test]
+    fn unquoted_words_still_join_into_one_content() {
+        // A deliberate superset of the reference, which declares a single
+        // positional and would reject this. Preserved because it is what this
+        // CLI already did and what unquoted shell input produces.
+        let parsed = parse_add_args(&args(&["several", "unquoted", "words"])).unwrap();
+        assert_eq!(parsed.content, "several unquoted words");
+    }
+
+    #[test]
+    fn a_double_dash_lets_content_start_with_dashes() {
+        let parsed = parse_add_args(&args(&["--", "--not-a-flag"])).unwrap();
+        assert_eq!(parsed.content, "--not-a-flag");
+        assert_eq!(parsed.category, "general");
+    }
+
+    #[test]
+    fn an_unknown_add_flag_is_rejected_rather_than_stored() {
+        // The whole point. `--limit` belongs to search/list, not add; before
+        // this it would have been silently appended to the memory's text.
+        let err = parse_add_args(&args(&["note", "--limit", "5"])).unwrap_err();
+        assert!(err.contains("unknown flag"), "got: {}", err);
+    }
+
+    #[test]
+    fn add_with_no_content_is_rejected() {
+        let err = parse_add_args(&args(&[])).unwrap_err();
+        assert!(err.contains("Usage"), "got: {}", err);
+        // A lone flag is not content either.
+        let err = parse_add_args(&args(&["--category", "work"])).unwrap_err();
+        assert!(err.contains("Usage"), "got: {}", err);
+    }
+
+    #[test]
+    fn an_add_flag_missing_its_value_is_rejected() {
+        let err = parse_add_args(&args(&["note", "--category"])).unwrap_err();
+        assert!(err.contains("expects a value"), "got: {}", err);
+    }
+
+    // ---------------------------------------------------------------------
+    // search (#216)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn search_without_flags_matches_the_reference_defaults() {
+        let parsed = parse_search_args(&args(&["a query"])).unwrap();
+        assert_eq!(parsed.query, "a query");
+        // `search_p.add_argument("--limit", type=int, default=20)`.
+        assert_eq!(parsed.limit, 20);
+        // The reference builds MARKDOWN unless --json, and this CLI's own
+        // `list` already defaults the same way.
+        assert!(!parsed.as_json);
+    }
+
+    #[test]
+    fn search_limit_is_honoured_rather_than_absorbed_into_the_query() {
+        // Before: `--limit 1` returned the same results as no flag, because
+        // "fact --limit 1" was the query and the limit stayed hardcoded at 20.
+        let parsed = parse_search_args(&args(&["fact", "--limit", "1"])).unwrap();
+        assert_eq!(parsed.query, "fact");
+        assert_eq!(parsed.limit, 1);
+        assert!(
+            !parsed.query.contains("--limit"),
+            "the flag leaked into the query: {:?}",
+            parsed.query
+        );
+    }
+
+    #[test]
+    fn search_json_opts_in() {
+        let parsed = parse_search_args(&args(&["q", "--json"])).unwrap();
+        assert!(parsed.as_json);
+    }
+
+    #[test]
+    fn a_non_numeric_search_limit_is_rejected() {
+        let err = parse_search_args(&args(&["q", "--limit", "lots"])).unwrap_err();
+        assert!(err.contains("expects a number"), "got: {}", err);
+    }
+
+    #[test]
+    fn an_out_of_range_search_limit_is_rejected_rather_than_clamped() {
+        // Same reasoning as `list`: `search_memories` clamps silently, and a
+        // caller who asked for 500 should be told, not handed a short page.
+        let err = parse_search_args(&args(&["q", "--limit", "100000"])).unwrap_err();
+        assert!(err.contains("must be between"), "got: {}", err);
+    }
+
+    #[test]
+    fn an_unknown_search_flag_is_rejected() {
+        let err = parse_search_args(&args(&["q", "--category", "work"])).unwrap_err();
+        assert!(err.contains("unknown flag"), "got: {}", err);
+    }
+
+    #[test]
+    fn search_with_no_query_is_rejected() {
+        let err = parse_search_args(&args(&["--json"])).unwrap_err();
+        assert!(err.contains("Usage"), "got: {}", err);
     }
 
     // ---------------------------------------------------------------------

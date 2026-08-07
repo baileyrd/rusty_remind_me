@@ -41,6 +41,57 @@ and dropping normalisation from `entity_id`. The first of them initially failed
 to apply at all — the substitution-count assertion caught the bad regex rather
 than letting a no-op masquerade as a verified guard.
 
+## 2026-08-07 — `add` and `search` stop eating their own flags
+
+### Fixed
+- **`add` takes `--category` and `--tags`; `search` takes `--limit` and
+  `--json`** (#216). Both subcommands did `args[2..].join(" ")`, so every
+  argument became the content or the query — flags included. `add "note"
+  --category engineering` stored the literal string
+  `"note --category engineering"` in category `general`, exited 0, and printed
+  a success line. `search "fact" --limit 1` returned exactly what no flag
+  returned, because the limit stayed hardcoded at 20 and `"--limit 1"` was part
+  of the query.
+- **Unknown flags are now rejected** rather than stored. This is the part that
+  made the bug invisible: `argparse` refuses an unrecognised flag, but a `join`
+  cannot, because every argument is valid text. The only way to see the failure
+  was to read the row back.
+- `--` ends flag parsing, so content that genuinely starts with dashes is still
+  expressible.
+
+### Changed
+- **`search` now prints Markdown by default, with `--json` opting in.**
+  Previously it always printed JSON. This matches the reference's `_cmd_search`
+  *and* this CLI's own `list`, which has defaulted to Markdown since #167 — the
+  two subcommands disagreed with each other in the same binary. **A script
+  piping `rusty-remind-me search` into a JSON parser needs `--json` added.**
+  The break is loud rather than silent: the output looks completely different
+  immediately.
+- Markdown search output deliberately drops the scores, because the reference
+  renders search hits through the same `_fmt_memories` it uses for `list`.
+  `--json` still carries the full result — score, per-signal components, and
+  all. Inventing a richer Markdown layout here would have been a divergence
+  introduced by the port rather than inherited from the reference.
+- `--limit` is bounded on `search` exactly as on `list`: out of range is an
+  error, not a silent clamp, so a caller who asked for 500 is told they cannot
+  have it rather than handed a short page.
+
+### Deliberately not matched
+The reference declares a single positional, so `add one two` is an error there.
+Here the words still join, which is what this CLI already did and what unquoted
+shell input produces. A superset, kept so working invocations keep working.
+
+### Verified
+Against stored rows, not exit codes — the old bug exited 0. `add "written by
+the rust port" --category engineering --tags work,important` now stores exactly
+that content, in `engineering`, with both tags; `search --limit 1 --json`
+returns one result; an unknown flag on either subcommand exits 1.
+
+Five sabotages each fail the suite (exit 101): restoring the pre-fix `join` on
+`add`, re-hardcoding `search`'s limit, accepting unknown flags as content,
+keeping blank tags, and defaulting `search` to JSON. Each asserted its own
+substitution count, so a regex matching nothing could not pass as a guard.
+
 ## 2026-08-07 — Both implementations can finally find the same database
 
 ### Changed
