@@ -214,10 +214,13 @@ pub fn dashboard(
 // Stats / vitality
 // ---------------------------------------------------------------------------
 
-/// `stats::collect`, shared with the MCP tool and resource — one
-/// implementation, so the dashboard and an LLM client see identical numbers.
+/// `stats::collect_dashboard` — the dashboard's own shape (`total`, `imports`,
+/// `tags`), not `remind_me_stats`'s. Using the wrong one here previously left
+/// the dashboard header, sidebar total, and "Unique Tags" card reading `0`
+/// via their JS `||0` fallbacks (`stats.total`/`stats.tags` were absent, not
+/// wrong), with nothing erroring to surface it.
 pub fn api_stats(conn: &Connection, _wiki: &Wiki, _req: &Request, _params: &Params) -> (u16, Body) {
-    match stats::collect(conn) {
+    match stats::collect_dashboard(conn) {
         Ok(s) => ok(s),
         Err(e) => internal_err(e),
     }

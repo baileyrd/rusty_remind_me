@@ -35,6 +35,34 @@ pub struct Stats {
     pub db_size_mb: f64,
 }
 
+/// Dashboard-facing statistics — `GET /api/stats`, matching the reference's
+/// own dashboard-only route (`api.py:531-562`), not `remind_me_stats`.
+///
+/// The reference itself uses two different response shapes for the same
+/// numbers depending on the caller: the MCP tool returns [`Stats`]'s
+/// `total_memories`/`total_imports`/`recent`, while its dashboard route
+/// returns `total`/`imports`/`tags` and omits `recent` entirely. This
+/// struct exists because the vendored dashboard JSX (`crates/remind_me_api`)
+/// reads the second shape — `stats.total` and `stats.tags` specifically —
+/// and a server that answers with [`Stats`] instead leaves every count in
+/// the dashboard's header, sidebar, and "Unique Tags" card reading `0` via
+/// its `||0` fallbacks, silently, with no error to notice.
+///
+/// `tags` is alphabetical here (via `BTreeMap`), same as `categories` and
+/// `sources` above — the dashboard's own "Top Tags" chart re-sorts by count
+/// client-side (`App.jsx`: `Object.entries(stats.tags).sort((a,b)=>b[1]-a[1])`),
+/// so wire order is not load-bearing for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardStats {
+    pub total: i64,
+    pub imports: i64,
+    pub categories: BTreeMap<String, i64>,
+    pub sources: BTreeMap<String, i64>,
+    pub tags: BTreeMap<String, i64>,
+    pub db_path: String,
+    pub db_size_mb: f64,
+}
+
 /// How many recent memories the reference includes.
 const RECENT_LIMIT: usize = 5;
 
@@ -115,6 +143,52 @@ pub fn collect(conn: &Connection) -> Result<Stats> {
         db_path: db_path(conn)?,
         db_size_mb: db_size_mb(conn)?,
     })
+}
+
+/// Collect statistics in the dashboard's own shape ([`DashboardStats`]),
+/// not the MCP tool's ([`Stats`]) — see that struct's doc for why the two
+/// differ. Reuses [`count_by`]/[`db_path`]/[`db_size_mb`] rather than
+/// re-deriving them, so the counts cannot disagree with [`collect`]'s.
+pub fn collect_dashboard(conn: &Connection) -> Result<DashboardStats> {
+    let total: i64 = conn.query_row(
+        "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let imports: i64 = conn.query_row("SELECT count(*) FROM chat_imports", [], |r| r.get(0))?;
+
+    Ok(DashboardStats {
+        total,
+        imports,
+        categories: count_by(conn, "category")?,
+        sources: count_by(conn, "source")?,
+        tags: tag_counts(conn)?,
+        db_path: db_path(conn)?,
+        db_size_mb: db_size_mb(conn)?,
+    })
+}
+
+/// Tag -> live-memory count, via the normalized `memory_tags` index rather
+/// than parsing every row's JSON `tags` column (the reference's own
+/// approach) — `memory_tags` is kept in step with that column by the
+/// `memories_tags_ai`/`_au`/`_ad` triggers (`db/queries.rs`'s `list_filters`
+/// doc), so the two cannot drift, and this avoids a per-row `json_each` scan.
+fn tag_counts(conn: &Connection) -> Result<BTreeMap<String, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT mt.tag, count(*) FROM memory_tags mt
+         JOIN memories m ON m.id = mt.memory_id
+         WHERE m.deleted_at IS NULL
+         GROUP BY mt.tag",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        let (tag, count) = row?;
+        counts.insert(tag, count);
+    }
+    Ok(counts)
 }
 
 /// Render the stats snapshot the way the reference's `remind_me_stats`
