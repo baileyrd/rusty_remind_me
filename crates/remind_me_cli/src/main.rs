@@ -598,7 +598,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let port: u16 = port_arg.parse().map_err(|_| {
                     format!("invalid port {:?}; expected a number 0-65535", port_arg)
                 })?;
-                let host = "127.0.0.1";
+                // Optional third argv, matching the reference's `--ui-host`
+                // (default 127.0.0.1) -- the reference's `--serve-ui` binds
+                // loopback unless told otherwise, and a deployment reaching
+                // this server from another host (a Tailscale IP, a LAN
+                // interface) needs the same escape hatch. `port` stayed
+                // argv-only for the same reason `main`'s own comment above
+                // draws the line between "api" (argv) and "server"/"remote"
+                // (env) -- adding host as a second positional keeps that
+                // convention rather than introducing a new env var for one
+                // flag.
+                let host = args
+                    .get(3)
+                    .cloned()
+                    .unwrap_or_else(|| "127.0.0.1".to_string());
                 let addr = format!("{}:{}", host, port);
 
                 // #90: refuse a double start for the same DB, matching the
@@ -632,7 +645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         std::process::exit(1);
                     }
-                    remind_me_core::pid::write_pid_file(path, host, port)?;
+                    remind_me_core::pid::write_pid_file(path, &host, port)?;
                 }
 
                 let scheduler = remind_me_core::scheduler::start_scheduler_for(&db.conn());
