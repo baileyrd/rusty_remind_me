@@ -34,6 +34,51 @@ not the exception: this is the second and third time a live run found what
 two prior revisions of this document, reading, did not (see "Drop-in verified
 against a live database, 2026-08-07" below for the first).
 
+**2026-08-08, later the same day: the dashboard and remote connector went
+live too.** Following up on the "no dashboard" mistake a few paragraphs
+above (#233, corrected in the "Standing state" section below) with an actual
+production cutover — not another read — found two more real gaps and closed
+both, then finished the switch: `remind-me-hub`, this machine's stdio MCP
+client, the dashboard, and the claude.ai remote connector are now all served
+by `rusty_remind_me`. Only Postgres (unchanged — same engine, new app layer
+only) and this machine's already-running stdio sessions (pick up the switch
+on their next restart, not mid-session) are still what they were.
+
+- `GET /api/stats` answered with `remind_me_stats`'s MCP-tool shape
+  (`total_memories`/`total_imports`, no `tags`) instead of the reference's
+  own dashboard-specific shape (`total`/`imports`/`tags`, `api.py:531-562`)
+  — two different response shapes in the reference itself, conflated into
+  one here. The vendored JSX reads `stats.total`/`stats.tags` with a `||0`
+  fallback, so the wrong field names failed by rendering every count as zero
+  rather than by erroring. Closed in
+  [#234](https://github.com/baileyrd/rusty_remind_me/pull/234), found by
+  actually loading the dashboard in a browser against a copy of the real
+  337MB production database before deploying it — the same method, applied
+  one route earlier than last time.
+- `rusty-remind-me api <port>` had no equivalent to the reference's
+  `--ui-host`: the bind host was a hard-coded `127.0.0.1`, with no way to
+  reach a Tailscale IP or any other non-loopback interface — exactly what
+  this production dashboard needed, tunnelled publicly from
+  `100.83.168.90:5199`. Not degraded, unreachable. Closed in
+  [#235](https://github.com/baileyrd/rusty_remind_me/pull/235): an optional
+  second positional argument, `rusty-remind-me api <port> [host]`, matching
+  how this subcommand already takes its config from argv rather than the
+  environment.
+- The two connector path divergences logged earlier today (`~/.remind_me`
+  vs `~/.remind-me` for the token file and OAuth state file) were exercised
+  for real, not just documented: `REMIND_ME_REMOTE_TOKEN_FILE` and
+  `REMIND_ME_REMOTE_OAUTH_STATE_FILE` pointed at the reference's real paths,
+  then verified against production — a real registered claude.ai OAuth
+  client from the live `oauth.json` (4 registered, 475 issued access tokens)
+  authorized correctly (`302`, not `invalid_client`), a bogus client id was
+  rejected, the real legacy bearer token from the live `connector_token`
+  authenticated (`200`), and a wrong one didn't (`401`). Rehearsed first
+  against copies with distinct inodes from the live files, confirmed via
+  `lsof` before ever pointing at the real paths — the previous rehearsal in
+  this same session skipped that discipline and triggered an unplanned
+  schema migration on the live database (harmless, data-only, auto-backed
+  up, but avoidable).
+
 ---
 
 ## Headline: surface parity holds — and surface was never the whole claim
