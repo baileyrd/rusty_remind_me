@@ -31,6 +31,15 @@
 
 set -euo pipefail
 
+# A `cd` builtin echoes the resolved directory to stdout whenever CDPATH is
+# set and the target isn't found relative to `.` first — invisible in a
+# terminal, but fatal here: `repo_root="$(cd ... && pwd)"` below then
+# captures two lines and every path built from it silently gains a leading
+# `$CDPATH_HIT\n`, so `[[ -f "$file" ]]` reports a real file as missing. Unset
+# it before the first `cd`, not after: by the time symptoms show up the
+# variable has already done its damage.
+unset CDPATH
+
 REFERENCE_REPO="https://github.com/baileyrd/remind_me.git"
 PORT_FILE="crates/remind_me_core/src/db/migrations.rs"
 REFERENCE_FILE="remind_me_mcp/db.py"

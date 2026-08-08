@@ -198,6 +198,24 @@ pub fn render_memories_markdown(memories: &[Memory]) -> String {
         .join("\n---\n")
 }
 
+/// Render a `remind_me_list` page the way the reference's `_fmt_memories`
+/// does when it is given a `total`: a `**Showing N of M memories**` header
+/// ahead of the same per-memory rendering, joined by the same `\n---\n`
+/// separator. `remind_me_list_reminders` calls `_fmt_memories` *without* a
+/// `total` (reminders.py:116), which is why it stays on
+/// `render_memories_markdown` alone rather than sharing this wrapper — only
+/// `remind_me_list` (crud.py:189-196) passes one.
+pub fn render_memory_page_markdown(memories: &[Memory], total: usize) -> String {
+    if memories.is_empty() {
+        return "_No memories found._".to_string();
+    }
+    let header = format!("**Showing {} of {} memories**\n", memories.len(), total);
+    std::iter::once(header)
+        .chain(memories.iter().map(render_memory_markdown))
+        .collect::<Vec<_>>()
+        .join("\n---\n")
+}
+
 fn render_memory_markdown(m: &Memory) -> String {
     let tags = if m.tags.is_empty() {
         "none".to_string()
