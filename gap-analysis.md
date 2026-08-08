@@ -447,14 +447,18 @@ they are not re-discovered as novel:
 - `remind_me_search` in the MCP dispatch layer always returns JSON and ignores
   `response_format` entirely, unlike the twelve tools fixed in #211. The
   reference honours it there and defaults to Markdown.
-- **No dashboard.** `remind_me_mcp --serve-ui` (a Starlette app plus the React
-  dashboard at `dashboard/App.jsx`) has no Rust counterpart anywhere in the
-  workspace — not degraded, not partial, absent. There is no `ui`/`dashboard`
-  subcommand on `rusty-remind-me` and no dashboard-serving crate. Noticed
-  switching a real deployment over (2026-08-08): the hub, the stdio server, and
-  the REST API each have a direct Rust counterpart the switch could move to,
-  and the dashboard does not, so a full-stack cutover permanently drops it
-  unless something is built to replace it. Left running on the reference.
+- **Correction, same day: there is a dashboard.** The bullet this replaced
+  (committed in #233) claimed `rusty-remind-me` has no counterpart to
+  `--serve-ui` anywhere in the workspace. Wrong. `crates/remind_me_api`
+  serves one: `dashboard/App.jsx` vendored verbatim from the reference,
+  `GET /` wired into the same `ROUTES` table as the 25 `/api/*` routes the
+  headline table above already counted, live since 2026-07-30 (ADR-0008,
+  issue #78). The error was checking only `rusty-remind-me --help`'s
+  subcommand list — the stdio CLI binary — and never looking at the separate
+  REST API server (`rusty-remind-me api [port]`) the dashboard actually runs
+  under. Left standing here as the record of the mistake rather than
+  scrubbed, matching this document's own convention of correcting itself in
+  place (see the 2026-08-05 corrections above).
 - **The remote connector's token and OAuth state file defaults silently
   diverge from the reference's.** `resolve_connector_token`'s default
   (`remote.rs:127`, `default_token_file`) is `~/.remind_me/connector_token`

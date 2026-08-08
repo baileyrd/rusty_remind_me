@@ -24,7 +24,13 @@ fn stats_on_an_empty_store() {
     let (server, root) = server("stats-empty");
     let response = get(&server, "/api/stats");
     assert_eq!(response.status, 200);
-    assert_eq!(response.json()["total_memories"], 0);
+    // `total`, not `total_memories` -- the dashboard's own shape
+    // (`api.py:531-562`), distinct from `remind_me_stats`'s. The vendored
+    // JSX reads `stats.total`/`stats.tags` with a `||0` fallback, so the
+    // wrong field name here previously passed silently while the dashboard
+    // rendered every count as zero.
+    assert_eq!(response.json()["total"], 0);
+    assert_eq!(response.json()["tags"], json!({}));
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -35,7 +41,7 @@ fn stats_reflects_what_was_added() {
         &server,
         "POST",
         "/api/memories",
-        &json!({ "content": "counted" }).to_string(),
+        &json!({ "content": "counted", "tags": ["quokka"] }).to_string(),
     );
 
     let response = call(
@@ -46,7 +52,8 @@ fn stats_reflects_what_was_added() {
         None,
         "",
     );
-    assert_eq!(response.json()["total_memories"], 1);
+    assert_eq!(response.json()["total"], 1);
+    assert_eq!(response.json()["tags"]["quokka"], 1);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
