@@ -1,209 +1,263 @@
-//! `response_format` on the twelve tools that were JSON-only (#206).
+//! Every tool's default output format, and the per-call override (#224).
 //!
-//! The reference returns Markdown from these and offers no JSON; this port
-//! returned JSON and offered no Markdown. Both were half a surface. Markdown is
-//! now opt-in with **JSON as the default**, so no existing caller changes
-//! behaviour and the capability gap closes.
+//! # Why this drives the server rather than the dispatch arms
 //!
-//! Every case drives the real JSON-RPC dispatch rather than calling a renderer
-//! directly: a renderer that is never reached from `tools/call` would satisfy a
-//! unit test and change nothing a client can see.
+//! The bug this file exists for was not a missing branch that a unit test would
+//! have caught. `MemorySearchInput` and `MemoryListInput` *already* carried
+//! `response_format`, already defaulting to Markdown exactly as the reference
+//! does — the value was parsed correctly and then discarded when the arm
+//! serialized JSON regardless. Reading either the struct or the input model
+//! showed a correct default. Only the returned text showed the truth.
+//!
+//! So everything here goes through `handle_request` and asserts on the text a
+//! caller actually receives.
+//!
+//! # Why the expected defaults are per-tool
+//!
+//! There is no single right default, and the temptation to impose one is what
+//! #225 got wrong before being closed as not-a-bug. Two populations:
+//!
+//! - Tools mirroring a `remind_me` input model take **that model's** default.
+//!   The reference sets MARKDOWN on seven of its eight and JSON on
+//!   `VitalityReportInput`.
+//! - The twelve tools from #211 take **JSON**, because the reference has no
+//!   `response_format` for them at all — it returns Markdown and offers no
+//!   JSON, so the parameter is a pure addition here and JSON keeps this port's
+//!   existing callers working (#206).
 
-use remind_me_core::{Database, MemoryAddInput};
 use remind_me_mcp::McpServer;
-use serde_json::{json, Value};
+use serde_json::json;
 
-/// Every tool this issue covers, with arguments good enough to reach a
-/// success path.
+/// A server whose wiki is a directory this test owns.
 ///
-/// `remind_me_history` is deliberately absent: it already offered both formats
-/// and already defaulted to Markdown, so giving it a JSON default would be the
-/// one regression in a change that is otherwise a pure addition.
-fn cases(seed: &str) -> Vec<(&'static str, Value)> {
-    vec![
-        ("remind_me_add", json!({"content": "a new fact"})),
-        (
-            "remind_me_update",
-            json!({"memory_id": seed, "content": "revised"}),
-        ),
-        (
-            "remind_me_set_reminder",
-            json!({"memory_id": seed, "remind_at": "2030-01-01T00:00:00+00:00"}),
-        ),
-        (
-            "remind_me_save_search",
-            json!({"name": "s1", "query": "Boston"}),
-        ),
-        ("remind_me_list_saved_searches", json!({})),
-        ("remind_me_server_status", json!({})),
-        ("remind_me_check_update", json!({})),
-        ("remind_me_reindex", json!({})),
-        (
-            "remind_me_auto_capture",
-            json!({"conversation": "a: hi", "summary": "a greeting"}),
-        ),
-        ("remind_me_wiki_compile", json!({})),
-    ]
+/// `McpServer::new` uses `Wiki::from_env()`, and `list_pages` *reconciles from
+/// the filesystem* before reading the index — so an in-memory database is not
+/// isolation. A server built with `new` picks up whatever pages happen to be in
+/// the shared wiki root, which made the empty-wiki assertion below pass or fail
+/// depending on what else had ever run on the machine.
+fn server() -> McpServer {
+    let dir = std::env::temp_dir().join(format!(
+        "rrm-fmt-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch wiki dir");
+    McpServer::with_wiki(
+        remind_me_core::Database::open_in_memory().unwrap(),
+        remind_me_core::wiki_fs::Wiki::new(dir),
+    )
 }
 
-fn server() -> (McpServer, String) {
-    let db = Database::open_in_memory().unwrap();
-    let id = {
-        let conn = db.conn();
-        remind_me_core::db::queries::add_memory(
-            &conn,
-            MemoryAddInput {
-                content: "seed memory about Boston".into(),
-                category: "general".into(),
-                tags: vec![],
-                source: "manual".into(),
-                metadata: json!({}),
-                subject: None,
-                predicate: None,
-                object: None,
-                entities: vec![],
-                sensitive: false,
-            },
-        )
-        .unwrap()
-        .id
-    };
-    (McpServer::new(db), id)
-}
-
-fn call(server: &McpServer, name: &str, args: Value) -> String {
-    let req = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": name, "arguments": args }
-    });
-    let res = server.handle_request(&req.to_string()).unwrap();
-    res["result"]["content"][0]["text"]
+fn call(s: &McpServer, tool: &str, args: serde_json::Value) -> String {
+    let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                     "params":{"name":tool,"arguments":args}})
+    .to_string();
+    let r = s.handle_request(&req).expect("the server should answer");
+    r["result"]["content"][0]["text"]
         .as_str()
-        .unwrap_or("")
+        .unwrap_or_default()
         .to_string()
 }
 
+/// JSON responses are serialized objects or arrays; Markdown never is.
 fn is_json(text: &str) -> bool {
-    serde_json::from_str::<Value>(text).is_ok()
+    let t = text.trim_start();
+    t.starts_with('{') || t.starts_with('[')
 }
 
-#[test]
-fn json_is_the_default_for_every_tool_that_had_no_choice() {
-    // The compatibility half. These twelve emitted JSON before this change and
-    // must still emit JSON when nothing is asked for, or every existing caller
-    // breaks.
-    for (name, args) in cases("placeholder") {
-        let (srv, seed) = server();
-        let args = if args.get("memory_id").is_some() {
-            json!({"memory_id": seed, "content": "revised", "remind_at": "2030-01-01T00:00:00+00:00"})
-        } else {
-            args
-        };
-        let text = call(&srv, name, args);
-        assert!(
-            is_json(&text),
-            "{name} must default to JSON, got: {}",
-            text.chars().take(120).collect::<String>()
-        );
+fn seed(s: &McpServer) {
+    call(
+        s,
+        "remind_me_add",
+        json!({"content": "alpha beta gamma", "category": "general"}),
+    );
+}
+
+/// The four tools that mirror a reference model, with the reference's own
+/// default for each. Deliberately written as reference facts with a file
+/// reference, so changing one means restating what `remind_me` does.
+const MIRRORED: [(&str, &str, bool); 4] = [
+    // (tool, reference model & line, reference default is markdown)
+    ("remind_me_search", "MemorySearchInput, models.py:199", true),
+    ("remind_me_list", "MemoryListInput, models.py:365", true),
+    ("remind_me_wiki_list", "WikiListInput, models.py:1547", true),
+    (
+        "remind_me_vitality_report",
+        "VitalityReportInput, models.py:1653",
+        false,
+    ),
+];
+
+fn args_for(tool: &str) -> serde_json::Value {
+    match tool {
+        "remind_me_search" => json!({"query": "alpha"}),
+        _ => json!({}),
     }
 }
 
+// ---------------------------------------------------------------------------
+// Defaults match the reference, per tool
+// ---------------------------------------------------------------------------
+
 #[test]
-fn markdown_is_reachable_for_every_tool() {
-    // The capability half. Asking for Markdown must produce something that is
-    // *not* JSON — otherwise the parameter is decorative.
-    for (name, args) in cases("placeholder") {
-        let (srv, seed) = server();
-        let mut args = if args.get("memory_id").is_some() {
-            json!({"memory_id": seed, "content": "revised", "remind_at": "2030-01-01T00:00:00+00:00"})
-        } else {
-            args
-        };
-        args.as_object_mut()
-            .unwrap()
-            .insert("response_format".into(), json!("markdown"));
-        let text = call(&srv, name, args);
-        assert!(!text.is_empty(), "{name} returned nothing for markdown");
-        assert!(
+fn each_mirrored_tool_defaults_to_what_the_reference_defaults_to() {
+    let s = server();
+    seed(&s);
+    for (tool, reference, markdown_default) in MIRRORED {
+        let text = call(&s, tool, args_for(tool));
+        assert_eq!(
             !is_json(&text),
-            "{name} still returned JSON when markdown was asked for: {}",
+            markdown_default,
+            "{tool} default disagrees with {reference}; got: {}",
             text.chars().take(120).collect::<String>()
         );
     }
 }
 
 #[test]
-fn add_renders_the_reference_s_confirmation_line() {
-    // Pinned against the reference's actual wording:
-    //   "✓ Memory stored with id `a0563f…` in category 'general'."
-    let (srv, _) = server();
-    let text = call(
-        &srv,
-        "remind_me_add",
-        json!({"content": "a fact", "response_format": "markdown"}),
-    );
-    assert!(text.starts_with("✓ Memory stored with id"), "got: {text}");
-    assert!(text.contains("in category 'general'"), "got: {text}");
+fn an_explicit_format_is_honoured_in_both_directions() {
+    // The precise shape of the bug: the parameter deserialized fine and was
+    // then dropped, so a markdown request returned a *successful* JSON body.
+    // Asserting both directions means neither can be satisfied by hardcoding.
+    let s = server();
+    seed(&s);
+    for (tool, _, _) in MIRRORED {
+        let mut as_json = args_for(tool);
+        as_json["response_format"] = json!("json");
+        assert!(
+            is_json(&call(&s, tool, as_json)),
+            "{tool} ignored an explicit json request"
+        );
+
+        let mut as_md = args_for(tool);
+        as_md["response_format"] = json!("markdown");
+        assert!(
+            !is_json(&call(&s, tool, as_md)),
+            "{tool} ignored an explicit markdown request"
+        );
+    }
 }
 
 #[test]
-fn an_unknown_format_falls_back_to_json_rather_than_failing() {
-    // A caller typo should still return their data. Erroring would turn a
-    // cosmetic mistake into a failed call.
-    let (srv, _) = server();
-    let text = call(
-        &srv,
-        "remind_me_add",
-        json!({"content": "a fact", "response_format": "yaml"}),
-    );
-    assert!(is_json(&text), "got: {text}");
+fn an_unknown_format_falls_back_to_the_tools_default_rather_than_erroring() {
+    let s = server();
+    seed(&s);
+    for (tool, _, markdown_default) in MIRRORED {
+        let mut args = args_for(tool);
+        args["response_format"] = json!("yaml");
+        let text = call(&s, tool, args);
+        assert!(!text.is_empty(), "{tool} returned nothing for a bad format");
+        assert_eq!(
+            !is_json(&text),
+            markdown_default,
+            "{tool} should fall back to its own default, not a global one"
+        );
+    }
 }
 
 #[test]
-fn every_covered_tool_advertises_the_parameter() {
-    // A format a client cannot discover is a format nobody uses.
-    let (srv, _) = server();
-    let listed = srv
+fn the_four_schemas_advertise_the_parameter() {
+    // Previously none did — a caller reading `tools/list` had no way to learn
+    // the parameter existed. Extracted per tool from the listing rather than
+    // grepped from source: an unbounded grep runs into the *next* tool's
+    // properties and reports the wrong answer, which is a mistake this issue
+    // already made once.
+    let s = server();
+    let listed = s
         .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string())
         .unwrap();
     let tools = listed["result"]["tools"].as_array().unwrap();
-
-    for name in [
-        "remind_me_add",
-        "remind_me_update",
-        "remind_me_revert",
-        "remind_me_set_reminder",
-        "remind_me_save_search",
-        "remind_me_list_saved_searches",
-        "remind_me_server_status",
-        "remind_me_check_update",
-        "remind_me_reindex",
-        "remind_me_auto_capture",
-        "remind_me_wiki_compile",
-        "remind_me_wiki_read",
-    ] {
-        let tool = tools
+    for (tool, _, markdown_default) in MIRRORED {
+        let entry = tools
             .iter()
-            .find(|t| t["name"] == name)
-            .unwrap_or_else(|| panic!("{name} is not registered"));
-        let prop = &tool["inputSchema"]["properties"]["response_format"];
-        assert!(!prop.is_null(), "{name} does not advertise response_format");
+            .find(|t| t["name"] == tool)
+            .unwrap_or_else(|| panic!("{tool} missing from tools/list"));
+        let prop = &entry["inputSchema"]["properties"]["response_format"];
+        assert!(!prop.is_null(), "{tool} does not advertise response_format");
+        // The advertised default has to agree with the behaviour above, or the
+        // schema documents a tool that does not exist.
         assert_eq!(
-            prop["default"], "json",
-            "{name} must advertise json as the default"
+            prop["default"],
+            if markdown_default { "markdown" } else { "json" },
+            "{tool} advertises a default it does not honour"
         );
     }
 }
 
+// ---------------------------------------------------------------------------
+// The #211 population keeps its JSON default
+// ---------------------------------------------------------------------------
+
 #[test]
-fn history_keeps_its_markdown_default() {
-    // The deliberate exception. It already offered both, already defaulted to
-    // Markdown, and flipping it would be the only regression in this change.
-    let (srv, seed) = server();
-    let text = call(&srv, "remind_me_history", json!({"memory_id": seed}));
-    assert!(
-        !is_json(&text),
-        "remind_me_history must keep defaulting to markdown, got JSON: {}",
-        text.chars().take(120).collect::<String>()
+fn the_additive_tools_still_default_to_json() {
+    // #206's decision, and the reason this file's expectations are per-tool
+    // rather than global. The reference offers no JSON for these at all, so
+    // JSON here is a pure addition and flipping it would break every existing
+    // caller of this port to imitate a limitation.
+    let s = server();
+    for tool in [
+        "remind_me_check_update",
+        "remind_me_reindex",
+        "remind_me_server_status",
+    ] {
+        let text = call(&s, tool, json!({}));
+        assert!(
+            is_json(&text),
+            "{tool} should still default to json; got: {}",
+            text.chars().take(80).collect::<String>()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The renderings themselves
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_empty_wiki_says_how_to_populate_it() {
+    // Verbatim from the reference (tools/wiki.py:129). An empty index is far
+    // more often "nothing synthesised yet" than "nothing to synthesise", and
+    // the message is what tells them apart.
+    let s = server();
+    let text = call(&s, "remind_me_wiki_list", json!({}));
+    assert!(text.contains("The wiki is empty"), "got: {text}");
+    assert!(text.contains("remind_me_wiki_compile"), "got: {text}");
+}
+
+#[test]
+fn search_markdown_carries_the_budget_envelope() {
+    // The trimming envelope (#200) is the part a caller cannot recover from
+    // the rendered memories: a response cut in half otherwise looks complete.
+    let s = server();
+    seed(&s);
+    let text = call(
+        &s,
+        "remind_me_search",
+        json!({"query": "alpha", "response_format": "markdown"}),
     );
+    assert!(text.contains("results"), "no result count in: {text}");
+    assert!(text.contains("tokens"), "no budget line in: {text}");
+    assert!(text.contains("alpha beta gamma"), "no content in: {text}");
+}
+
+#[test]
+fn vitality_markdown_formats_the_average_to_two_places() {
+    // `:.2f` in the reference. Rust's default float formatting would print
+    // something like 0.8333333333333334 here.
+    let s = server();
+    seed(&s);
+    let text = call(
+        &s,
+        "remind_me_vitality_report",
+        json!({"response_format": "markdown"}),
+    );
+    assert!(text.contains("## Vault Vitality Report"), "got: {text}");
+    let avg = text
+        .lines()
+        .find(|l| l.starts_with("**Average vitality:**"))
+        .unwrap_or_else(|| panic!("no average line in: {text}"));
+    let value = avg.trim_start_matches("**Average vitality:**").trim();
+    let decimals = value.split_once('.').map(|(_, d)| d.len()).unwrap_or(0);
+    assert_eq!(decimals, 2, "expected two decimal places, got {value:?}");
 }

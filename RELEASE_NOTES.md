@@ -2,6 +2,64 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-08 — Four tools stop ignoring `response_format`
+
+### Fixed
+- **`remind_me_search` and `remind_me_list` honour `response_format`** (#224).
+  Both input models already carried the field, already defaulting to Markdown
+  exactly as the reference's do — the value was parsed correctly and then
+  discarded when the dispatch serialized JSON regardless. A caller passing
+  `{"response_format": "markdown"}` got a *successful* JSON response.
+- **`remind_me_wiki_list` and `remind_me_vitality_report` gained the parameter**,
+  which they had no way to express at all.
+- All four now advertise `response_format` in their `tools/list` schema. None
+  did before, so a caller reading the schema had no way to learn it existed.
+
+### Changed
+- **Default output is now Markdown for `search`, `list` and `wiki_list`**,
+  matching `MemorySearchInput`, `MemoryListInput` and `WikiListInput` in the
+  reference. **This changes what existing callers of those three receive** —
+  same class of break as #220's CLI `search` change, and equally loud. Pass
+  `"response_format": "json"` to keep the old output.
+- `remind_me_vitality_report` still defaults to JSON, because
+  `VitalityReportInput` is the one reference model that does. Its default was
+  already right, by absence rather than intent; Markdown was simply
+  unreachable.
+
+### Not changed
+- **The twelve tools from #211 keep their JSON default.** The reference has no
+  `response_format` for those at all — it returns Markdown and offers no JSON —
+  so the parameter is a pure addition here and JSON keeps every existing caller
+  working (#206). There is no single global default and there should not be:
+  tools mirroring a reference model take that model's default, additive tools
+  take JSON.
+
+### Corrected
+This started as #225, filed claiming that four tools defaulting to Markdown
+were an accident of the enum's `#[default]` and should be flipped to JSON.
+They were not an accident — `stats`, `history`, `digest` and `list_reminders`
+are the tools that were ported *faithfully*, and flipping them would have
+introduced the divergence the issue thought it was removing. `HistoryInput`
+even carries a comment saying so. #225 is closed as not-a-bug with the full
+per-model mapping; #224 was widened to the tools that are genuinely wrong.
+
+Observation established what the port did; only the reference could establish
+what it should do.
+
+### Verified
+Driven through `handle_request` rather than by reading dispatch arms — the bug
+was invisible in both the input model and the struct definition, and only the
+returned text showed it. Five sabotages each fail the suite (exit 101):
+restoring the pre-fix drop on `search` and on `list`, flipping `wiki_list` to
+JSON, flipping `vitality_report` to Markdown, and forcing unknown format values
+to a global JSON instead of the tool's own default.
+
+The Markdown rendering of `search` is deliberately **less** than the
+reference's: the per-hit method badge, `distance`, the `_Tiers: …_` footer and
+the `verbose` rank line all need search-pipeline signals this port does not
+track. The renderer says so at its definition rather than inventing substitutes
+that would look right and mean something else.
+
 ## 2026-08-07 — The gap analysis catches up, and admits what it missed
 
 ### Changed
