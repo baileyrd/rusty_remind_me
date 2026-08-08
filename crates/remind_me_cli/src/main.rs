@@ -608,7 +608,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // (env) -- adding host as a second positional keeps that
                 // convention rather than introducing a new env var for one
                 // flag.
-                let host = args.get(3).cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+                let host = args
+                    .get(3)
+                    .cloned()
+                    .unwrap_or_else(|| "127.0.0.1".to_string());
                 let addr = format!("{}:{}", host, port);
 
                 // #90: refuse a double start for the same DB, matching the
