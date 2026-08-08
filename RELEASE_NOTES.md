@@ -2,6 +2,49 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-07 — The gap analysis catches up, and admits what it missed
+
+### Changed
+- **`gap-analysis.md` refreshed** against target `68ae0a9` / reference
+  `f199a11`. Surface counts re-derived from both codebases rather than carried
+  forward, which corrected two of them: target-only tools are **2**, not 1
+  (`remind_me_entity_upsert` and `remind_me_wiki_import`), and the route
+  comparison needs care because `/api/reminders/{token}.ics` is served by prefix
+  dispatch and has no matching string literal — a naive diff reports it missing.
+- **The headline now carries its caveat.** "100%" in that table has always meant
+  names and paths, never responses. The document said "surface parity" on
+  2026-08-05 and was correct; the sweep that followed found ~40 divergent
+  response fields behind those same matching names. Two more instances are now
+  recorded alongside it: #167 closing a missing subcommand while leaving missing
+  flags, and a drop-in claim that was true for data and false for
+  configuration.
+- **New "Deliberate divergences" section.** Eight places the port knowingly
+  differs — `response_format` defaults, CLI `search` output, id format, vector
+  store, sync cursor advance, the hub's trailing-zero migration,
+  `estimated_tokens`, Unix sidecar teardown — each with its reason and ADR. They
+  were scattered across ADRs and release notes; nowhere did one list say
+  "parity does not mean identical, and here is exactly where".
+- **New "What is guarded, and what is only true" section.** The schema version
+  is checked per-PR and daily. Tool lists, route lists, response fields and CLI
+  flags are checked only when someone re-runs the analysis by hand — and all
+  three 2026-08-07 findings lived in that second category. That gap is larger
+  than any specific unported feature.
+- The C1 row records that it closed at the wrong boundary: scoped to a missing
+  *subcommand*, it left the missing *flags* on the two that already existed.
+
+### Method
+The section on the drop-in verification says plainly that none of the three
+findings came from reading either codebase — two prior revisions of this
+document did exactly that and missed all of them. Running the two
+implementations against one database found them in an afternoon.
+
+Two things noticed in passing are recorded rather than filed, so they are not
+re-discovered as novel: `MemoryListInput`'s derived `Default` yields `limit: 0`
+because the serde attribute only applies when deserializing; and
+`remind_me_search` in the MCP dispatch layer ignores `response_format`
+entirely, unlike the twelve tools fixed in #211. Both were re-verified against
+current `main` before being written down.
+
 ## 2026-08-07 — Two id formats in one database, now on purpose
 
 ### Added
