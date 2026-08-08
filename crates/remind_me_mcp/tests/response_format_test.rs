@@ -186,31 +186,6 @@ fn the_four_schemas_advertise_the_parameter() {
 }
 
 // ---------------------------------------------------------------------------
-// The #211 population keeps its JSON default
-// ---------------------------------------------------------------------------
-
-#[test]
-fn the_additive_tools_still_default_to_json() {
-    // #206's decision, and the reason this file's expectations are per-tool
-    // rather than global. The reference offers no JSON for these at all, so
-    // JSON here is a pure addition and flipping it would break every existing
-    // caller of this port to imitate a limitation.
-    let s = server();
-    for tool in [
-        "remind_me_check_update",
-        "remind_me_reindex",
-        "remind_me_server_status",
-    ] {
-        let text = call(&s, tool, json!({}));
-        assert!(
-            is_json(&text),
-            "{tool} should still default to json; got: {}",
-            text.chars().take(80).collect::<String>()
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The renderings themselves
 // ---------------------------------------------------------------------------
 
@@ -260,4 +235,128 @@ fn vitality_markdown_formats_the_average_to_two_places() {
     let value = avg.trim_start_matches("**Average vitality:**").trim();
     let decimals = value.split_once('.').map(|(_, d)| d.len()).unwrap_or(0);
     assert_eq!(decimals, 2, "expected two decimal places, got {value:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The global default switch (#226)
+//
+// `REMIND_ME_DEFAULT_RESPONSE_FORMAT` is process-global, so these run one at a
+// time and always restore what they found. Cargo runs a binary's tests on
+// several threads; without the lock they would pass or fail on scheduling.
+// ---------------------------------------------------------------------------
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_default_format<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var(remind_me_mcp::DEFAULT_FORMAT_ENV).ok();
+    match value {
+        Some(v) => std::env::set_var(remind_me_mcp::DEFAULT_FORMAT_ENV, v),
+        None => std::env::remove_var(remind_me_mcp::DEFAULT_FORMAT_ENV),
+    }
+    let out = f();
+    match previous {
+        Some(v) => std::env::set_var(remind_me_mcp::DEFAULT_FORMAT_ENV, v),
+        None => std::env::remove_var(remind_me_mcp::DEFAULT_FORMAT_ENV),
+    }
+    out
+}
+
+/// Three of the twelve tools from #211 — the population this switch moves.
+const ADDITIVE: [&str; 3] = [
+    "remind_me_check_update",
+    "remind_me_reindex",
+    "remind_me_server_status",
+];
+
+#[test]
+fn unset_leaves_every_byte_as_it_was() {
+    // The promise that makes this additive rather than a breaking change.
+    with_default_format(None, || {
+        let s = server();
+        for tool in ADDITIVE {
+            assert!(
+                is_json(&call(&s, tool, json!({}))),
+                "{tool} should still default to json when the variable is unset"
+            );
+        }
+    });
+}
+
+#[test]
+fn markdown_moves_the_additive_tools() {
+    with_default_format(Some("markdown"), || {
+        let s = server();
+        for tool in ADDITIVE {
+            let text = call(&s, tool, json!({}));
+            assert!(
+                !is_json(&text),
+                "{tool} should render markdown under the switch; got: {}",
+                text.chars().take(80).collect::<String>()
+            );
+        }
+    });
+}
+
+#[test]
+fn the_switch_does_not_touch_reference_mandated_defaults() {
+    // The subtle half. `vitality_report` mirrors `VitalityReportInput`, which
+    // the reference defaults to JSON. Making it render Markdown because
+    // somebody asked for "markdown defaults" would move this port *away* from
+    // the reference — the opposite of what the switch is for.
+    with_default_format(Some("markdown"), || {
+        let s = server();
+        assert!(
+            is_json(&call(&s, "remind_me_vitality_report", json!({}))),
+            "vitality_report must keep the reference's JSON default"
+        );
+        // And the Markdown-defaulting mirrors stay Markdown, unchanged.
+        seed(&s);
+        assert!(!is_json(&call(&s, "remind_me_list", json!({}))));
+    });
+}
+
+#[test]
+fn an_explicit_argument_still_beats_the_switch_in_both_directions() {
+    with_default_format(Some("markdown"), || {
+        let s = server();
+        assert!(
+            is_json(&call(
+                &s,
+                "remind_me_server_status",
+                json!({"response_format": "json"})
+            )),
+            "an explicit json request must win over a markdown default"
+        );
+    });
+    with_default_format(Some("json"), || {
+        let s = server();
+        assert!(
+            !is_json(&call(
+                &s,
+                "remind_me_server_status",
+                json!({"response_format": "markdown"})
+            )),
+            "an explicit markdown request must win over a json default"
+        );
+    });
+}
+
+#[test]
+fn a_typo_selects_json_rather_than_markdown() {
+    // Failing toward the documented default. A misspelling that silently
+    // enabled Markdown would change output for someone who thought they had
+    // configured nothing.
+    for bogus in ["markdwon", "md", "MARKDOWN ", "", "  "] {
+        with_default_format(Some(bogus), || {
+            let s = server();
+            let text = call(&s, "remind_me_server_status", json!({}));
+            let markdown_expected = bogus.trim().eq_ignore_ascii_case("markdown");
+            assert_eq!(
+                !is_json(&text),
+                markdown_expected,
+                "{bogus:?} resolved the wrong way"
+            );
+        });
+    }
 }

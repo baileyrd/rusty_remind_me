@@ -32,8 +32,54 @@ pub mod render;
 /// `remind_me_history`, `remind_me_list`, `remind_me_search` — keep parsing it
 /// there, with their existing defaults. This value is only consulted by arms
 /// that had no choice before.
+/// Selects the fallback format for the tools that have no reference-mandated
+/// one. `json` (the default) or `markdown`.
+pub const DEFAULT_FORMAT_ENV: &str = "REMIND_ME_DEFAULT_RESPONSE_FORMAT";
+
 fn requested_format(args: &serde_json::Value) -> ResponseFormat {
-    format_or(args, ResponseFormat::Json)
+    format_or(args, configured_default_format())
+}
+
+/// The configured fallback for the [`requested_format`] population.
+fn configured_default_format() -> ResponseFormat {
+    default_format_from(std::env::var(DEFAULT_FORMAT_ENV).ok().as_deref())
+}
+
+/// [`configured_default_format`] with the raw variable injected.
+///
+/// Separate so the parsing can be tested without `set_var`, which is
+/// process-global and races every other test in the binary.
+///
+/// # Why this moves twelve tools and not sixty-three
+///
+/// After #224 this port matches the reference's default for every tool that
+/// mirrors a reference input model — Markdown for `search`, `list`,
+/// `wiki_list`, `stats`, `history`, `digest` and `list_reminders`, JSON for
+/// `vitality_report`. Those defaults are *fixed by the reference* and this
+/// variable deliberately does not touch them: making `vitality_report` render
+/// Markdown because someone asked for "markdown defaults" would move the port
+/// away from the reference, which is the opposite of the point.
+///
+/// What remains is the twelve tools from #211, for which the reference has no
+/// `response_format` at all — it returns Markdown and offers no JSON. The port
+/// added the parameter as a pure addition and defaulted it to JSON so existing
+/// callers were unaffected (#206). That choice is right for this port's own
+/// callers and wrong for anyone substituting this binary into a client
+/// configured against `remind_me`, and one default cannot serve both.
+///
+/// So: unset leaves every byte as it is today; `markdown` makes those twelve
+/// match the reference, which is the last thing standing between this and a
+/// drop-in MCP server (#226).
+fn default_format_from(raw: Option<&str>) -> ResponseFormat {
+    match raw.map(str::trim) {
+        // Case-insensitive because this arrives from a shell or a JSON config
+        // by hand, where `Markdown` is at least as likely as `markdown`.
+        Some(v) if v.eq_ignore_ascii_case("markdown") => ResponseFormat::Markdown,
+        // Everything else -- unset, blank, `json`, or a typo -- is JSON. A
+        // misspelled value silently selecting Markdown would be a worse
+        // failure than one silently selecting the documented default.
+        _ => ResponseFormat::Json,
+    }
 }
 
 /// Read `response_format` from raw arguments, falling back to `default`.
