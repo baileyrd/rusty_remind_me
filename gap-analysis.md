@@ -9,6 +9,31 @@ That analysis is superseded in full: its entire gap table was worked to
 completion (issues #100–#122, PRs #123–#166), and every headline number it
 reported has moved.
 
+**2026-08-08 re-verification.** This document's headline table was derived by
+reading both codebases, and said so. A follow-up pass ran the two
+implementations against one shared database and one shared shell instead —
+the method the "What is guarded, and what is only true" section below already
+recommended — and found two things reading had missed, both closed in
+[#231](https://github.com/baileyrd/rusty_remind_me/pull/231):
+
+- `remind_me_list` / CLI `list`, Markdown format, was missing the
+  `**Showing N of M memories**` pagination header the reference's
+  `_fmt_memories` prepends when it's given a `total` (crud.py:189-196). The
+  shared `render_memories_markdown` was correct for
+  `remind_me_list_reminders`, which never passes a `total` — the gap was in
+  reusing that renderer for the one caller that needed the header too.
+- `scripts/check_schema_drift.sh` — the one drift check this document calls
+  "guarded automatically" — silently exited 2 ("could not determine") on any
+  machine with `CDPATH` set, because `cd` echoes its resolved directory to
+  stdout under `CDPATH`, corrupting the script's `repo_root` capture. It never
+  went red; it just stopped being able to compare. Re-run clean against true
+  `origin/main` afterward: 29/29, confirming the schema row below still holds.
+
+Neither changes the headline numbers. Both are recorded here as the pattern,
+not the exception: this is the second and third time a live run found what
+two prior revisions of this document, reading, did not (see "Drop-in verified
+against a live database, 2026-08-07" below for the first).
+
 ---
 
 ## Headline: surface parity holds — and surface was never the whole claim
