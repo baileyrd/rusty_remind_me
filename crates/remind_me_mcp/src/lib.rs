@@ -33,9 +33,31 @@ pub mod render;
 /// there, with their existing defaults. This value is only consulted by arms
 /// that had no choice before.
 fn requested_format(args: &serde_json::Value) -> ResponseFormat {
+    format_or(args, ResponseFormat::Json)
+}
+
+/// Read `response_format` from raw arguments, falling back to `default`.
+///
+/// The fallback is a parameter rather than a constant because the right default
+/// is per-tool, not global (#224). Two populations, and they disagree for good
+/// reasons:
+///
+/// - Tools that mirror a reference model take **that model's** default. The
+///   reference sets MARKDOWN on seven of its eight `response_format` fields and
+///   JSON on `VitalityReportInput`; matching per-tool is what makes an MCP
+///   client configured against `remind_me` behave the same way here.
+/// - The twelve tools from #211 take **JSON**, via [`requested_format`]. The
+///   reference has no `response_format` field for those at all — it returns
+///   Markdown and offers no JSON — so the parameter is a pure addition here and
+///   JSON keeps every existing caller of this port unaffected (#206).
+///
+/// An unrecognised value falls through to `default` rather than erroring, which
+/// is what `requested_format` has always done for unknown strings.
+fn format_or(args: &serde_json::Value, default: ResponseFormat) -> ResponseFormat {
     match args.get("response_format").and_then(|v| v.as_str()) {
         Some("markdown") => ResponseFormat::Markdown,
-        _ => ResponseFormat::Json,
+        Some("json") => ResponseFormat::Json,
+        _ => default,
     }
 }
 
@@ -391,6 +413,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown", "description": "markdown (default, as the reference) renders the memories; json returns the structured page." },
                                         "category": { "type": "string" },
                                         "tags": {
                                             "type": "array",
@@ -439,6 +462,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown", "description": "markdown (default, as the reference) renders the results; json returns the full envelope including scores." },
                                         "query": { "type": "string" },
                                         "limit": { "type": "integer", "default": 20 },
                                         "category": { "type": "string" },
@@ -971,6 +995,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default, as the reference) returns the structured report; markdown renders it for reading." },
                                         "response_format": {
                                             "type": "string",
                                             "enum": ["json", "markdown"],
@@ -1019,7 +1044,8 @@ impl McpServer {
                                 "description": "List every wiki page, most recently updated first.",
                                 "inputSchema": {
                                     "type": "object",
-                                    "properties": {}
+                                    "properties": {
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown", "description": "markdown (default, as the reference) renders the wiki index; json returns count and pages." },}
                                 }
                             },
                             {
@@ -1237,7 +1263,20 @@ impl McpServer {
                         match input {
                             Ok(list_input) => match queries::list_memories(&conn, &list_input) {
                                 Ok(page) => {
-                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&page).unwrap() }] })
+                                    // Same as search above: the field was
+                                    // parsed with the reference's Markdown
+                                    // default (models.py:365) and discarded.
+                                    let text = match list_input.response_format {
+                                        ResponseFormat::Json => {
+                                            serde_json::to_string_pretty(&page).unwrap()
+                                        }
+                                        ResponseFormat::Markdown => {
+                                            remind_me_core::reminders::render_memories_markdown(
+                                                &page.memories,
+                                            )
+                                        }
+                                    };
+                                    json!({ "content": [{ "type": "text", "text": text }] })
                                 }
                                 Err(e) => {
                                     json!({ "isError": true, "content": [{ "type": "text", "text": format!("List error: {}", e) }] })
@@ -1296,7 +1335,22 @@ impl McpServer {
                             Ok(search_input) => {
                                 match queries::search_with_expansions(&conn, &search_input) {
                                     Ok(res) => {
-                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&res).unwrap() }] })
+                                        // `MemorySearchInput` already carries
+                                        // `response_format`, already defaulting
+                                        // to Markdown like the reference's
+                                        // `MemorySearchInput` (models.py:199).
+                                        // The value was parsed and then thrown
+                                        // away here, so a markdown request got
+                                        // a successful JSON response (#224).
+                                        let text = match search_input.response_format {
+                                            ResponseFormat::Json => {
+                                                serde_json::to_string_pretty(&res).unwrap()
+                                            }
+                                            ResponseFormat::Markdown => {
+                                                render::search_response(&res)
+                                            }
+                                        };
+                                        json!({ "content": [{ "type": "text", "text": text }] })
                                     }
                                     Err(e) => {
                                         json!({ "isError": true, "content": [{ "type": "text", "text": format!("Search error: {}", e) }] })
@@ -2371,7 +2425,18 @@ impl McpServer {
                     }
                     "remind_me_vitality_report" => match vitality::build_vitality_report(&conn) {
                         Ok(report) => {
-                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                            // The one reference model that defaults to JSON
+                            // (`VitalityReportInput`, models.py:1653), so the
+                            // default here was already right -- by absence
+                            // rather than intent. Markdown was simply
+                            // unreachable; now it is opt-in, matching.
+                            let text = match format_or(&args, ResponseFormat::Json) {
+                                ResponseFormat::Json => {
+                                    serde_json::to_string_pretty(&report).unwrap()
+                                }
+                                ResponseFormat::Markdown => render::vitality_report(&report),
+                            };
+                            json!({ "content": [{ "type": "text", "text": text }] })
                         }
                         Err(e) => {
                             json!({ "isError": true, "content": [{ "type": "text", "text": format!("Vitality report error: {}", e) }] })
@@ -2445,8 +2510,19 @@ impl McpServer {
                     }
                     "remind_me_wiki_list" => match self.wiki.list_pages(&conn) {
                         Ok(pages) => {
-                            let body = json!({ "count": pages.len(), "pages": pages });
-                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap() }] })
+                            // The reference's `WikiListInput` defaults to
+                            // MARKDOWN (models.py:1547); this had no field at
+                            // all and always returned JSON. Read from raw args
+                            // rather than adding an input model, because that is
+                            // all this arm has ever taken.
+                            let text = match format_or(&args, ResponseFormat::Markdown) {
+                                ResponseFormat::Json => {
+                                    let body = json!({ "count": pages.len(), "pages": pages });
+                                    serde_json::to_string_pretty(&body).unwrap()
+                                }
+                                ResponseFormat::Markdown => render::wiki_page_list(&pages),
+                            };
+                            json!({ "content": [{ "type": "text", "text": text }] })
                         }
                         Err(e) => {
                             json!({ "isError": true, "content": [{ "type": "text", "text": format!("Wiki list error: {}", e) }] })
@@ -2660,7 +2736,15 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let listed = call(&server, "remind_me_list", json!({}));
+        // `json` is explicit now: `remind_me_list` defaults to Markdown,
+        // matching the reference's `MemoryListInput` (#224). This test is
+        // about the round trip, not the rendering, so it asks for the
+        // structured form rather than parsing prose.
+        let listed = call(
+            &server,
+            "remind_me_list",
+            json!({ "response_format": "json" }),
+        );
         let page: Value = serde_json::from_str(&text_of(&listed)).unwrap();
         assert_eq!(page["total"], 1);
         assert_eq!(page["memories"][0]["id"], id);
@@ -2684,7 +2768,11 @@ mod tests {
             deleted
         );
 
-        let after = call(&server, "remind_me_list", json!({}));
+        let after = call(
+            &server,
+            "remind_me_list",
+            json!({ "response_format": "json" }),
+        );
         assert_eq!(
             serde_json::from_str::<Value>(&text_of(&after)).unwrap()["total"],
             0
@@ -2966,7 +3054,13 @@ mod tests {
             json!({ "title": "VLAN Setup", "content": "body" }),
         );
 
-        let listed = call(&server, "remind_me_wiki_list", json!({}));
+        // Same as the crud round trip above: `remind_me_wiki_list` now
+        // defaults to Markdown like the reference's `WikiListInput`.
+        let listed = call(
+            &server,
+            "remind_me_wiki_list",
+            json!({ "response_format": "json" }),
+        );
         let page: Value = serde_json::from_str(&text_of(&listed)).unwrap();
         assert_eq!(page["count"], 1);
         assert_eq!(page["pages"][0]["slug"], "vlan-setup");
@@ -2983,7 +3077,11 @@ mod tests {
             deleted
         );
 
-        let after = call(&server, "remind_me_wiki_list", json!({}));
+        let after = call(
+            &server,
+            "remind_me_wiki_list",
+            json!({ "response_format": "json" }),
+        );
         assert_eq!(
             serde_json::from_str::<Value>(&text_of(&after)).unwrap()["count"],
             0

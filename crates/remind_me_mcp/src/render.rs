@@ -26,6 +26,7 @@
 //! already-computed response and formats it, so a rendering bug can misreport
 //! but cannot corrupt.
 
+use remind_me_core::expansion::{MemorySearchResponse, RelatedMemory};
 use remind_me_core::models::{
     CaptureResult, Memory, RevertOutcome, SavedSearch, SetReminderOutcome,
 };
@@ -250,4 +251,186 @@ pub fn server_status(report: &serde_json::Value) -> String {
         }
     ));
     out
+}
+
+// ---------------------------------------------------------------------------
+// Tools that mirror a reference model (#224)
+//
+// Unlike everything above, these are not additive. The reference already
+// returns Markdown from `remind_me_wiki_list` by default and offers JSON as the
+// opt-in; this port had it backwards. So these two renderings reproduce the
+// reference's layout rather than inventing one -- the text is what a model
+// reads, and a different shape is a different prompt.
+// ---------------------------------------------------------------------------
+
+/// The wiki index, as `tools/wiki.py:130-134` renders it.
+pub fn wiki_page_list(pages: &[WikiPage]) -> String {
+    if pages.is_empty() {
+        // Verbatim from the reference, pointer to `wiki_compile` included: an
+        // empty index is far more often "nothing synthesised yet" than "nothing
+        // to synthesise", and the message is what says which.
+        return "_The wiki is empty._ Synthesise pages from raw memories with \
+                `remind_me_wiki_compile`."
+            .to_string();
+    }
+    let mut lines = vec![format!("## Wiki — {} page(s)", pages.len()), String::new()];
+    for p in pages {
+        // `[[title]]` wikilinks, and the summary omitted entirely when blank
+        // rather than rendered as a trailing em dash with nothing after it.
+        let summary = if p.summary.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", p.summary)
+        };
+        lines.push(format!("- [[{}]]{}", p.title, summary));
+    }
+    lines.join("\n")
+}
+
+/// The vault vitality report, as `tools/lifecycle.py:69-90` renders it.
+pub fn vitality_report(report: &remind_me_core::vitality::VitalityReport) -> String {
+    let mut lines = vec![
+        "## Vault Vitality Report".to_string(),
+        String::new(),
+        format!("**Total memories:** {}", report.total_memories),
+        format!("**Active:** {}", report.active_count),
+        format!("**Dormant:** {}", report.dormant_count),
+        format!("**Vault health:** {}", report.vault_health_score),
+        // `:.2f` in the reference. Two places, not Rust's default float
+        // formatting, which would print `0.8333333333333334`.
+        format!("**Average vitality:** {:.2}", report.average_vitality),
+        String::new(),
+        "### Vitality Distribution".to_string(),
+        String::new(),
+    ];
+    for (label, count) in &report.vitality_buckets {
+        // The bar caps at 40 so one enormous bucket cannot produce a line
+        // thousands of characters wide -- the reference's `min(count, 40)`.
+        let bar = "#".repeat((*count).min(40));
+        lines.push(format!("  {label}: {bar} ({count})"));
+    }
+    lines.push(String::new());
+    lines.push("### Memory Type Distribution".to_string());
+    lines.push(String::new());
+    // `decay_distribution` is a BTreeMap, so iteration is already sorted --
+    // matching the reference's explicit `sorted(...)`.
+    for (kind, count) in &report.decay_distribution {
+        lines.push(format!("- **{kind}**: {count}"));
+    }
+    lines.join("\n")
+}
+
+/// A search response, as close to `tools/search.py:936-992` as this port's data
+/// allows.
+///
+/// # What is faithful, and what is missing
+///
+/// Reproduced exactly: the results themselves (`_fmt_memory_md`, via
+/// [`remind_me_core::reminders::render_memories_markdown`]), the budget line in
+/// both its trimmed and untrimmed forms, the `_No memories found._` empty case,
+/// the `\n---\n` joiner, and the three expansion sections.
+///
+/// **Deliberately absent, because this port does not track the inputs:**
+///
+/// - the per-hit method badge (`⚡ hybrid` / `🔮 semantic` / `🔤 keyword`) and
+///   `distance: N`, which need a per-result search-method tag,
+/// - the `_Tiers: N keyword, N semantic, N hybrid | N dormant excluded_`
+///   footer, which needs a tier breakdown and a dormant-exclusion count,
+/// - the `verbose` debug-signal line, which needs per-result rank positions.
+///
+/// None of those exist anywhere in `remind_me_core`. Adding them is search
+/// pipeline work rather than rendering work, so this deliberately renders less
+/// than the reference rather than inventing substitutes that would look right
+/// and mean something else.
+pub fn search_response(res: &MemorySearchResponse) -> String {
+    if res.memories.is_empty() {
+        return "_No memories found._".to_string();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    // The reference names the retrieval method here. Without a per-result
+    // method tag this port cannot say which ran, and guessing "hybrid" would be
+    // a claim rather than a report -- so the count is stated and the method is
+    // not.
+    parts.push(format!("**{} results**", res.returned));
+    if res.trimmed > 0 {
+        parts.push(format!(
+            "_{} of {} candidates (trimmed {}, ~{}/{} tokens)_\n",
+            res.returned, res.total_candidates, res.trimmed, res.tokens_used, res.budget
+        ));
+    } else {
+        parts.push(format!(
+            "_~{} tokens used (budget: {})_\n",
+            res.tokens_used, res.budget
+        ));
+    }
+
+    let memories: Vec<_> = res.memories.iter().map(|r| r.memory.clone()).collect();
+    parts.push(remind_me_core::reminders::render_memories_markdown(
+        &memories,
+    ));
+
+    if let Some(related) = res.related_via_entities.as_ref().filter(|r| !r.is_empty()) {
+        parts.push(expansion_section(
+            &format!(
+                "**Related via entities** (1-hop expansion, max {}):",
+                remind_me_core::expansion::EXPANSION_CAP
+            ),
+            related,
+            true,
+        ));
+    }
+    if let Some(related) = res.related_via_neighbors.as_ref().filter(|r| !r.is_empty()) {
+        parts.push(expansion_section(
+            "**Related via document neighbors**:",
+            related,
+            false,
+        ));
+    }
+    if let Some(related) = res
+        .related_via_co_retrieval
+        .as_ref()
+        .filter(|r| !r.is_empty())
+    {
+        parts.push(expansion_section(
+            "**Related via co-retrieval**:",
+            related,
+            false,
+        ));
+    }
+
+    parts.join("\n---\n")
+}
+
+/// One expansion block, matching `_fmt_expansion_md`'s per-item shape.
+fn expansion_section(heading: &str, related: &[RelatedMemory], via_entities: bool) -> String {
+    let mut lines = vec![heading.to_string()];
+    for item in related {
+        // `" ".join(str(...).split())` in the reference: collapse all runs of
+        // whitespace, including newlines, so a multi-line memory does not break
+        // the list item across lines.
+        let snippet: String = item
+            .content_snippet
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Truncated at 120 *characters*, not bytes -- slicing a String by byte
+        // index would panic mid-codepoint on any non-ASCII memory.
+        let snippet = if snippet.chars().count() > 120 {
+            format!("{}…", snippet.chars().take(120).collect::<String>())
+        } else {
+            snippet
+        };
+        if via_entities && !item.via_entities.is_empty() {
+            lines.push(format!(
+                "- `{}` {} _(via: {})_",
+                item.id,
+                snippet,
+                item.via_entities.join(", ")
+            ));
+        } else {
+            lines.push(format!("- `{}` {}", item.id, snippet));
+        }
+    }
+    lines.join("\n")
 }
