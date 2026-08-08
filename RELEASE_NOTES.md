@@ -2,6 +2,55 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-08 — One setting makes this a drop-in MCP server
+
+### Added
+- **`REMIND_ME_DEFAULT_RESPONSE_FORMAT`** (#226), `json` (default) or
+  `markdown`. With `REMIND_ME_MCP_DIR` from #219, these are now the two
+  settings that make this binary substitutable for `remind_me`'s MCP server:
+  same database, same output.
+- **`configure --default-format json|markdown`**, which writes it into every
+  MCP client entry — the same place `REMIND_ME_DB_PATH` is written. Validated
+  at parse time, because a typo baked into every client config would otherwise
+  be silently ignored by the server and look like the flag did nothing. Only
+  written when asked for, so a later change to the shipped default can still
+  reach anyone who ran `configure` without it.
+
+### Scope — deliberately narrow
+The setting moves **only the twelve tools from #211**, for which the reference
+has no `response_format` at all: it returns Markdown and offers no JSON, so the
+parameter is a pure addition here and JSON was chosen to keep this port's
+existing callers working (#206). That choice is right for this port's callers
+and wrong for anyone substituting it into a client configured against
+`remind_me`, and one default cannot serve both. This is the switch.
+
+**Tools that mirror a reference input model are untouched by it.** After #224
+they already use that model's own default — Markdown for `search`, `list`,
+`wiki_list`, `stats`, `history`, `digest`, `list_reminders`; JSON for
+`vitality_report`. Making `vitality_report` render Markdown because someone
+asked for "markdown defaults" would move the port *away* from the reference,
+which is the opposite of the point. A test pins exactly this.
+
+### Behaviour
+- Unset leaves every byte as it is today — asserted, and the reason this is
+  additive rather than a breaking change.
+- A per-call `response_format` argument still wins, in both directions.
+- A typo, a blank, or any unrecognised value resolves to **JSON**, not
+  Markdown. Failing toward the documented default matters more than being
+  lenient: a misspelling that silently enabled Markdown would change output for
+  someone who believed they had configured nothing.
+
+### Verified
+Three sabotages each fail the suite (exit 101): ignoring the switch entirely,
+letting it leak into a reference-mandated default, and making a typo select
+Markdown. The third did not apply on the first attempt — the substitution-count
+assertion caught the bad regex rather than reporting a guard that had not run.
+
+The env var is process-global, so its tests hold a mutex and restore what they
+found. One pre-existing test read the variable *without* the lock, which made
+it race the tests that set it; it was removed rather than locked, being an
+exact duplicate of the unset case. Ten consecutive multi-threaded runs clean.
+
 ## 2026-08-08 — Four tools stop ignoring `response_format`
 
 ### Fixed

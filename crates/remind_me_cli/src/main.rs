@@ -56,6 +56,7 @@ fn get_target_config_paths() -> Vec<(PathBuf, &'static str, &'static str)> {
 const CONFIGURE_USAGE: &str = "\
 Usage: rusty-remind-me configure [--node-id ID --hub-url URL] [--peer-port N]
                                  [--sync-interval SECS] [--db-path PATH]
+                                 [--default-format json|markdown]
 
 Writes the MCP server entry for every client this tool knows about. With
 --node-id and --hub-url it also writes the sync environment, so a synced node
@@ -74,6 +75,7 @@ struct ConfigureArgs {
     peer_port: Option<u16>,
     sync_interval: Option<u64>,
     db_path: Option<String>,
+    default_format: Option<String>,
 }
 
 fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs, String> {
@@ -81,8 +83,8 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs, String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            flag
-            @ ("--node-id" | "--hub-url" | "--peer-port" | "--sync-interval" | "--db-path") => {
+            flag @ ("--node-id" | "--hub-url" | "--peer-port" | "--sync-interval" | "--db-path"
+            | "--default-format") => {
                 let value = args.get(i + 1).ok_or_else(|| {
                     format!("Error: {} expects a value.\n{}", flag, CONFIGURE_USAGE)
                 })?;
@@ -90,6 +92,18 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs, String> {
                     "--node-id" => parsed.node_id = Some(value.clone()),
                     "--hub-url" => parsed.hub_url = Some(value.clone()),
                     "--db-path" => parsed.db_path = Some(value.clone()),
+                    // Validated here rather than at read time: a typo written
+                    // into every MCP client config would otherwise be silently
+                    // ignored by the server and look like the flag did nothing.
+                    "--default-format" => match value.as_str() {
+                        "json" | "markdown" => parsed.default_format = Some(value.clone()),
+                        other => {
+                            return Err(format!(
+                            "Error: --default-format expects `json` or `markdown`, got {:?}.\n{}",
+                            other, CONFIGURE_USAGE
+                        ))
+                        }
+                    },
                     "--peer-port" => {
                         parsed.peer_port = Some(value.parse().map_err(|_| {
                             format!(
@@ -183,6 +197,13 @@ fn configure_mcp_clients(parsed: &ConfigureArgs) -> Result<(), Box<dyn std::erro
     let mut env_map = json!({
         "REMIND_ME_DB_PATH": db_path.to_string_lossy()
     });
+
+    // Only written when asked for. An entry that always pinned the default
+    // would freeze it into every client config, so a later change to the
+    // shipped default could never reach anyone who had run `configure`.
+    if let Some(format) = &parsed.default_format {
+        env_map[remind_me_mcp::DEFAULT_FORMAT_ENV] = json!(format);
+    }
 
     // `parse_configure_args` has already refused any partial combination, so
     // reaching here with a node id means the hub URL and secret are present

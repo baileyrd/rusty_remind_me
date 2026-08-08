@@ -85,6 +85,27 @@ A leading `~` is expanded in either. A variable set to the empty string counts a
 
 To share a database with `remind_me`, set `REMIND_ME_MCP_DIR` only — `REMIND_ME_DB_PATH` has no meaning to `remind_me` and setting it there is silently ignored.
 
+## Substituting for the `remind_me` MCP server
+
+Two settings make this binary a drop-in replacement for [`remind_me`](https://github.com/baileyrd/remind_me)'s MCP server:
+
+```bash
+REMIND_ME_MCP_DIR=~/.remind-me                 # the same database (the default)
+REMIND_ME_DEFAULT_RESPONSE_FORMAT=markdown     # the same output format
+```
+
+Or write both into every MCP client config at once:
+
+```bash
+rusty-remind-me configure --default-format markdown
+```
+
+`REMIND_ME_DEFAULT_RESPONSE_FORMAT` accepts `json` (the default) or `markdown`, and affects **only** the tools where `remind_me` has no `response_format` parameter at all — it returns Markdown from those and offers no JSON, whereas this port offers both and defaults to JSON so existing callers keep working.
+
+Tools that mirror a `remind_me` input model already use that model's own default and are deliberately untouched by this setting: Markdown for `search`, `list`, `wiki_list`, `stats`, `history`, `digest` and `list_reminders`, JSON for `vitality_report`. Making `vitality_report` render Markdown because you asked for "markdown defaults" would move this port *away* from the reference.
+
+A per-call `"response_format"` argument always wins over the setting, in both directions.
+
 ## Command Line Interface (CLI)
 
 The compiled binary `rusty-remind-me` provides subcommands for interactive management, MCP stdio protocol hosting, and REST API daemon mode:
