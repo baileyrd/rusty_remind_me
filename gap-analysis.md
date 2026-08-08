@@ -437,7 +437,7 @@ revisions of this document did that and missed all three of the 2026-08-07
 findings. Running the two implementations against one database found them in an
 afternoon. The next revision should start there.
 
-Two smaller things noticed in passing and deliberately not filed, recorded so
+Four smaller things noticed in passing and deliberately not filed, recorded so
 they are not re-discovered as novel:
 
 - `MemoryListInput` derives `Default`, which yields `limit: 0` — the
@@ -447,3 +447,27 @@ they are not re-discovered as novel:
 - `remind_me_search` in the MCP dispatch layer always returns JSON and ignores
   `response_format` entirely, unlike the twelve tools fixed in #211. The
   reference honours it there and defaults to Markdown.
+- **No dashboard.** `remind_me_mcp --serve-ui` (a Starlette app plus the React
+  dashboard at `dashboard/App.jsx`) has no Rust counterpart anywhere in the
+  workspace — not degraded, not partial, absent. There is no `ui`/`dashboard`
+  subcommand on `rusty-remind-me` and no dashboard-serving crate. Noticed
+  switching a real deployment over (2026-08-08): the hub, the stdio server, and
+  the REST API each have a direct Rust counterpart the switch could move to,
+  and the dashboard does not, so a full-stack cutover permanently drops it
+  unless something is built to replace it. Left running on the reference.
+- **The remote connector's token and OAuth state file defaults silently
+  diverge from the reference's.** `resolve_connector_token`'s default
+  (`remote.rs:127`, `default_token_file`) is `~/.remind_me/connector_token`
+  (underscored) — the reference persists at `<MEMORY_DIR>/connector_token`,
+  which in every real deployment is `~/.remind-me` (hyphenated, ARCHITECTURE.md
+  §1 Tenet 3's shared directory). `default_oauth_state_file` has the same
+  divergence for `~/.remind_me/oauth.json`. An unmodified switch of
+  `--serve-remote` to `rusty-remind-me remote` would not error — it would
+  silently mint a fresh connector token and start from an empty OAuth client
+  store at the wrong path, orphaning every already-registered claude.ai
+  connector. `REMIND_ME_REMOTE_TOKEN_FILE` and `REMIND_ME_REMOTE_OAUTH_STATE_FILE`
+  override both and must be pointed at the reference's paths explicitly for a
+  real cutover. Found switching a live deployment (2026-08-08) — with 4
+  registered OAuth clients and 475 issued access tokens at stake, the
+  connector switch itself was deliberately stopped short and left on the
+  reference pending this fix, unlike the hub and stdio server, which did move.
