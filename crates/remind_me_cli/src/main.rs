@@ -765,7 +765,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{}", serde_json::to_string_pretty(&page)?)
                     }
                     ResponseFormat::Markdown => {
-                        println!("{}", reminders::render_memories_markdown(&page.memories))
+                        println!(
+                            "{}",
+                            reminders::render_memory_page_markdown(&page.memories, page.total)
+                        )
                     }
                 }
             }

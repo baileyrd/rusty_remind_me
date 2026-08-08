@@ -1317,8 +1317,9 @@ impl McpServer {
                                             serde_json::to_string_pretty(&page).unwrap()
                                         }
                                         ResponseFormat::Markdown => {
-                                            remind_me_core::reminders::render_memories_markdown(
+                                            remind_me_core::reminders::render_memory_page_markdown(
                                                 &page.memories,
+                                                page.total,
                                             )
                                         }
                                     };
