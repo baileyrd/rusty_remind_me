@@ -134,15 +134,91 @@ Rust port's support for those was not at parity.
    suites (83 tests total across the six directly-touched files) pass
    unchanged.
 
-Cutover on this host is no longer blocked by a missing Rust capability.
-What remains before actually cutting it over: rebuild with
-`--features "remind_me_core/rerank remind_me_core/local-embed"`, point
-`REMIND_ME_RERANK_MODEL_PATH`/`_TOKENIZER_PATH` and
-`REMIND_ME_ONNX_MODEL_PATH`/`_TOKENIZER_PATH` at the converted files above,
-and re-verify `REMIND_ME_QUERY_EXPANSION=hyde` against a real Ollama daemon
-(not done here — none was running on this host). The live Python process
-was **not** touched while closing these gaps — see the Runbook below when
-it is time to actually cut it over.
+Cutover on this host was no longer blocked by a missing Rust *search*
+capability. It found one more gap anyway — see the cutover record below.
+
+---
+
+## home-pc-win cutover, executed (2026-08-09)
+
+**One more gap, found only by actually cutting over — not by reading.**
+The port-8767 role this host runs is not what `rusty-remind-me remote`
+is. Python's `--serve-mcp` (standalone, no `--serve-ui`) calls the raw
+FastMCP HTTP transport directly — `remind_me_mcp/__main__.py:546-553` —
+with **no auth middleware**; `remind_me_mcp/config.py:254-256` states this
+outright: *"Standalone MCP HTTP mode (--serve-mcp without --serve-ui) ...
+stays unauthenticated by design, relying on its localhost-only default
+bind."* `remind_me_remote` (`rusty-remind-me remote`) is the port of the
+reference's *different*, always-token-gated `--serve-remote` mode — built
+for claude.ai reaching in over the internet
+(`crates/remind_me_remote/src/auth.rs`: every `/mcp` request needs a
+matching `/mcp/<token>` path or `Authorization: Bearer`). There is no Rust
+equivalent of Python's trust-loopback, zero-auth local mode. Cutting over
+with the bare `http://127.0.0.1:8767/mcp` URLs every client already had
+configured would have 401'd Claude Desktop, Claude Code, and this
+harness's own `remind-me-win` connection simultaneously.
+
+**Resolved by adding auth, not by adding code.** Generated a
+`REMIND_ME_REMOTE_TOKEN` and moved every client to the secret-path form
+(`http://127.0.0.1:8767/mcp/<token>`, no header support required) rather
+than building a new no-auth mode — `remind_me_remote`'s existing gate is
+the *more* secure posture, and Python's own "unauthenticated by design"
+choice was never reviewed against exposing the same port to whatever else
+is on this machine.
+
+**What actually happened:**
+1. Built `--features "remind_me_core/rerank remind_me_core/local-embed"`.
+2. Verified read-only first: `rusty-remind-me stats`/`search` against the
+   real `~/.remind-me/memory.db` (14758 memories) before touching anything
+   live.
+3. Replaced `serve-mcp.ps1` with `serve-mcp-rust.ps1` — same
+   `REMIND_ME_NODE_ID=home-pc-win`/`HUB_URL`/`SYNC_SECRET`/`SYNC_INTERVAL`,
+   plus the rerank/ONNX/HyDE paths from the "Feature parity gaps" section
+   above, plus the new `REMIND_ME_REMOTE_MCP=1`/`REMOTE_HOST=127.0.0.1`/
+   `REMOTE_PORT=8767`/`REMOTE_TOKEN`. One value had to be added that
+   Python never needed: `REMIND_ME_EMBEDDING_BACKEND=onnx` — Python's
+   `EMBEDDING_BACKEND` defaults to `"onnx"` when unset
+   (`remind_me_mcp/config.py:182`), this port defaults to disabled instead
+   (matching its own "off until asked for" convention across every
+   optional backend), so leaving it unset here would have silently
+   dropped semantic search entirely.
+4. Stopped the Python process (`Stop-Process -Force`) — its dashboard
+   sidecar (port 5199) died with it, confirming the Job-object relationship
+   `serve-mcp.ps1`'s own comment described. Started
+   `rusty-remind-me remote` and, since no second Scheduled Task could be
+   created non-interactively (`schtasks /Create` → Access denied without
+   an elevated/interactive prompt), folded the dashboard
+   (`rusty-remind-me api 5199 127.0.0.1`) into `serve-mcp-rust.ps1` as a
+   detached child instead of its own task.
+5. Updated the "remind-me-mcp-http" Scheduled Task's target to
+   `serve-mcp-rust.ps1` (`schtasks /Change`) so the swap survives reboot.
+6. Verified after: `netstat` shows the new PID holding `0.0.0.0:8766` and
+   `127.0.0.1:8767`; `GET /health` → `200 {"status":"ok"}`; bare `/mcp` →
+   `401` (confirms the gap above is real and now closed); a full
+   `initialize` JSON-RPC handshake through
+   `http://127.0.0.1:8767/mcp/<token>` → `200` with
+   `serverInfo.name: rusty_remind_me`; dashboard `GET /` → `200`.
+7. Updated Claude Desktop (`claude_desktop_config.json`) and Claude Code
+   (`.claude.json` → `mcpServers.remind-me-win`) to the token URL. This
+   harness's own `remind-me-win` connection is the same entry — per
+   Lesson 3, it will not pick up the change until this omp session itself
+   restarts; memory tools 401 for the rest of this conversation.
+
+**Not migrated in this pass:** `REMIND_ME_QUERY_EXPANSION=hyde` is
+configured and will silently no-op exactly as before — no Ollama daemon is
+running on this host, so HyDE was already a no-op under Python too. Not a
+regression, just still unverified against a real LLM (see Lesson 8).
+
+**New consumer inventory row for this host** (this table's existing rows
+are the *other* — Linux — host; see Lesson 1, rebuild before reusing):
+
+| Consumer | Config | Supervisor | Action taken |
+| --- | --- | --- | --- |
+| Claude Desktop | `claude_desktop_config.json` → `mcpServers.remind-me` (via `mcp-remote`) | none (spawned per launch) | URL updated to `/mcp/<token>`; app restart still needed to reconnect |
+| Claude Code | `.claude.json` → `mcpServers.remind-me-win` | none (spawned per launch) | URL updated to `/mcp/<token>`; app restart still needed to reconnect |
+| omp agent (this harness) | same `.claude.json` entry as Claude Code | none (spawned per session) | same edit; **this session will not pick it up until restarted** |
+| shared MCP+sync+peer process | Scheduled Task `remind-me-mcp-http` → `serve-mcp-rust.ps1` | Task Scheduler, at logon | Python stopped, `rusty-remind-me remote` started; task target updated |
+| dashboard/API | folded into `serve-mcp-rust.ps1` (detached child, no task of its own) | none — see step 4 above | Python stopped (died with parent), `rusty-remind-me api` started |
 
 ---
 
@@ -235,6 +311,21 @@ which this repo owns or can lint.
    `uv tool` install were removed. They cost nothing idle and are the entire
    rollback plan below — deleting them before confidence is established would
    turn a config edit back into a reinstall.
+
+8. **"Zero client-config edits" was itself wrong, and only cutting over for
+   real found it.** The "Feature parity gaps" section above predicted this
+   host's cutover would need no client-config changes, reasoning purely
+   from what port every client already pointed at. That reasoning never
+   checked whether the *auth model* on both ends matched — Python's
+   standalone `--serve-mcp` is unauthenticated by design (trust-loopback);
+   `rusty-remind-me remote` is a port of the reference's *different*,
+   always-token-gated `--serve-remote` mode. Two builds serving the same
+   protocol on the same port are not interchangeable if one gates and the
+   other does not. The lesson isn't "always add auth" or "always match the
+   reference's posture" — it's that a topology assumption made from reading
+   config files, however carefully, is still a hypothesis until the actual
+   swap is attempted end-to-end. See the home-pc-win cutover record above
+   for how this one was found and closed.
 
 ---
 
