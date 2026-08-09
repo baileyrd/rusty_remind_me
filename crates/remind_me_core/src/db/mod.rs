@@ -2,9 +2,9 @@ pub mod migrations;
 pub mod queries;
 pub mod schema;
 
+use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, Result};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 /// Points directly at a database *file*. This crate's own variable.
 pub const DB_PATH_ENV: &str = "REMIND_ME_DB_PATH";
@@ -94,6 +94,10 @@ fn expand_tilde(raw: &str, home: &Path) -> PathBuf {
 
 pub struct Database {
     conn: Mutex<Connection>,
+    /// `None` for an in-memory database. Kept so [`Database::open_secondary`]
+    /// can reopen the same on-disk file without every caller having to carry
+    /// the path around separately.
+    path: Option<PathBuf>,
 }
 
 impl Database {
@@ -102,18 +106,46 @@ impl Database {
         schema::initialize_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            path: None,
         })
     }
 
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let path = path.as_ref().to_path_buf();
+        let conn = Connection::open(&path)?;
         schema::initialize_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            path: Some(path),
         })
     }
 
     pub fn conn(&self) -> MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap()
+        self.conn.lock()
+    }
+
+    /// Opens a second, independent connection to the same on-disk file this
+    /// `Database` wraps — for callers (namely [`crate::sync::SyncWorker`])
+    /// that must not hold the process-wide [`Database::conn`] `Mutex` across
+    /// long-running work such as network I/O. Every other MCP tool call
+    /// needs that mutex; a sync cycle pushing/pulling several remotes can run
+    /// for many multiples of any one HTTP timeout, and previously held the
+    /// whole process's database hostage for that entire span. WAL mode plus
+    /// the `busy_timeout` `schema::initialize_schema` sets let this
+    /// connection write concurrently with the primary one; SQLite's own
+    /// briefly-held, per-statement file lock replaces the Rust-level lock
+    /// for the moments a caller like that actually needs it.
+    ///
+    /// `Err` for an in-memory database: a second `:memory:` connection would
+    /// open a distinct, disconnected store, not a second handle onto the
+    /// same data.
+    pub fn open_secondary(&self) -> std::result::Result<Connection, String> {
+        let path = self
+            .path
+            .as_ref()
+            .ok_or_else(|| "in-memory database has no file to reopen".to_string())?;
+        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        schema::initialize_schema(&conn).map_err(|e| e.to_string())?;
+        Ok(conn)
     }
 }
