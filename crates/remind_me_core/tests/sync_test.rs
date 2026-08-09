@@ -8,17 +8,19 @@
 //! default, so every test that touches any of them holds `ENV_LOCK` for the
 //! duration -- the same convention `mempalace_import_test.rs` established.
 
+mod support;
+
 use remind_me_core::db::queries;
 use remind_me_core::sync::{
-    self, pull_remote, push_outbox, serve_once, upsert_record, ApplyOutcome, PeerServerConfig,
-    SyncRecord, CLIENT_ENV, HUB_URL_ENV, NODE_ID_ENV, SYNC_SECRET_ENV,
+    self, pull_remote, push_outbox, upsert_record, ApplyOutcome, SyncRecord, CLIENT_ENV,
+    HUB_URL_ENV, NODE_ID_ENV, SYNC_SECRET_ENV,
 };
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
 use serde_json::json;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use support::MockNode;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -457,59 +459,11 @@ fn a_second_delete_of_an_already_tombstoned_memory_reports_not_found() {
 // Push/pull against a real peer server (no HTTP mocking: a second real
 // in-memory Database served by the actual `serve_once` handler over a real
 // TcpListener -- the same protocol this node's own worker uses against a
-// configured hub).
+// configured hub). `support::MockNode` is this pattern, shared with
+// `graph_sync_test.rs` instead of duplicated a second time.
 // ---------------------------------------------------------------------------
 
 const SECRET: &str = "hub-secret";
-
-struct TestHub {
-    url: String,
-    db: Arc<Database>,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl TestHub {
-    fn start(node_id: &str) -> Self {
-        let db = Arc::new(Database::open_in_memory().unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let config = PeerServerConfig::new("127.0.0.1", port, SECRET, node_id);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let thread_shutdown = Arc::clone(&shutdown);
-        let thread_db = Arc::clone(&db);
-        let handle = std::thread::spawn(move || {
-            while !thread_shutdown.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let conn = thread_db.conn();
-                        let _ = serve_once(&mut stream, &config, &conn);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(10))
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Self {
-            url: format!("http://127.0.0.1:{}", port),
-            db,
-            shutdown,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for TestHub {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
 
 /// These tests only need a row sitting in `sync_outbox` before calling
 /// `push_outbox` -- `#76`'s `sync_flags` gate means a plain `add()` no
@@ -532,7 +486,7 @@ fn disable_sync() {
 fn push_outbox_delivers_local_writes_to_a_real_hub() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("local-node");
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
     let id = add(&local_conn, "pushed content");
@@ -592,7 +546,7 @@ fn a_sensitive_memory_pushes_with_its_flag_intact() {
     // sending node. Only a real push over the wire catches that.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("local-node");
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
     let id = queries::add_memory(
@@ -630,7 +584,7 @@ fn a_sensitive_memory_pushes_with_its_flag_intact() {
 fn push_outbox_is_refused_with_the_wrong_secret() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("local-node");
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
     add(&local_conn, "content");
@@ -642,7 +596,7 @@ fn push_outbox_is_refused_with_the_wrong_secret() {
 
 #[test]
 fn pull_remote_applies_the_hubs_changes_and_persists_the_cursor() {
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     {
         let hub_conn = hub.db.conn();
         let id = add(&hub_conn, "hub content");
@@ -698,7 +652,7 @@ fn pull_remote_applies_the_hubs_changes_and_persists_the_cursor() {
 
 #[test]
 fn pull_remote_excludes_records_this_node_originated() {
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     {
         let hub_conn = hub.db.conn();
         let id = add(&hub_conn, "originated locally then pushed to hub");
@@ -724,7 +678,7 @@ fn pull_remote_excludes_records_this_node_originated() {
 fn a_full_push_then_pull_round_trip_between_two_nodes_converges() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("node-a");
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     let node_a = Database::open_in_memory().unwrap();
     let node_a_conn = node_a.conn();
     add(&node_a_conn, "from node a");
@@ -755,7 +709,7 @@ fn a_successful_push_and_pull_advance_the_remotes_liveness_timestamps() {
     // round trip actually writes them.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("local-node");
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
     add(&local_conn, "content for liveness check");
