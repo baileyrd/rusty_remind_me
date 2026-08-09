@@ -4025,7 +4025,10 @@ mod tests {
             text.contains("- remote: disabled"),
             "expected a concrete remote line, got: {text}"
         );
-        assert!(!text.contains(": ?"), "no subsystem line should be a bare '?': {text}");
+        assert!(
+            !text.contains(": ?"),
+            "no subsystem line should be a bare '?': {text}"
+        );
     }
 
     #[test]
