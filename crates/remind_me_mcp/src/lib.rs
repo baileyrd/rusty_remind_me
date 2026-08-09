@@ -3992,6 +3992,45 @@ mod tests {
         assert_eq!(report["dashboard"]["pid"], record.pid);
     }
 
+    /// The bug this guards: `remind_me_server_status`'s Markdown renderer
+    /// looked for a `state` tag on every subsystem, but `dashboard`, `sync`,
+    /// `webhook` and `remote` are overwritten at dispatch with their own
+    /// untagged structs (see the JSON-mode test above) — so Markdown printed
+    /// `?` for all four regardless of their real state, even though the JSON
+    /// response for the same call carried the truth.
+    #[test]
+    fn test_server_status_markdown_reports_dashboard_state_instead_of_a_bare_question_mark() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let text = text_of(&call(
+            &server,
+            "remind_me_server_status",
+            json!({"response_format": "markdown"}),
+        ));
+
+        assert!(
+            text.contains("- dashboard: not running"),
+            "expected a concrete dashboard line, got: {text}"
+        );
+        assert!(
+            text.contains("- sync: disabled"),
+            "expected a concrete sync line, got: {text}"
+        );
+        assert!(
+            text.contains("- webhook: disabled"),
+            "expected a concrete webhook line, got: {text}"
+        );
+        assert!(
+            text.contains("- remote: disabled"),
+            "expected a concrete remote line, got: {text}"
+        );
+        assert!(
+            !text.contains(": ?"),
+            "no subsystem line should be a bare '?': {text}"
+        );
+    }
+
     #[test]
     fn test_stopping_the_webhook_is_safe_when_none_is_running() {
         let db = Database::open_in_memory().unwrap();
