@@ -307,9 +307,12 @@ pub fn prune_outbox(conn: &Connection) -> Result<usize> {
     Ok(removed)
 }
 
-/// Records a real, successful HTTP round trip with `remote_id` (a push
-/// destination like `"hub"`, or a namespaced pull cursor key like
-/// `"hub#entities"`) -- setting `last_attempt_at` and `last_push_at`.
+/// Records a real, successful HTTP push round trip with `remote_id` (a push
+/// destination like `"hub"`) -- setting `last_attempt_at` and
+/// `last_push_at`. Only ever called with a bare destination id: pushing
+/// happens once per remote for the whole `sync_outbox`, not per resource
+/// type, so there is no namespaced push cursor the way pulls have one (see
+/// [`record_pull`] for those).
 ///
 /// `sync_status`'s and `reconcile`'s docs both promise these `_at` columns
 /// "advance every cycle" so a quiet-but-healthy remote is distinguishable

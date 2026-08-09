@@ -165,6 +165,49 @@ fn liveness_comes_from_the_at_columns_not_the_cursors() {
     disable_sync();
 }
 
+#[test]
+fn a_namespaced_pull_cursor_reports_the_same_pending_as_its_base_remote() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync();
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(&conn, "queued for hub");
+
+    // Mark the outbox row delivered to the base remote "hub" -- the same
+    // sync_sends row a real push_outbox cycle would leave behind.
+    conn.execute(
+        "INSERT INTO sync_sends (remote_id, outbox_id, sent_at)
+         SELECT 'hub', id, '2026-08-09T00:00:00+00:00' FROM sync_outbox",
+        [],
+    )
+    .unwrap();
+
+    // A namespaced pull-only cursor for the same destination: entities never
+    // get an independent sync_sends row keyed to "hub#entities" -- the
+    // memories/entities/links outbox is one queue, pushed once under "hub".
+    remote(
+        &conn,
+        "hub#entities",
+        "2026-08-09T00:00:00+00:00",
+        EPOCH,
+        "2026-08-09T00:00:00+00:00",
+    );
+
+    let SyncStatus::Enabled { remotes, .. } = sync_status(&conn).unwrap() else {
+        panic!("expected enabled");
+    };
+    let entities = remotes
+        .iter()
+        .find(|r| r.remote_id == "hub#entities")
+        .unwrap();
+
+    // Before the fix this always read back the *entire* outbox -- a literal
+    // lookup against "hub#entities", which sync_sends never records under --
+    // reporting a permanent backlog no push cycle could ever drain.
+    assert_eq!(entities.pending, 0);
+    disable_sync();
+}
+
 // ---------------------------------------------------------------------------
 // Outbox and the drain verdict
 // ---------------------------------------------------------------------------

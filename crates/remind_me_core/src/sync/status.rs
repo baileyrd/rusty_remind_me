@@ -174,7 +174,18 @@ pub fn sync_status(conn: &Connection) -> Result<SyncStatus> {
 
     let mut remotes = Vec::with_capacity(rows.len());
     for (remote_id, last_attempt_at, last_push_at, last_pull_at) in rows {
-        let (pending, _) = pending_to_remote(conn, &remote_id)?;
+        // Namespaced keys ("hub#entities", "hub#links", ...) are pull-only
+        // cursors: entities/entity_relations/links ride the same
+        // sync_outbox/sync_sends as memories, pushed under the bare
+        // destination id ("hub"), never under the namespaced key itself. A
+        // literal lookup against the namespaced key found no sync_sends row
+        // ever and so always reported the *entire* outbox as pending to
+        // it -- a permanent, misleading backlog that never drained no
+        // matter how healthy the real push was. The right answer is
+        // whatever the base destination's own pending count is, since it's
+        // the same outbox.
+        let push_remote_id = remote_id.split('#').next().unwrap_or(remote_id.as_str());
+        let (pending, _) = pending_to_remote(conn, push_remote_id)?;
         remotes.push(RemoteStatus {
             // A never-contacted remote sits at the epoch default rather than
             // NULL, which reads as a very stale timestamp unless called out.
