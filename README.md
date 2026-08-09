@@ -154,6 +154,15 @@ that need a network endpoint — e.g. `claude.ai`'s custom connector. Supports
 a legacy secret-path/bearer token and, when an issuer is configured, OAuth
 2.1.
 
+Speaks both Streamable HTTP lifecycles `rmcp` implements: the
+session-managed one every client through protocol version `2025-11-25`
+uses (`Mcp-Session-Id`, including `mcp-remote`-fronted clients like Claude
+Desktop) keeps working unchanged, and SEP-2567's newer per-request
+"discover" lifecycle for `2026-07-28`+ clients, which can call a tool in a
+single POST with no `initialize`/session at all. Which one a given request
+gets is decided per request from its negotiated protocol version, not by
+configuration.
+
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `REMIND_ME_REMOTE_MCP` | Enables the connector (`1`/`true`/`yes`) | disabled |

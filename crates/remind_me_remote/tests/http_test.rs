@@ -56,6 +56,36 @@ fn sse_json_payloads(body: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Every SSE event in a response body as `(id, parsed data)` pairs, in
+/// delivery order -- unlike `sse_json_payloads`, this keeps the priming
+/// event (empty `data:`) rather than filtering it out, and keeps its `id:`
+/// line. That id is exactly what `InProcessEventStore` assigns once an
+/// event store is attached (see `server::build_router`), and exactly what a
+/// client resuming via `Last-Event-Id` after that priming event would send.
+fn sse_events(body: &str) -> Vec<(Option<String>, Option<Value>)> {
+    body.split("\n\n")
+        .filter(|event| !event.trim().is_empty())
+        .map(|event| {
+            let mut id = None;
+            let mut data_lines = Vec::new();
+            for line in event.lines() {
+                if let Some(rest) = line.strip_prefix("id:") {
+                    id = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    data_lines.push(rest.trim());
+                }
+            }
+            let data = data_lines.join("\n");
+            let parsed = if data.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&data).ok()
+            };
+            (id, parsed)
+        })
+        .collect()
+}
+
 fn mcp_headers() -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
@@ -268,4 +298,274 @@ async fn bearer_auth_reuses_a_session_the_secret_path_opened_and_round_trips_a_r
         "expected the round-tripped memory content in the tool result, got: {text}"
     );
     assert_ne!(result["result"]["isError"], json!(true));
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_calls_a_tool_in_one_post_with_no_session_at_all() {
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // No prior `initialize`, no `Mcp-Session-Id` -- SEP-2567's discover
+    // lifecycle dispatches per request. `MCP-Protocol-Version: 2026-07-28`
+    // is what routes `handle_post` there instead of the legacy session
+    // path; `Mcp-Method` is the SEP-2243 standard header that version also
+    // requires (`tools/list` has no `Mcp-Name` counterpart -- only
+    // name-bearing methods like `tools/call` do).
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "tools/list".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(
+        !response.headers().contains_key("mcp-session-id"),
+        "the discover lifecycle is session-free -- a 2026-07-28 request \
+         must not mint a legacy session"
+    );
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the tools/list response must be among the SSE payloads");
+    let tools = result["result"]["tools"]
+        .as_array()
+        .expect("tools/list result must carry a tools array");
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "remind_me_add"),
+        "expected the real tool list dispatched through RemindMeHandler, got: {tools:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_2025_11_25_client_still_uses_the_legacy_session_lifecycle() {
+    // 2025-11-25 predates SEP-2567 (that lands at 2026-07-28) -- confirms
+    // `is_legacy_request`'s version cutoff, not just the two edges already
+    // covered by the default (2024-11-05, via the other tests) and the new
+    // 2026-07-28 discover lifecycle above.
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(mcp_headers())
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "integration-test", "version": "0" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(
+        response.headers().contains_key("mcp-session-id"),
+        "2025-11-25 is still legacy-lifecycle and must get a session id"
+    );
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_calls_a_mutating_tool_in_one_post_with_no_session_at_all() {
+    // The one `tools/call` coverage this file already had
+    // (`bearer_auth_reuses_a_session_...`) runs entirely over the legacy
+    // session lifecycle. This is the discover-lifecycle counterpart:
+    // `tools/call` also carries an SEP-2243 `Mcp-Name` header (`tools/call`
+    // is in `NAME_FROM_NAME`, sourced from `params.name`), unlike
+    // `tools/list` above.
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "tools/call".parse().unwrap());
+    headers.insert("Mcp-Name", "remind_me_add".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "remind_me_add",
+                "arguments": { "content": "written through the discover lifecycle" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the tools/call response must be among the SSE payloads");
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("call_tool result content must carry the stored memory as text");
+    assert!(
+        text.contains("written through the discover lifecycle"),
+        "expected the round-tripped memory content, got: {text}"
+    );
+    assert_ne!(result["result"]["isError"], json!(true));
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_reads_the_stats_resource_with_no_session() {
+    // `resources/read`'s `Mcp-Name` is sourced from `params.uri` (it's in
+    // `NAME_FROM_URI`, not `NAME_FROM_NAME`) -- the one SEP-2243 header
+    // shape neither of the other two new tests exercises.
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "resources/read".parse().unwrap());
+    headers.insert("Mcp-Name", "memory://stats".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": { "uri": "memory://stats" }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the resources/read response must be among the SSE payloads");
+    assert_eq!(result["result"]["contents"][0]["uri"], "memory://stats");
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_lists_prompts_with_no_session() {
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "prompts/list".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "prompts/list" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the prompts/list response must be among the SSE payloads");
+    let prompts = result["result"]["prompts"]
+        .as_array()
+        .expect("prompts/list result must carry a prompts array");
+    assert!(
+        prompts.iter().any(|p| p["name"] == "recall_context"),
+        "expected the real prompt list dispatched through RemindMeHandler, got: {prompts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_resumes_a_dropped_response_stream_via_last_event_id() {
+    // The actual mechanism `InProcessEventStore` exists for: before it was
+    // wired into `build_router`, a discover-lifecycle POST's SSE response
+    // was never persisted anywhere, so a client that dropped its connection
+    // before reading the response lost it for good. Now every event on that
+    // response -- including the leading empty-data priming event -- gets a
+    // real, replayable id (`tower.rs`'s `persisted_stateless_stream`, which
+    // only runs when `session_manager.event_store()` is `Some`).
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "tools/list".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let body = response.text().await.unwrap();
+    let events = sse_events(&body);
+    let (priming_id, priming_data) = events
+        .first()
+        .expect("expected at least a priming event in the response");
+    assert!(
+        priming_data.is_none(),
+        "expected an empty-data priming event first, got {events:?}"
+    );
+    let priming_id = priming_id
+        .clone()
+        .expect("the priming event must carry a real event id once an EventStore is attached");
+
+    // Simulate the client dropping before it ever saw the real response:
+    // reconnect with `Last-Event-Id` pointing at the priming event it did
+    // see -- no `Mcp-Session-Id` at all, since this is the session-free
+    // stateless-replay path (`tower.rs::handle_get`'s non-legacy branch).
+    let mut resume_headers = reqwest::header::HeaderMap::new();
+    resume_headers.insert("Accept", "text/event-stream".parse().unwrap());
+    resume_headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    resume_headers.insert("Last-Event-Id", priming_id.parse().unwrap());
+
+    let resumed = client
+        .get(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(resume_headers)
+        .send()
+        .await
+        .unwrap();
+    let resumed_status = resumed.status();
+    let resumed_body = resumed.text().await.unwrap();
+    assert_eq!(resumed_status, 200, "{resumed_body}");
+
+    let resumed_events = sse_events(&resumed_body);
+    let result = resumed_events
+        .iter()
+        .find_map(|(_, data)| data.clone())
+        .expect("the resumed stream must replay the tools/list response the client missed");
+    assert!(
+        result["result"]["tools"].as_array().is_some(),
+        "expected the real tools/list result to be replayed, got: {result}"
+    );
 }

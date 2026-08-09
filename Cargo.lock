@@ -3150,7 +3150,9 @@ dependencies = [
 name = "remind_me_remote"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "futures",
  "remind_me_core",
  "remind_me_mcp",
  "reqwest",

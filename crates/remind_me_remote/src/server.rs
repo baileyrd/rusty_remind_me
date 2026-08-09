@@ -15,6 +15,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use serde_json::json;
 
 use crate::auth::{secret_gate, GateConfig, HEALTH_PATH, MCP_PATH};
+use crate::event_store::InProcessEventStore;
 use crate::handler::RemindMeHandler;
 use crate::oauth::{self, IssuerError, OAuthAppState};
 
@@ -73,6 +74,17 @@ async fn health() -> impl IntoResponse {
 /// default allowlist would just break every tunneled connection while
 /// adding no protection this app doesn't already have from those checks.
 ///
+/// `session_manager` also carries an [`InProcessEventStore`] (see that
+/// module's doc, and `lib.rs`'s SEP-2567 section): `legacy_session_mode`
+/// stays on (default) so `mcp-remote` and every other pre-`2026-07-28`
+/// client keeps the session-managed lifecycle it already speaks, while the
+/// event store is what makes `rmcp` also serve `GET /mcp`'s resumable
+/// stream for `2026-07-28`+ clients using the newer, session-free discover
+/// lifecycle — `tower.rs`'s own `supports_stateless_replay` check. Nothing
+/// else here changes per lifecycle: `RemindMeHandler::dispatch` was already
+/// stateless per call, and `tower.rs` picks the right branch per request
+/// based on its negotiated protocol version.
+///
 /// # Errors
 ///
 /// Returns [`IssuerError`] if `issuer` is `Some` and fails
@@ -85,7 +97,9 @@ pub fn build_router(
     issuer: Option<String>,
 ) -> Result<Router, IssuerError> {
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
-    let session_manager = Arc::new(LocalSessionManager::default());
+    let session_manager = Arc::new(
+        LocalSessionManager::default().with_event_store(Arc::new(InProcessEventStore::new())),
+    );
     let service: StreamableHttpService<RemindMeHandler, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(RemindMeHandler::new(Arc::clone(&mcp))),

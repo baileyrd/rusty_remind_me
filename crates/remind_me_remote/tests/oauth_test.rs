@@ -670,6 +670,41 @@ async fn the_legacy_bearer_token_still_authenticates_mcp_in_oauth_mode() {
 }
 
 #[tokio::test]
+async fn a_2026_07_28_discover_lifecycle_request_authenticates_via_oauth_bearer_with_no_session() {
+    // OAuth mode (an issuer configured) and the SEP-2567 discover lifecycle
+    // are independent axes -- `oauth::require_bearer` gates `/mcp` before
+    // `tower.rs` ever looks at the negotiated protocol version. Nothing in
+    // `http_test.rs`'s 2026-07-28 coverage runs with OAuth active, and
+    // nothing here runs the discover lifecycle -- this is the one place
+    // both are exercised together, using the legacy owner-token bearer
+    // credential (still valid in OAuth mode, see
+    // `the_legacy_bearer_token_still_authenticates_mcp_in_oauth_mode`
+    // above) since a dynamically-issued OAuth access token authenticates
+    // through the identical bearer check either way.
+    let _guard = isolated_oauth_state_file("discover_lifecycle").await;
+    let addr = spawn_oauth_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert(
+        "Authorization",
+        format!("Bearer {OWNER_TOKEN}").parse().unwrap(),
+    );
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "tools/list".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp"))
+        .headers(headers)
+        .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200, "{:?}", response.text().await);
+}
+
+#[tokio::test]
 async fn probes_still_fail_closed_in_oauth_mode() {
     let _guard = isolated_oauth_state_file("probes").await;
     let addr = spawn_oauth_server().await;
