@@ -8,7 +8,7 @@
 //! LWW-stale record would never have been accepted anyway so re-sending it
 //! costs nothing but a wasted round-trip.
 
-use super::http;
+use super::{http, record_push};
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -155,6 +155,7 @@ pub fn push_outbox(
                 response_body.trim()
             )));
         }
+        record_push(conn, remote_id);
         let response: Value = serde_json::from_str(&response_body)
             .map_err(|e| PushError(format!("push response from {} was not JSON: {}", url, e)))?;
 

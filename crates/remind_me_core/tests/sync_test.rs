@@ -746,3 +746,43 @@ fn a_full_push_then_pull_round_trip_between_two_nodes_converges() {
     assert_eq!(count, 1);
     disable_sync();
 }
+
+#[test]
+fn a_successful_push_and_pull_advance_the_remotes_liveness_timestamps() {
+    // `remind_me_sync_status` reads `last_attempt_at`/`last_push_at`/
+    // `last_pull_at` to tell a quiet-but-healthy remote from one that has
+    // never actually answered -- a distinction that only holds if a real
+    // round trip actually writes them.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("local-node");
+    let hub = TestHub::start("hub-node");
+    let local_db = Database::open_in_memory().unwrap();
+    let local_conn = local_db.conn();
+    add(&local_conn, "content for liveness check");
+
+    push_outbox(&local_conn, &hub.url, SECRET, "local-node", "hub").unwrap();
+    pull_remote(&local_conn, &hub.url, SECRET, "local-node", "hub").unwrap();
+
+    let (last_attempt_at, last_push_at, last_pull_at): (String, String, String) = local_conn
+        .query_row(
+            "SELECT last_attempt_at, last_push_at, last_pull_at FROM sync_log WHERE remote_id = 'hub'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+
+    const EPOCH: &str = "1970-01-01T00:00:00+00:00";
+    assert_ne!(
+        last_attempt_at, EPOCH,
+        "a real push+pull must record contact"
+    );
+    assert_ne!(
+        last_push_at, EPOCH,
+        "a successful push must record last_push_at"
+    );
+    assert_ne!(
+        last_pull_at, EPOCH,
+        "a successful pull must record last_pull_at"
+    );
+    disable_sync();
+}
