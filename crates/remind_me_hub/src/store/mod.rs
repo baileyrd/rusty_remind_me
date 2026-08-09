@@ -180,6 +180,10 @@ pub trait HubStore: Send + Sync {
     /// `origin_node` never crosses the wire.
     fn count_by_origin_node(&self, since: Option<&str>) -> StoreResult<Vec<(String, i64)>>;
 
+    /// Per-category memory counts, for `remind_me_sync_reconcile`'s
+    /// category-by-category drift check against `/count?by=category`.
+    fn count_by_category(&self, since: Option<&str>) -> StoreResult<Vec<(String, i64)>>;
+
     /// Hard-delete memories tombstoned before `cutoff`. Returns how many.
     fn compact_tombstones(&self, cutoff: &str) -> StoreResult<usize>;
 

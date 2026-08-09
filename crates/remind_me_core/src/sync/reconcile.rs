@@ -137,9 +137,15 @@ fn last_pull_age(conn: &Connection, remote_id: &str) -> Result<Option<i64>> {
         .map(|when| (chrono::Utc::now() - when.with_timezone(&chrono::Utc)).num_seconds()))
 }
 
-/// Fetch a remote's `/count`.
+/// Fetch a remote's `/count`, with the per-category breakdown `?by=category`
+/// asks for. Without it the response has no `by_category` key at all --
+/// `RemoteCounts::by_category` defaults to empty on a missing key rather than
+/// failing to deserialise, which is exactly how this used to go unnoticed:
+/// every category read as "remote has 0", so `classify` reported every
+/// nonempty local category as drift and the verdict was `NodeAhead` on every
+/// call, whether or not sync was actually keeping up.
 fn fetch_counts(base_url: &str) -> Result<RemoteCounts, String> {
-    let url = format!("{}/count", base_url.trim_end_matches('/'));
+    let url = format!("{}/count?by=category", base_url.trim_end_matches('/'));
     let (status, body) = super::http::get(&url, &configured_sync_secret())
         .map_err(|e| format!("could not reach {}: {}", url, e))?;
     if status != 200 {

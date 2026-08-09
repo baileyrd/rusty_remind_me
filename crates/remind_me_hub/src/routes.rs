@@ -106,8 +106,11 @@ pub fn count(store: &dyn HubStore, query: &str) -> Response {
     }
     let by = query_param(query, "by");
     if let Some(b) = &by {
-        if b != "origin_node" {
-            return Response::error(400, format!("unknown grouping '{b}'; expected origin_node"));
+        if b != "origin_node" && b != "category" {
+            return Response::error(
+                400,
+                format!("unknown grouping '{b}'; expected origin_node or category"),
+            );
         }
     }
     let since = match query_param(query, "since") {
@@ -160,12 +163,26 @@ pub fn count(store: &dyn HubStore, query: &str) -> Response {
         Err(e) => return storage_error("count", &e.0),
     };
 
-    let by_origin = match &by {
-        Some(_) => match store.count_by_origin_node(since.as_deref()) {
+    let by_origin = match by.as_deref() {
+        Some("origin_node") => match store.count_by_origin_node(since.as_deref()) {
             Ok(rows) => Some(rows),
             Err(e) => return storage_error("count", &e.0),
         },
-        None => None,
+        _ => None,
+    };
+    // `by_category` is a top-level key here, not nested under `memories` the
+    // way `/stats` reports it -- `RemoteCounts` (the `reconcile` client's
+    // deserialisation target) expects it at the top level, and diverging
+    // from that shape is exactly how `by_category` ends up silently always
+    // empty, which is what made every `remind_me_sync_reconcile` call report
+    // a false "pushes are not landing" verdict before this route supported
+    // the grouping at all.
+    let by_category = match by.as_deref() {
+        Some("category") => match store.count_by_category(since.as_deref()) {
+            Ok(rows) => Some(rows),
+            Err(e) => return storage_error("count", &e.0),
+        },
+        _ => None,
     };
 
     let mut body = Map::new();
@@ -176,6 +193,9 @@ pub fn count(store: &dyn HubStore, query: &str) -> Response {
     }
     if let Some(rows) = &by_origin {
         body.insert("by_origin_node".into(), pairs_to_object(rows));
+    }
+    if let Some(rows) = &by_category {
+        body.insert("by_category".into(), pairs_to_object(rows));
     }
     // Always present, not only when true: a caller who forgot to ask would
     // otherwise have to infer exactness from the absence of a key.

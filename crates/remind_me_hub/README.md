@@ -77,7 +77,7 @@ because `DATABASE_URL` was misspelled would look healthy while serving nothing.
 | --- | --- | --- |
 | `GET /health` | none | Liveness. 200 when the database is reachable, 503 when not. |
 | `GET /stats` | bearer | Full aggregate — once per reconcile. |
-| `GET /count` | bearer | Scalar counts, cheap enough to poll. `?table=`, `?since=`, `?by=origin_node`, `?approx=1`. |
+| `GET /count` | bearer | Scalar counts, cheap enough to poll. `?table=`, `?since=`, `?by=origin_node\|category`, `?approx=1`. |
 | `GET /metrics` | bearer | Prometheus text. 404 when disabled. |
 | `POST /admin/compact_tombstones` | bearer | Hard-delete expired tombstones. |
 | `POST /sync/push` | bearer | Upsert a batch. LWW on `updated_at`. |

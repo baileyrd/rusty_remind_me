@@ -208,6 +208,67 @@ fn a_namespaced_pull_cursor_reports_the_same_pending_as_its_base_remote() {
     disable_sync();
 }
 
+#[test]
+fn a_graph_cursor_row_reports_the_base_remotes_push_state_not_its_own() {
+    // `hub#entities`/`hub#links`/`hub#entity_relations` are pull-only cursor
+    // rows -- `sync_with_remote` drains the whole outbox in one push keyed by
+    // the bare `"hub"`, so `sync_sends`/`last_push_at` are never written
+    // under a cursor's own `#`-suffixed key. Reading those rows the same way
+    // as a real push target reported a permanently-full backlog and an
+    // eternal epoch `last_push_at` for graph data that was, in fact, pushed
+    // and draining fine alongside `memories`.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync();
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    add(&conn, "m1");
+    // Mark the one outbox row sent to the base remote, "hub" -- as a real
+    // push cycle would.
+    conn.execute(
+        "INSERT INTO sync_sends (remote_id, outbox_id, sent_at)
+         SELECT 'hub', id, '2026-08-03T04:00:00+00:00' FROM sync_outbox",
+        [],
+    )
+    .unwrap();
+    remote(
+        &conn,
+        "hub",
+        "2026-08-03T04:00:00+00:00",
+        "2026-08-03T04:00:00+00:00",
+        "2026-08-03T04:00:00+00:00",
+    );
+    // The cursor row: attempted and pulled recently, but its own
+    // `last_push_at` sits at the epoch default forever, since nothing ever
+    // writes it.
+    remote(
+        &conn,
+        "hub#entities",
+        "2026-08-03T05:00:00+00:00",
+        EPOCH,
+        "2026-08-03T05:00:00+00:00",
+    );
+
+    let SyncStatus::Enabled { remotes, .. } = sync_status(&conn).unwrap() else {
+        panic!("expected enabled");
+    };
+    let hub = remotes.iter().find(|r| r.remote_id == "hub").unwrap();
+    let entities = remotes
+        .iter()
+        .find(|r| r.remote_id == "hub#entities")
+        .unwrap();
+
+    assert_eq!(hub.pending, 0);
+    // Falls back to the base remote's real push state instead of reporting
+    // a full, permanently-stuck backlog.
+    assert_eq!(entities.pending, 0);
+    assert_eq!(entities.last_push_at, "2026-08-03T04:00:00+00:00");
+    // Its own attempt/pull clocks are untouched -- only push state borrows
+    // from the base remote.
+    assert_eq!(entities.last_attempt_at, "2026-08-03T05:00:00+00:00");
+    assert_eq!(entities.last_pull_at, "2026-08-03T05:00:00+00:00");
+    assert!(entities.ever_contacted);
+    disable_sync();
+}
 // ---------------------------------------------------------------------------
 // Outbox and the drain verdict
 // ---------------------------------------------------------------------------

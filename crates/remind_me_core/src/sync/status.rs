@@ -172,30 +172,42 @@ pub fn sync_status(conn: &Connection) -> Result<SyncStatus> {
         .collect::<Result<Vec<_>>>()?;
     drop(stmt);
 
+    // Per-table graph cursors (`"{remote}#entities"`, `"…#links"`,
+    // `"…#entity_relations"`) never get their own push -- `sync_with_remote`
+    // drains the whole outbox in one call keyed by the *base* remote id, so
+    // `sync_sends`/`last_push_at` are never written under the cursor's own
+    // key. Reading them with the same `pending_to_remote` lookup as a real
+    // push target reports a permanently-full backlog and an eternal-epoch
+    // `last_push_at` for graph data that is, in fact, pushed and draining
+    // fine alongside `memories` -- a false "the hub is stuck" signal. These
+    // rows fall back to the base remote's own push state instead.
     let mut remotes = Vec::with_capacity(rows.len());
-    for (remote_id, last_attempt_at, last_push_at, last_pull_at) in rows {
-        // Namespaced keys ("hub#entities", "hub#links", ...) are pull-only
-        // cursors: entities/entity_relations/links ride the same
-        // sync_outbox/sync_sends as memories, pushed under the bare
-        // destination id ("hub"), never under the namespaced key itself. A
-        // literal lookup against the namespaced key found no sync_sends row
-        // ever and so always reported the *entire* outbox as pending to
-        // it -- a permanent, misleading backlog that never drained no
-        // matter how healthy the real push was. The right answer is
-        // whatever the base destination's own pending count is, since it's
-        // the same outbox.
-        let push_remote_id = remote_id.split('#').next().unwrap_or(remote_id.as_str());
-        let (pending, _) = pending_to_remote(conn, push_remote_id)?;
+    for (remote_id, last_attempt_at, last_push_at, last_pull_at) in &rows {
+        let base_id = match remote_id.split_once('#') {
+            Some((base, _)) => base,
+            None => remote_id.as_str(),
+        };
+        let (pending, last_push_at) = if base_id == remote_id {
+            (pending_to_remote(conn, remote_id)?.0, last_push_at.clone())
+        } else {
+            let (pending, _) = pending_to_remote(conn, base_id)?;
+            let push_at = rows
+                .iter()
+                .find(|(id, ..)| id == base_id)
+                .map(|(_, _, push_at, _)| push_at.clone())
+                .unwrap_or_else(|| EPOCH.to_string());
+            (pending, push_at)
+        };
         remotes.push(RemoteStatus {
             // A never-contacted remote sits at the epoch default rather than
             // NULL, which reads as a very stale timestamp unless called out.
             // This is what distinguishes "never tried" from "tried and
             // failing" — the issue's own acceptance criterion.
             ever_contacted: last_attempt_at != EPOCH,
-            remote_id,
-            last_attempt_at,
+            remote_id: remote_id.clone(),
+            last_attempt_at: last_attempt_at.clone(),
             last_push_at,
-            last_pull_at,
+            last_pull_at: last_pull_at.clone(),
             pending,
         });
     }

@@ -603,6 +603,35 @@ fn count_splits_live_from_tombstoned() {
 }
 
 #[test]
+fn count_reports_a_category_breakdown_when_asked() {
+    // `RemoteCounts` (the `reconcile` client's deserialisation target)
+    // expects `by_category` as a top-level key -- unlike `/stats`, which
+    // nests it under `memories`. Regression for the reconcile bug where
+    // `/count` never returned this key at all, so every reconcile call read
+    // every remote category as 0 and reported a false `NodeAhead`.
+    let store = store();
+    let mut a = memory("m1", "2026-08-05T10:00:00Z");
+    a["category"] = json!("fact");
+    push(&store, "node-a", vec![a]);
+    let mut b = memory("m2", "2026-08-05T11:00:00Z");
+    b["category"] = json!("fact");
+    push(&store, "node-a", vec![b]);
+    let mut c = memory("m3", "2026-08-05T12:00:00Z");
+    c["category"] = json!("preference");
+    push(&store, "node-a", vec![c]);
+
+    let (status, body) = get(&store, "/count", "by=category");
+    assert_eq!(status, 200);
+    assert_eq!(body["by_category"]["fact"], 2);
+    assert_eq!(body["by_category"]["preference"], 1);
+
+    // Without the flag, no key at all -- a caller who forgot to ask must not
+    // be able to mistake absence for zero.
+    let (_, body) = get(&store, "/count", "");
+    assert!(body.get("by_category").is_none());
+}
+
+#[test]
 fn count_rejects_an_unknown_table_and_grouping() {
     let store = store();
     let (status, body) = get(&store, "/count", "table=passwords");

@@ -61,7 +61,7 @@ use store::HubStore;
 /// off. Clients needing to know whether a capability exists should still probe
 /// for the 404 rather than compare versions — this is a diagnostic, not a
 /// feature-negotiation channel.
-pub const HUB_VERSION: &str = "1.5.0";
+pub const HUB_VERSION: &str = "1.6.0";
 
 /// The cursor a client sends when it has never synced.
 pub const EPOCH: &str = "1970-01-01T00:00:00+00:00";

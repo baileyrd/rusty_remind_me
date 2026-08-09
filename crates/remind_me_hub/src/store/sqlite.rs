@@ -528,6 +528,22 @@ impl HubStore for SqliteStore {
         })
     }
 
+    fn count_by_category(&self, since: Option<&str>) -> StoreResult<Vec<(String, i64)>> {
+        self.with_conn(|conn| match since {
+            Some(since) => group_counts_with(
+                conn,
+                "SELECT COALESCE(NULLIF(category, ''), ?1), COUNT(*) FROM memories \
+                 WHERE updated_at > ?2 GROUP BY 1",
+                &[&NO_CATEGORY, &since],
+            ),
+            None => group_counts(
+                conn,
+                "SELECT COALESCE(NULLIF(category, ''), ?1), COUNT(*) FROM memories GROUP BY 1",
+                NO_CATEGORY,
+            ),
+        })
+    }
+
     fn compact_tombstones(&self, cutoff: &str) -> StoreResult<usize> {
         self.with_conn(|conn| {
             let tx = conn.transaction().map_err(err)?;

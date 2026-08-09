@@ -534,6 +534,23 @@ impl HubStore for PostgresStore {
         }
     }
 
+    fn count_by_category(&self, since: Option<&str>) -> StoreResult<Vec<(String, i64)>> {
+        let mut client = self.connect()?;
+        match since {
+            Some(since) => group_counts(
+                &mut client,
+                "SELECT COALESCE(NULLIF(category, ''), $1), COUNT(*) FROM memories \
+                 WHERE updated_at > $2 GROUP BY 1",
+                &[&NO_CATEGORY, &since],
+            ),
+            None => group_counts(
+                &mut client,
+                "SELECT COALESCE(NULLIF(category, ''), $1), COUNT(*) FROM memories GROUP BY 1",
+                &[&NO_CATEGORY],
+            ),
+        }
+    }
+
     fn compact_tombstones(&self, cutoff: &str) -> StoreResult<usize> {
         let mut client = self.connect()?;
         let mut tx = client.transaction().map_err(err)?;
