@@ -121,7 +121,7 @@ impl Wiki {
             .filter(|v| !v.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-crate::import_paths::home_dir_var()
+                crate::import_paths::home_dir_var()
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join(crate::db::DEFAULT_DIR_NAME)
