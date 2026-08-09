@@ -116,18 +116,21 @@ pub fn remote_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Default token file location: `~/.remind_me/connector_token`.
+/// Default token file location: `~/.remind-me/connector_token`, alongside
+/// the database ([`crate::db::DEFAULT_DIR_NAME`]).
 ///
-/// The reference persists it under its own `MEMORY_DIR` (`~/.remind-me`,
-/// hyphenated) — this port has no equivalent single "memory directory"
-/// concept to reuse, so this instead matches the directory this port's own
-/// `rusty-remind-me configure` subcommand already writes the database under
-/// (`crates/remind_me_cli/src/main.rs`'s `~/.remind_me`, underscored), to
-/// avoid inventing a third convention.
+/// Used to default to `~/.remind_me` (underscored) on the theory that
+/// `rusty-remind-me configure` wrote its database there too — that was true
+/// once, but `configure` converged onto [`crate::db::resolve_db_path`] (the
+/// same hyphenated default the reference uses) some time ago, leaving this
+/// as the one place still pointing at a directory nothing else reads or
+/// writes. A caller relying on this default (no
+/// [`REMOTE_TOKEN_FILE_ENV`]/`REMIND_ME_MCP_DIR` override) silently drifted
+/// from wherever the real connector's token actually lives.
 fn default_token_file() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".remind_me")
+        .join(crate::db::DEFAULT_DIR_NAME)
         .join("connector_token")
 }
 
@@ -141,13 +144,12 @@ pub fn token_file_path() -> PathBuf {
         .unwrap_or_else(default_token_file)
 }
 
-/// Default OAuth state file location: `~/.remind_me/oauth.json`, sibling of
-/// [`default_token_file`] — same "no `MEMORY_DIR` equivalent to reuse"
-/// reasoning as that function's own doc.
+/// Default OAuth state file location: `~/.remind-me/oauth.json`, sibling of
+/// [`default_token_file`] — same drift this fixes for the same reason.
 fn default_oauth_state_file() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".remind_me")
+        .join(crate::db::DEFAULT_DIR_NAME)
         .join("oauth.json")
 }
 
@@ -703,6 +705,30 @@ mod tests {
         std::env::set_var(REMOTE_ENABLED_ENV, "0");
         assert!(!remote_enabled());
         clear_env();
+    }
+
+    #[test]
+    fn default_token_and_oauth_paths_share_the_hyphenated_data_directory() {
+        // Regression: these used to hardcode `.remind_me` (underscored), a
+        // directory nothing else in this port reads or writes -- `configure`
+        // and the database resolver both settled on `.remind-me` (hyphenated)
+        // long ago. A default that disagreed meant a caller with no
+        // REMOTE_TOKEN_FILE_ENV/REMOTE_OAUTH_STATE_FILE_ENV override (e.g.
+        // `remind_me_revoke_clients` run from a process that isn't the
+        // configured connector) silently looked in the wrong place and
+        // always found an empty client list.
+        let token = default_token_file();
+        let oauth = default_oauth_state_file();
+        assert_eq!(token.file_name().unwrap(), "connector_token");
+        assert_eq!(oauth.file_name().unwrap(), "oauth.json");
+        assert_eq!(
+            token.parent().unwrap().file_name().unwrap(),
+            crate::db::DEFAULT_DIR_NAME
+        );
+        assert_eq!(
+            oauth.parent().unwrap().file_name().unwrap(),
+            crate::db::DEFAULT_DIR_NAME
+        );
     }
 
     #[test]
