@@ -159,10 +159,7 @@ pub const ICS_TOKEN_FILE_ENV: &str = "REMIND_ME_ICS_TOKEN_FILE";
 /// Default token file, beside the connector token this crate already writes
 /// (`~/.remind-me/ics_token`, alongside [`crate::db::DEFAULT_DIR_NAME`]).
 fn default_token_file() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(crate::db::DEFAULT_DIR_NAME)
-        .join("ics_token")
+    crate::db::resolve_memory_dir_child("ics_token")
 }
 
 pub fn token_file_path() -> std::path::PathBuf {

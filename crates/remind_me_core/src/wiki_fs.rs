@@ -112,21 +112,16 @@ impl Wiki {
 
     /// The configured wiki directory.
     ///
-    /// `REMIND_ME_WIKI_DIR`, or `~/.remind-me/wiki` (alongside
-    /// [`crate::db::DEFAULT_DIR_NAME`]). Read at call time rather than
-    /// cached so a caller can relocate it without restarting.
+    /// `REMIND_ME_WIKI_DIR`, or `~/.remind-me/wiki` (falling back to
+    /// `~/.remind_me/wiki` — underscore — if that's the only one that
+    /// exists; see `db::resolve_memory_dir_child`, #228). Read at call time
+    /// rather than cached so a caller can relocate it without restarting.
     pub fn from_env() -> Self {
         let root = std::env::var(WIKI_DIR_ENV)
             .ok()
             .filter(|v| !v.trim().is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                crate::import_paths::home_dir_var()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(crate::db::DEFAULT_DIR_NAME)
-                    .join("wiki")
-            });
+            .unwrap_or_else(|| crate::db::resolve_memory_dir_child("wiki"));
         Self::new(root)
     }
 
