@@ -233,11 +233,56 @@ pub fn semantic_search(
     category: Option<&str>,
 ) -> Result<Vec<Memory>, VectorError> {
     Ok(
-        semantic_search_scored(conn, embedder, query, limit, category)?
+        semantic_search_scored(conn, embedder, query, &[], limit, category)?
             .into_iter()
             .map(|(memory, _similarity)| memory)
             .collect(),
     )
+}
+
+/// Embed `texts` and average them into one L2-normalised search vector.
+///
+/// With a single text this is exactly that text's own (already-normalised)
+/// embedding, re-normalised — a no-op. With several (e.g. the query plus a
+/// HyDE passage from [`crate::query_expansion`]), the mean vector blends
+/// question-space and document-space so candidates near either phrasing
+/// rank well.
+///
+/// `texts[0]` is always the literal search query and is embedded with
+/// [`EmbedRole::Query`]; any remaining texts are passage-like expansion
+/// text, embedded with [`EmbedRole::Passage`] — otherwise a query-prefixed
+/// model would apply the wrong instruction to half the fused vector's
+/// inputs. Matches the reference's `db._fuse_query_embedding`.
+///
+/// # Panics
+/// Never — `texts` empty returns an empty vector, the same degrade-not-fail
+/// contract as everything else here.
+pub fn fuse_query_embedding(
+    embedder: &dyn Embedder,
+    texts: &[String],
+) -> Result<Vec<f32>, EmbedError> {
+    let Some((query_text, extra_texts)) = texts.split_first() else {
+        return Ok(Vec::new());
+    };
+    let mut vecs = embedder.embed(std::slice::from_ref(query_text), EmbedRole::Query)?;
+    if !extra_texts.is_empty() {
+        vecs.extend(embedder.embed(extra_texts, EmbedRole::Passage)?);
+    }
+    let dim = vecs.first().map(|v| v.len()).unwrap_or(0);
+    if dim == 0 {
+        return Ok(Vec::new());
+    }
+    let mut fused = vec![0.0f32; dim];
+    for v in &vecs {
+        for (f, x) in fused.iter_mut().zip(v.iter()) {
+            *f += x;
+        }
+    }
+    let n = vecs.len() as f32;
+    for f in fused.iter_mut() {
+        *f /= n;
+    }
+    Ok(crate::embedder::l2_normalize(fused))
 }
 
 /// Same as [`semantic_search`], but keeps each memory's raw cosine
@@ -251,14 +296,14 @@ pub fn semantic_search_scored(
     conn: &Connection,
     embedder: &dyn Embedder,
     query: &str,
+    extra_texts: &[String],
     limit: usize,
     category: Option<&str>,
 ) -> Result<Vec<(Memory, f32)>, VectorError> {
-    let query_vector = embedder
-        .embed(&[query.to_string()], EmbedRole::Query)?
-        .into_iter()
-        .next()
-        .unwrap_or_default();
+    let mut fuse_texts = Vec::with_capacity(1 + extra_texts.len());
+    fuse_texts.push(query.to_string());
+    fuse_texts.extend(extra_texts.iter().cloned());
+    let query_vector = fuse_query_embedding(embedder, &fuse_texts)?;
     if query_vector.is_empty() {
         return Ok(Vec::new());
     }
@@ -422,7 +467,7 @@ pub fn reindex(conn: &Connection) -> Result<ReindexResult, VectorError> {
             ..Default::default()
         });
     };
-    reindex_with(conn, &embedder)
+    reindex_with(conn, &*embedder)
 }
 
 /// Same as [`reindex`], but takes the embedder explicitly instead of

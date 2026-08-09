@@ -118,6 +118,19 @@ jobs:
       - name: cargo test --features rerank
         run: cargo test -p remind_me_core --features rerank --locked
 
+      # Unlike `rerank`, this is a build+clippy check rather than a test
+      # run, like `ocr`/`audio` above — not because it needs a model (it
+      # does not; `onnx_embedder_test.rs` covers the graceful-degradation
+      # paths with synthetic files, the same way `reranker_test.rs` does),
+      # but because `cargo test` relinks every integration test binary in
+      # the crate against `rten`/`tokenizers`, and by this point in the job
+      # that exhausted the runner's disk mid-link (`ld` SIGBUS on an
+      # unrelated test binary, not a real code fault — see the fix commit
+      # for a run that failed this way). Clippy's analysis pass never
+      # invokes the linker, so it is unaffected.
+      - name: cargo clippy --features local-embed
+        run: cargo clippy -p remind_me_core --features local-embed --all-targets --locked -- -D warnings
+
       # Like `rerank` above, this runs the tests rather than only clippy, and
       # for a stronger reason: the feature's entire claim is that a thread
       # wedged in CPU-bound code still gets dumped. Only running it can show

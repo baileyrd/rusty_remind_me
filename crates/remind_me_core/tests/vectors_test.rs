@@ -11,7 +11,8 @@ use remind_me_core::db::queries;
 use remind_me_core::embedder::{EmbedError, EmbedRole, Embedder, EmbeddingIdentity};
 use remind_me_core::vectors::{
     delete_chunks_for_memory, dimension_of, embed_and_store, embedding_mismatch_info,
-    mark_embedding_meta_current, reconcile_embedding_meta, reindex, reindex_with, semantic_search,
+    fuse_query_embedding, mark_embedding_meta_current, reconcile_embedding_meta, reindex,
+    reindex_with, semantic_search, semantic_search_scored,
 };
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
@@ -717,4 +718,164 @@ fn embedding_blank_content_does_not_record_embedding_meta() {
         .query_row("SELECT count(*) FROM embedding_meta", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// fuse_query_embedding / HyDE-style expansion
+// ---------------------------------------------------------------------------
+
+/// Records which [`EmbedRole`] each input text was embedded with, keyed by
+/// text — used only to assert `fuse_query_embedding`'s role assignment
+/// (query vs. passage), which `FakeEmbedder` above deliberately ignores.
+struct RoleTrackingEmbedder {
+    dim: usize,
+    vectors: HashMap<String, Vec<f32>>,
+    roles_seen: std::sync::Mutex<HashMap<String, EmbedRole>>,
+}
+
+impl RoleTrackingEmbedder {
+    fn new(dim: usize) -> Self {
+        Self {
+            dim,
+            vectors: HashMap::new(),
+            roles_seen: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn with(mut self, text: &str, vector: Vec<f32>) -> Self {
+        assert_eq!(vector.len(), self.dim);
+        self.vectors.insert(text.to_string(), vector);
+        self
+    }
+
+    fn role_of(&self, text: &str) -> Option<EmbedRole> {
+        self.roles_seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(text)
+            .copied()
+    }
+}
+
+impl Embedder for RoleTrackingEmbedder {
+    fn embed(&self, texts: &[String], role: EmbedRole) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let mut seen = self.roles_seen.lock().unwrap_or_else(|e| e.into_inner());
+        texts
+            .iter()
+            .map(|t| {
+                seen.insert(t.clone(), role);
+                self.vectors
+                    .get(t)
+                    .cloned()
+                    .ok_or_else(|| EmbedError(format!("no vector for {:?}", t)))
+            })
+            .collect()
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn identity(&self) -> EmbeddingIdentity {
+        EmbeddingIdentity {
+            backend: "fake".to_string(),
+            model: "role-tracking".to_string(),
+            dim: self.dim,
+        }
+    }
+}
+
+#[test]
+fn fuse_query_embedding_of_a_single_text_is_that_texts_own_normalized_vector() {
+    let embedder = FakeEmbedder::new(2).with("hello", vec![3.0, 4.0]);
+
+    let fused = fuse_query_embedding(&embedder, &["hello".to_string()]).unwrap();
+
+    assert!((fused[0] - 0.6).abs() < 1e-6);
+    assert!((fused[1] - 0.8).abs() < 1e-6);
+}
+
+#[test]
+fn fuse_query_embedding_averages_and_renormalizes_several_texts() {
+    let embedder = FakeEmbedder::new(2)
+        .with("query text", vec![1.0, 0.0])
+        .with("hyde passage", vec![0.0, 1.0]);
+
+    let fused = fuse_query_embedding(
+        &embedder,
+        &["query text".to_string(), "hyde passage".to_string()],
+    )
+    .unwrap();
+
+    // Mean of [1,0] and [0,1] is [0.5,0.5]; L2-normalised is [1/sqrt(2), 1/sqrt(2)].
+    let expected = 1.0 / std::f32::consts::SQRT_2;
+    assert!((fused[0] - expected).abs() < 1e-6);
+    assert!((fused[1] - expected).abs() < 1e-6);
+}
+
+#[test]
+fn fuse_query_embedding_of_no_texts_is_empty() {
+    let embedder = FakeEmbedder::new(2);
+    assert!(fuse_query_embedding(&embedder, &[]).unwrap().is_empty());
+}
+
+#[test]
+fn fuse_query_embedding_sends_the_query_role_to_the_first_text_and_passage_role_to_the_rest() {
+    let embedder = RoleTrackingEmbedder::new(2)
+        .with("the query", vec![1.0, 0.0])
+        .with("expansion one", vec![0.0, 1.0])
+        .with("expansion two", vec![1.0, 1.0]);
+
+    fuse_query_embedding(
+        &embedder,
+        &[
+            "the query".to_string(),
+            "expansion one".to_string(),
+            "expansion two".to_string(),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(embedder.role_of("the query"), Some(EmbedRole::Query));
+    assert_eq!(embedder.role_of("expansion one"), Some(EmbedRole::Passage));
+    assert_eq!(embedder.role_of("expansion two"), Some(EmbedRole::Passage));
+}
+
+#[test]
+fn semantic_search_scored_with_extra_texts_can_change_the_winner_vs_the_plain_query() {
+    // The plain query alone is closest to `off_topic`; a HyDE-style
+    // expansion text pulls the fused vector toward `on_topic` instead —
+    // proving `extra_texts` is actually wired into the search vector, not
+    // silently ignored.
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let off_topic = add(&conn, "off topic memory");
+    let on_topic = add(&conn, "on topic memory");
+    let embedder = FakeEmbedder::new(2)
+        .with("query", vec![1.0, 0.05])
+        .with("expansion", vec![0.0, 1.0])
+        .with("off topic memory", vec![1.0, 0.0])
+        .with("on topic memory", vec![0.0, 1.0]);
+    embed_and_store(&conn, &embedder, &off_topic, "off topic memory").unwrap();
+    embed_and_store(&conn, &embedder, &on_topic, "on topic memory").unwrap();
+
+    let plain = semantic_search_scored(&conn, &embedder, "query", &[], 10, None).unwrap();
+    let expanded = semantic_search_scored(
+        &conn,
+        &embedder,
+        "query",
+        &["expansion".to_string()],
+        10,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        plain[0].0.id, off_topic,
+        "plain query alone favors off_topic"
+    );
+    assert_eq!(
+        expanded[0].0.id, on_topic,
+        "the expansion text should pull the fused vector toward on_topic"
+    );
 }

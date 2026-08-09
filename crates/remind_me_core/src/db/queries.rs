@@ -146,7 +146,7 @@ pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
     // the write that already succeeded. `remind_me_reindex` is the backstop
     // for anything that lands here without an embedder available.
     if let Some(embedder) = crate::embedder::available_embedder() {
-        let _ = crate::vectors::embed_and_store(conn, &embedder, &id, &input.content);
+        let _ = crate::vectors::embed_and_store(conn, &*embedder, &id, &input.content);
     }
 
     let memory = get_memory_by_id(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
@@ -351,7 +351,7 @@ pub fn update_memory(conn: &Connection, input: &MemoryUpdateInput) -> Result<Upd
     // that already committed.
     if let Some(content) = &input.content {
         if let Some(embedder) = crate::embedder::available_embedder() {
-            let _ = crate::vectors::embed_and_store(conn, &embedder, &input.memory_id, content);
+            let _ = crate::vectors::embed_and_store(conn, &*embedder, &input.memory_id, content);
         }
     }
 
@@ -726,7 +726,7 @@ pub fn search_memories(
         input,
         configured
             .as_ref()
-            .map(|e| e as &dyn crate::embedder::Embedder),
+            .map(|e| &**e as &dyn crate::embedder::Embedder),
     )
 }
 
@@ -830,10 +830,12 @@ pub fn search_memories_budgeted(
     // answer.
     let (semantic_memories, semantic_similarity) = match embedder {
         Some(embedder) => {
+            let extra_texts = crate::query_expansion::expand_query(&input.query);
             let scored = crate::vectors::semantic_search_scored(
                 conn,
                 embedder,
                 &input.query,
+                &extra_texts,
                 input.limit * 2,
                 input.category.as_deref(),
             )
@@ -1077,7 +1079,7 @@ pub fn search_with_expansions(
         input,
         configured
             .as_ref()
-            .map(|e| e as &dyn crate::embedder::Embedder),
+            .map(|e| &**e as &dyn crate::embedder::Embedder),
     )?;
     let memories = outcome.results;
     let ids: Vec<String> = memories.iter().map(|r| r.memory.id.clone()).collect();

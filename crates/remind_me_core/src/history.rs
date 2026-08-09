@@ -253,7 +253,7 @@ pub fn revert(
     // embedder leaves the memory keyword-searchable rather than failing an
     // edit that already committed.
     if let Some(embedder) = crate::embedder::available_embedder() {
-        let _ = crate::vectors::embed_and_store(conn, &embedder, memory_id, &content);
+        let _ = crate::vectors::embed_and_store(conn, &*embedder, memory_id, &content);
     }
 
     Ok(RevertOutcome::Reverted { revision_id })
