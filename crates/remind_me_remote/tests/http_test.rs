@@ -269,3 +269,81 @@ async fn bearer_auth_reuses_a_session_the_secret_path_opened_and_round_trips_a_r
     );
     assert_ne!(result["result"]["isError"], json!(true));
 }
+
+#[tokio::test]
+async fn a_2026_07_28_client_calls_a_tool_in_one_post_with_no_session_at_all() {
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // No prior `initialize`, no `Mcp-Session-Id` -- SEP-2567's discover
+    // lifecycle dispatches per request. `MCP-Protocol-Version: 2026-07-28`
+    // is what routes `handle_post` there instead of the legacy session
+    // path; `Mcp-Method` is the SEP-2243 standard header that version also
+    // requires (`tools/list` has no `Mcp-Name` counterpart -- only
+    // name-bearing methods like `tools/call` do).
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "tools/list".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(
+        !response.headers().contains_key("mcp-session-id"),
+        "the discover lifecycle is session-free -- a 2026-07-28 request \
+         must not mint a legacy session"
+    );
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the tools/list response must be among the SSE payloads");
+    let tools = result["result"]["tools"]
+        .as_array()
+        .expect("tools/list result must carry a tools array");
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "remind_me_add"),
+        "expected the real tool list dispatched through RemindMeHandler, got: {tools:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_2025_11_25_client_still_uses_the_legacy_session_lifecycle() {
+    // 2025-11-25 predates SEP-2567 (that lands at 2026-07-28) -- confirms
+    // `is_legacy_request`'s version cutoff, not just the two edges already
+    // covered by the default (2024-11-05, via the other tests) and the new
+    // 2026-07-28 discover lifecycle above.
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(mcp_headers())
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "integration-test", "version": "0" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(
+        response.headers().contains_key("mcp-session-id"),
+        "2025-11-25 is still legacy-lifecycle and must get a session id"
+    );
+}

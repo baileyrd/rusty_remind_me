@@ -71,8 +71,6 @@
 //! `handler.rs`'s `remind_me_handler_is_send_and_sync` test, which asserts
 //! that compile-time property directly rather than assuming it holds.
 //!
-//! # What a human still needs to validate
-//!
 //! This crate's own test suite (unit tests here, plus `tests/http_test.rs`
 //! driving the real axum/rmcp server over HTTP) can assert protocol shape —
 //! that `initialize` negotiates, `tools/call` round-trips through
@@ -80,11 +78,31 @@
 //! rmcp itself produces. It cannot prove interop with an actual claude.ai
 //! custom connector, which this sandboxed environment has no network path
 //! to reach. That remains an explicit open item; see `RELEASE_NOTES.md`.
+//!
+//! # SEP-2567 (protocol version >= 2026-07-28): stateless per-request dispatch
+//!
+//! `rmcp` 3.0.1 implements both the classic session-managed lifecycle every
+//! client up to `2025-11-25` uses (`legacy_session_mode`, kept on here —
+//! that's what a real-world client like `mcp-remote` still speaks, and
+//! there is no reason to drop support for it) and SEP-2567's newer
+//! "discover lifecycle": a `2026-07-28`+ client can call a tool in a single
+//! POST with no prior `initialize`/session at all, deciding per-request
+//! rather than per-connection. `tower.rs`'s `handle_post` already routes to
+//! whichever lifecycle a given request's protocol version calls for — nothing
+//! in `handler.rs`'s `RemindMeHandler` needed to change for that, since
+//! `dispatch` was already per-call and stateless. The one piece this crate
+//! does add is [`event_store::InProcessEventStore`], wired into
+//! `server::build_router`'s `LocalSessionManager`: it's what lets `GET /mcp`
+//! (resuming a dropped stream via `Last-Event-Id`) work for both lifecycles
+//! at once, rather than only the legacy session-based one. See that
+//! module's doc for why.
 
 pub mod auth;
+pub mod event_store;
 pub mod handler;
 pub mod oauth;
 pub mod server;
 
+pub use event_store::InProcessEventStore;
 pub use handler::RemindMeHandler;
 pub use server::{build_router, is_loopback_host, run, run_blocking, warn_if_widened};
