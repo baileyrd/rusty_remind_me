@@ -31,6 +31,8 @@ rusty_remind_me/
 ├── README.md                   # User & Developer guide
 ├── ARCHITECTURE.md             # Technical design & schema documentation
 ├── CONTRIBUTING.md             # Development & testing guidelines
+├── docs/
+│   └── CUTOVER.md              # Runbook: migrating clients from the Python reference to this port
 ├── scripts/
 │   ├── configure_mcp.ps1       # PowerShell auto-configuration script for Windows
 │   └── configure_mcp.py        # Cross-platform Python auto-configuration script
@@ -105,6 +107,11 @@ rusty-remind-me configure --default-format markdown
 Tools that mirror a `remind_me` input model already use that model's own default and are deliberately untouched by this setting: Markdown for `search`, `list`, `wiki_list`, `stats`, `history`, `digest` and `list_reminders`, JSON for `vitality_report`. Making `vitality_report` render Markdown because you asked for "markdown defaults" would move this port *away* from the reference.
 
 A per-call `"response_format"` argument always wins over the setting, in both directions.
+
+**Migrating an already-running client from `remind_me` to this binary?** A
+stdio client will not pick up a config change until it restarts — see
+`docs/CUTOVER.md` for the full runbook and the lessons learned cutting over
+every consumer on a real machine.
 
 ## Command Line Interface (CLI)
 
