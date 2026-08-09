@@ -180,10 +180,72 @@ pub fn wiki_page(page: &WikiPage) -> String {
 
 /// Renders the **enriched** status value, not the bare `ServerStatus`.
 ///
-/// The dispatch layer overwrites `webhook`, `sync_peer`, `sync` and `remote`
-/// with live state the core crate cannot see. Rendering from the struct would
-/// silently omit exactly those four, so Markdown would report less than JSON
-/// for the same call.
+/// The dispatch layer overwrites `dashboard`, `sync`, `webhook` and `remote`
+/// with live state the core crate cannot see on its own (a separate
+/// dashboard process's PID file, the sync worker's in-memory counters, the
+/// webhook listener, the remote connector's env/token state). Only `mcp` and
+/// `embeddings` keep the core crate's tagged `SubsystemStatus` shape
+/// (`{"state": "active"}` / `{"state": "not_implemented", ...}`) — the other
+/// four are untagged structs (`DashboardStatus`/`SyncWorkerStatus`/
+/// `WebhookStatus`/`RemoteStatus`) with no `state` field at all. Reading all
+/// six the same generic way rendered `?` for those four regardless of their
+/// real state, even while `remind_me_server_status`'s own JSON output was
+/// correct — [`subsystem_line`] renders each shape on its own terms instead.
+fn subsystem_line(key: &str, v: &serde_json::Value) -> String {
+    let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+
+    match key {
+        "dashboard" => {
+            if b("running") {
+                format!("active ({})", s("url").unwrap_or_default())
+            } else {
+                "not running".to_string()
+            }
+        }
+        "sync" => {
+            if !b("enabled") {
+                return "disabled".to_string();
+            }
+            match s("last_error") {
+                Some(err) => format!("error: {err} (after {} cycles)", n("cycles")),
+                None => format!("active ({} cycles)", n("cycles")),
+            }
+        }
+        "webhook" => {
+            if !b("enabled") {
+                return "disabled".to_string();
+            }
+            if !b("running") {
+                return match s("start_error") {
+                    Some(err) => format!("enabled, not listening: {err}"),
+                    None => "enabled, not listening".to_string(),
+                };
+            }
+            format!(
+                "active ({}:{}, {} ingested)",
+                s("bind").unwrap_or_default(),
+                n("port"),
+                n("requests_ingested")
+            )
+        }
+        "remote" => {
+            if !b("enabled") {
+                "disabled".to_string()
+            } else {
+                format!("active ({}:{})", s("host").unwrap_or_default(), n("port"))
+            }
+        }
+        // `mcp`/`embeddings`: the tagged `SubsystemStatus` shape.
+        _ => v
+            .get("state")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?")
+            .to_string(),
+    }
+}
+
 pub fn server_status(report: &serde_json::Value) -> String {
     let s = |k: &str| -> String {
         report
@@ -193,15 +255,6 @@ pub fn server_status(report: &serde_json::Value) -> String {
             .to_string()
     };
     let n = |k: &str| -> i64 { report.get(k).and_then(|v| v.as_i64()).unwrap_or(0) };
-    // Subsystems serialise as a tagged object; `state` is the tag.
-    let sub = |k: &str| -> String {
-        report
-            .get(k)
-            .and_then(|v| v.get("state"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("?")
-            .to_string()
-    };
 
     let mut out = format!("**rusty-remind-me {}**\n", s("version"));
     out.push_str(&format!(
@@ -231,7 +284,11 @@ pub fn server_status(report: &serde_json::Value) -> String {
         "webhook",
         "remote",
     ] {
-        out.push_str(&format!("\n- {key}: {}", sub(key)));
+        let line = report
+            .get(key)
+            .map(|v| subsystem_line(key, v))
+            .unwrap_or_else(|| "?".to_string());
+        out.push_str(&format!("\n- {key}: {line}"));
     }
     let watcher = report.get("watcher");
     let flag = |k: &str| -> bool {
