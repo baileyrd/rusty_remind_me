@@ -107,10 +107,7 @@ impl std::error::Error for ApiKeyError {}
 
 /// `~/.remind-me/api_keys.json`, alongside [`crate::db::DEFAULT_DIR_NAME`].
 fn default_store_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(crate::db::DEFAULT_DIR_NAME)
-        .join("api_keys.json")
+    crate::db::resolve_memory_dir_child("api_keys.json")
 }
 
 pub fn store_path() -> PathBuf {

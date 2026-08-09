@@ -117,21 +117,14 @@ pub fn remote_enabled() -> bool {
 }
 
 /// Default token file location: `~/.remind-me/connector_token`, alongside
-/// the database ([`crate::db::DEFAULT_DIR_NAME`]).
-///
-/// Used to default to `~/.remind_me` (underscored) on the theory that
-/// `rusty-remind-me configure` wrote its database there too — that was true
-/// once, but `configure` converged onto [`crate::db::resolve_db_path`] (the
-/// same hyphenated default the reference uses) some time ago, leaving this
-/// as the one place still pointing at a directory nothing else reads or
-/// writes. A caller relying on this default (no
-/// [`REMOTE_TOKEN_FILE_ENV`]/`REMIND_ME_MCP_DIR` override) silently drifted
-/// from wherever the real connector's token actually lives.
+/// the database ([`crate::db::DEFAULT_DIR_NAME`]) — falling back to
+/// `~/.remind_me/connector_token` (underscore) if that's the only one that
+/// exists, via [`crate::db::resolve_memory_dir_child`] (#228). No caller
+/// relying on this default (no [`REMOTE_TOKEN_FILE_ENV`]/`REMIND_ME_MCP_DIR`
+/// override) silently drifts from wherever the real connector's token
+/// already lives, whichever of the two directories that turns out to be.
 fn default_token_file() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(crate::db::DEFAULT_DIR_NAME)
-        .join("connector_token")
+    crate::db::resolve_memory_dir_child("connector_token")
 }
 
 /// The effective token file path: [`REMOTE_TOKEN_FILE_ENV`] if set and
@@ -145,12 +138,9 @@ pub fn token_file_path() -> PathBuf {
 }
 
 /// Default OAuth state file location: `~/.remind-me/oauth.json`, sibling of
-/// [`default_token_file`] — same drift this fixes for the same reason.
+/// [`default_token_file`] — same fallback, same reason.
 fn default_oauth_state_file() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(crate::db::DEFAULT_DIR_NAME)
-        .join("oauth.json")
+    crate::db::resolve_memory_dir_child("oauth.json")
 }
 
 /// The effective OAuth state file path: [`REMOTE_OAUTH_STATE_FILE_ENV`] if

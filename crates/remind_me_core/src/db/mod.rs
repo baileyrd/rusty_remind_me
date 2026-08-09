@@ -21,6 +21,11 @@ pub const DB_FILE_NAME: &str = "memory.db";
 /// the reference's default. Hyphen, not underscore.
 pub const DEFAULT_DIR_NAME: &str = ".remind-me";
 
+/// The pre-#228 default directory, before the hyphen fix landed. Read-only:
+/// [`resolve_memory_dir_child`]'s fallback for a file/directory a user
+/// already has here, never a location anything in this crate writes to.
+const LEGACY_UNDERSCORE_DIR_NAME: &str = ".remind_me";
+
 /// Where the database lives, given the environment.
 ///
 /// # Why this honours a variable belonging to another implementation
@@ -68,10 +73,76 @@ where
     if let Some(path) = non_empty(DB_PATH_ENV) {
         return expand_tilde(&path, &home);
     }
-    if let Some(dir) = non_empty(MCP_DIR_ENV) {
-        return expand_tilde(&dir, &home).join(DB_FILE_NAME);
+    resolve_memory_dir_from(&get, home).join(DB_FILE_NAME)
+}
+
+/// Where per-user files other than the database live: `$REMIND_ME_MCP_DIR`
+/// or `~/.remind-me` — the directory half of [`resolve_db_path`]'s
+/// precedence, lifted out (as suggested in #228) so every other per-user
+/// file this crate writes (wiki root, ICS feed token, API key store,
+/// connector token, OAuth state) resolves under the same directory as the
+/// database instead of drifting to its own ad-hoc default.
+///
+/// No `REMIND_ME_DB_PATH`-equivalent override here: that variable names a
+/// *file*, and there is no directory-shaped analogue to prefer ahead of
+/// `MCP_DIR_ENV`. Each caller keeps its own explicit override env var
+/// (`REMIND_ME_WIKI_DIR`, `REMIND_ME_ICS_TOKEN_FILE`, ...) for that, checked
+/// before ever calling this.
+pub fn resolve_memory_dir() -> PathBuf {
+    resolve_memory_dir_from(
+        |name| std::env::var(name).ok(),
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+    )
+}
+
+/// [`resolve_memory_dir`] with the environment and home directory injected —
+/// same reason as [`resolve_db_path_from`].
+pub fn resolve_memory_dir_from<F>(get: F, home: PathBuf) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match get(MCP_DIR_ENV).filter(|v| !v.trim().is_empty()) {
+        Some(dir) => expand_tilde(&dir, &home),
+        None => home.join(DEFAULT_DIR_NAME),
     }
-    home.join(DEFAULT_DIR_NAME).join(DB_FILE_NAME)
+}
+
+/// [`resolve_memory_dir`] plus a filename, with one safety net for the #228
+/// rename (`~/.remind_me` → `~/.remind-me`, underscore to hyphen): when
+/// `REMIND_ME_MCP_DIR` is unset (so the *default* directory applies) and
+/// `name` does not exist under the new default but does exist under the
+/// pre-fix underscored one, that legacy path is returned instead — so a
+/// wiki page, API key store, calendar token, or connector credential nobody
+/// re-created under the new directory is found rather than silently
+/// orphaned. Only ever read from here, never written to or migrated: the
+/// old directory is left exactly as it is.
+///
+/// `REMIND_ME_MCP_DIR` being set opts out of the fallback entirely — an
+/// explicitly chosen directory has no "legacy" counterpart to fall back to.
+pub fn resolve_memory_dir_child(name: &str) -> PathBuf {
+    resolve_memory_dir_child_from(
+        |key| std::env::var(key).ok(),
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+        name,
+    )
+}
+
+/// [`resolve_memory_dir_child`] with the environment and home directory
+/// injected — same reason as [`resolve_db_path_from`].
+pub fn resolve_memory_dir_child_from<F>(get: F, home: PathBuf, name: &str) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mcp_dir_overridden = get(MCP_DIR_ENV).is_some_and(|v| !v.trim().is_empty());
+    let new_path = resolve_memory_dir_from(&get, home.clone()).join(name);
+    if mcp_dir_overridden || new_path.exists() {
+        return new_path;
+    }
+    let legacy_path = home.join(LEGACY_UNDERSCORE_DIR_NAME).join(name);
+    if legacy_path.exists() {
+        return legacy_path;
+    }
+    new_path
 }
 
 /// Expand a leading `~` against `home`, as the reference's `expanduser` does.

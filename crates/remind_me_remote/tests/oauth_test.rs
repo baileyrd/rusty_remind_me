@@ -52,9 +52,10 @@ fn mcp_headers() -> reqwest::header::HeaderMap {
 
 /// `build_router`'s OAuth branch resolves its state-file path via
 /// `remind_me_core::remote::oauth_state_file_path()` (env-var-overridable,
-/// defaulting to `~/.remind_me/oauth.json`) rather than taking one as a
-/// parameter -- correct for the one real server process, but this file's
-/// tests must never share that file (each needs its own client/token
+/// defaulting to `~/.remind-me/oauth.json`, falling back to the pre-#228
+/// `~/.remind_me/oauth.json` if only that one exists) rather than taking one
+/// as a parameter -- correct for the one real server process, but this
+/// file's tests must never share that file (each needs its own client/token
 /// population, and must never touch a developer's actual home directory).
 /// `ENV_LOCK` serializes every test that spawns a server so setting
 /// `REMIND_ME_REMOTE_OAUTH_STATE_FILE` per test is race-free, the same

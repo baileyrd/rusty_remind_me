@@ -45,6 +45,42 @@ Dated entries, newest first. One entry per merged pull request.
 ### Docs
 - `docs/adr/0017-sep-2567-discover-lifecycle-shared-event-store.md`.
 
+## 2026-08-09 — Every per-user file now resolves under one directory, hyphen not underscore (#228)
+
+### Fixed
+- **The wiki root, ICS feed token, API key store, connector token, and
+  OAuth state file** all now resolve under the same directory
+  `db::resolve_db_path` already uses (`$REMIND_ME_MCP_DIR` or
+  `~/.remind-me`), via new `db::resolve_memory_dir`/
+  `resolve_memory_dir_child` helpers. `wiki_fs.rs`, `ics.rs`, and
+  `api_keys.rs` were still hardcoding `~/.remind_me` (underscore) —
+  `#219`'s own release note claimed that directory was gone; it was only
+  gone from the database path. `remote.rs`'s connector token and OAuth
+  state (`#243`) already pointed at the hyphenated directory, but with no
+  fallback for existing data — retrofitted with the same helper below.
+- **A user with existing data under the old `~/.remind_me` (underscore)
+  directory does not lose it.** If the new hyphenated location for a given
+  file doesn't exist yet but the old underscored one does,
+  `resolve_memory_dir_child` reads from the old location instead — read
+  only, nothing is migrated or written to the old directory. An explicit
+  `REMIND_ME_MCP_DIR` override opts out of the fallback entirely: a custom
+  directory has no "legacy" counterpart to fall back to.
+- Confirmed this wasn't hypothetical: this exact fix was written against a
+  machine with both `~/.remind_me/wiki` and `~/.remind-me/wiki` already
+  present, exactly the drift this issue describes.
+
+### Verified
+- `resolve_memory_dir_from`'s precedence (mirrors `db_path_test.rs`'s
+  existing coverage of `resolve_db_path_from`) and
+  `resolve_memory_dir_child_from`'s full fallback matrix — neither location
+  exists, only the new one, only the legacy one, both (new wins), an
+  `REMIND_ME_MCP_DIR` override opts out, works for a plain file and not
+  just a directory — against real scratch directories
+  (`crates/remind_me_core/tests/memory_dir_test.rs`).
+- A regression guard: a test that walks every `crates/*/src/**/*.rs` file
+  and fails if the quoted literal `".remind_me"` appears in real code
+  anywhere outside `db/mod.rs`'s own allowlisted fallback constant.
+
 ## 2026-08-08 — One setting makes this a drop-in MCP server
 
 ### Added
