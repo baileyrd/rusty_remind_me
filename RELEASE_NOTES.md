@@ -2,6 +2,49 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-09 — Discover-lifecycle (SEP-2567, protocol version 2026-07-28) support in the remote connector (#246)
+
+### Added
+- **`remind_me_remote` now speaks both Streamable HTTP lifecycles `rmcp`
+  3.0.1 implements.** The session-managed one every client through protocol
+  version `2025-11-25` uses — `mcp-remote`, Claude Desktop, everything
+  ADR-0010 built — keeps working exactly as before: `legacy_session_mode`
+  is unchanged, still on by default. `2026-07-28`+ clients get SEP-2567's
+  newer "discover lifecycle" instead: a tool call is a single POST with no
+  `initialize`/session at all, decided per request from its negotiated
+  protocol version rather than by configuration.
+- **`InProcessEventStore`** (`crates/remind_me_remote/src/event_store.rs`):
+  `rmcp` ships the `EventStore` trait but no implementation of it. Attaching
+  one to `build_router`'s `LocalSessionManager` is what makes `GET /mcp`
+  (resuming a dropped response stream via `Last-Event-Id`) work at all for
+  discover-lifecycle clients, and — traced directly in
+  `LocalSessionManager::resume`, not assumed — upgrades legacy-session
+  resumption too, from a more limited in-worker mechanism to the
+  store-backed one `rmcp` already preferred when available.
+
+### Behaviour
+- No client sees any change unless it negotiates protocol version
+  `2026-07-28` or later. `2025-11-25` is still classified legacy (SEP-2567's
+  own lifecycle cutover is `2026-07-28`, not the version number closest to
+  the SEP's own name).
+
+### Verified
+- A `2026-07-28` client round-trips a real mutating tool call
+  (`tools/call`), a resource read (`resources/read`), and a prompt listing
+  (`prompts/list`) in one POST each, no session, driven through the real
+  HTTP router (`crates/remind_me_remote/tests/http_test.rs`).
+- The OAuth-enabled router (an issuer configured) authenticates a
+  `2026-07-28` discover-lifecycle request via bearer token
+  (`crates/remind_me_remote/tests/oauth_test.rs`) — auth-gating and
+  lifecycle dispatch compose correctly.
+- `GET /mcp` with `Last-Event-Id` resumes a dropped discover-lifecycle
+  response stream with no session at all, replaying the missed result —
+  driven through the real router and `InProcessEventStore`, not just
+  unit-tested against the store directly.
+
+### Docs
+- `docs/adr/0017-sep-2567-discover-lifecycle-shared-event-store.md`.
+
 ## 2026-08-08 — One setting makes this a drop-in MCP server
 
 ### Added
