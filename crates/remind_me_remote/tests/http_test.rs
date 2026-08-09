@@ -56,6 +56,36 @@ fn sse_json_payloads(body: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Every SSE event in a response body as `(id, parsed data)` pairs, in
+/// delivery order -- unlike `sse_json_payloads`, this keeps the priming
+/// event (empty `data:`) rather than filtering it out, and keeps its `id:`
+/// line. That id is exactly what `InProcessEventStore` assigns once an
+/// event store is attached (see `server::build_router`), and exactly what a
+/// client resuming via `Last-Event-Id` after that priming event would send.
+fn sse_events(body: &str) -> Vec<(Option<String>, Option<Value>)> {
+    body.split("\n\n")
+        .filter(|event| !event.trim().is_empty())
+        .map(|event| {
+            let mut id = None;
+            let mut data_lines = Vec::new();
+            for line in event.lines() {
+                if let Some(rest) = line.strip_prefix("id:") {
+                    id = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    data_lines.push(rest.trim());
+                }
+            }
+            let data = data_lines.join("\n");
+            let parsed = if data.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&data).ok()
+            };
+            (id, parsed)
+        })
+        .collect()
+}
+
 fn mcp_headers() -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
@@ -469,5 +499,73 @@ async fn a_2026_07_28_client_lists_prompts_with_no_session() {
     assert!(
         prompts.iter().any(|p| p["name"] == "recall_context"),
         "expected the real prompt list dispatched through RemindMeHandler, got: {prompts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_resumes_a_dropped_response_stream_via_last_event_id() {
+    // The actual mechanism `InProcessEventStore` exists for: before it was
+    // wired into `build_router`, a discover-lifecycle POST's SSE response
+    // was never persisted anywhere, so a client that dropped its connection
+    // before reading the response lost it for good. Now every event on that
+    // response -- including the leading empty-data priming event -- gets a
+    // real, replayable id (`tower.rs`'s `persisted_stateless_stream`, which
+    // only runs when `session_manager.event_store()` is `Some`).
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "tools/list".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let body = response.text().await.unwrap();
+    let events = sse_events(&body);
+    let (priming_id, priming_data) = events
+        .first()
+        .expect("expected at least a priming event in the response");
+    assert!(
+        priming_data.is_none(),
+        "expected an empty-data priming event first, got {events:?}"
+    );
+    let priming_id = priming_id
+        .clone()
+        .expect("the priming event must carry a real event id once an EventStore is attached");
+
+    // Simulate the client dropping before it ever saw the real response:
+    // reconnect with `Last-Event-Id` pointing at the priming event it did
+    // see -- no `Mcp-Session-Id` at all, since this is the session-free
+    // stateless-replay path (`tower.rs::handle_get`'s non-legacy branch).
+    let mut resume_headers = reqwest::header::HeaderMap::new();
+    resume_headers.insert("Accept", "text/event-stream".parse().unwrap());
+    resume_headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    resume_headers.insert("Last-Event-Id", priming_id.parse().unwrap());
+
+    let resumed = client
+        .get(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(resume_headers)
+        .send()
+        .await
+        .unwrap();
+    let resumed_status = resumed.status();
+    let resumed_body = resumed.text().await.unwrap();
+    assert_eq!(resumed_status, 200, "{resumed_body}");
+
+    let resumed_events = sse_events(&resumed_body);
+    let result = resumed_events
+        .iter()
+        .find_map(|(_, data)| data.clone())
+        .expect("the resumed stream must replay the tools/list response the client missed");
+    assert!(
+        result["result"]["tools"].as_array().is_some(),
+        "expected the real tools/list result to be replayed, got: {result}"
     );
 }
