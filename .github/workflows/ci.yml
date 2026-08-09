@@ -118,6 +118,14 @@ jobs:
       - name: cargo test --features rerank
         run: cargo test -p remind_me_core --features rerank --locked
 
+      # Like `rerank` above, this runs the tests rather than only clippy:
+      # the feature-on tests need no model either — `onnx_embedder_test.rs`
+      # covers backend dispatch and the graceful-degradation paths (a
+      # nonexistent path, a file that is not a model) with synthetic files,
+      # not a downloaded one.
+      - name: cargo test --features local-embed
+        run: cargo test -p remind_me_core --features local-embed --locked
+
       # Like `rerank` above, this runs the tests rather than only clippy, and
       # for a stronger reason: the feature's entire claim is that a thread
       # wedged in CPU-bound code still gets dumped. Only running it can show
