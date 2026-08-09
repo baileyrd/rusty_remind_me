@@ -3104,6 +3104,7 @@ dependencies = [
  "dirs",
  "image",
  "ocrs",
+ "parking_lot",
  "pdf-extract",
  "rstack-self",
  "rten",

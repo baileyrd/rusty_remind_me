@@ -70,11 +70,32 @@ impl SyncWorker {
                 // reason: a tunnel is only wanted while something is syncing
                 // through it.
                 let mut sidecars = crate::sidecars::Sidecars::new();
+                // A connection of its own, not `db.conn()`'s shared `Mutex`:
+                // a cycle below pushes/pulls every remote over the network,
+                // which can run for many multiples of any one HTTP timeout.
+                // Holding the process-wide mutex for that whole span used to
+                // block every other MCP tool call -- reads and writes alike
+                // -- until the cycle finished. Opened once and kept for the
+                // thread's life; re-opened on the next cycle if the attempt
+                // itself failed (e.g. transient file-permission trouble).
+                let mut conn = db.open_secondary().ok();
                 while !thread_shutdown.load(Ordering::Relaxed) {
                     // Before the cycle, not after: the tunnel this may start
                     // is what the cycle about to run needs in place.
                     sidecars.ensure();
-                    run_one_cycle(&db, &hub_url, &secret, &node_id, &thread_state);
+                    if conn.is_none() {
+                        conn = db.open_secondary().ok();
+                    }
+                    match conn.as_ref() {
+                        Some(c) => run_one_cycle(c, &hub_url, &secret, &node_id, &thread_state),
+                        None => {
+                            let mut guard = thread_state.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.last_error = Some(
+                                "sync worker could not open its own database connection"
+                                    .to_string(),
+                            );
+                        }
+                    }
 
                     let mut waited = Duration::ZERO;
                     while waited < interval && !thread_shutdown.load(Ordering::Relaxed) {
@@ -174,15 +195,14 @@ fn sync_with_remote(
 }
 
 fn run_one_cycle(
-    db: &Database,
+    conn: &Connection,
     hub_url: &str,
     secret: &str,
     node_id: &str,
     state: &Mutex<WorkerState>,
 ) {
     let mut span = crate::telemetry::maybe_span("sync.cycle");
-    let conn = db.conn();
-    let mut error = sync_with_remote(&conn, hub_url, secret, node_id, HUB_REMOTE_ID);
+    let mut error = sync_with_remote(conn, hub_url, secret, node_id, HUB_REMOTE_ID);
 
     // Every discovered peer (static list plus Tailscale) gets the same
     // treatment as the hub: probed first (the only "is this really a
@@ -195,15 +215,14 @@ fn run_one_cycle(
         if !super::probe_peer(&peer.url, secret) {
             continue;
         }
-        if let Some(e) = sync_with_remote(&conn, &peer.url, secret, node_id, &peer.node_id) {
+        if let Some(e) = sync_with_remote(conn, &peer.url, secret, node_id, &peer.node_id) {
             error.get_or_insert(e);
         }
     }
 
-    if let Err(e) = prune_outbox(&conn) {
+    if let Err(e) = prune_outbox(conn) {
         error.get_or_insert_with(|| format!("outbox prune failed: {e}"));
     }
-    drop(conn);
 
     if error.is_some() {
         span.mark_error();
