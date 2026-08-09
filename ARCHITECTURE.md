@@ -10,7 +10,15 @@ This document details the architectural principles, data flow, mathematical scor
 
 Key Architectural Tenets:
 1. **Predictable Performance**: Microsecond-level SQLite FTS5 query latency and zero runtime Garbage Collection pauses.
-2. **Strict Rusty Mill Alignment**: Consumes the `c:\dev\Rusty_Mill` suite of crates (`rusty_tokio`, `rusty-db`, `rusty_json`, `rusty-search`, `rusty_http`, `rusty_lines`, `rusty_term`, `rusty_time`, `rusty_config`) to maintain ecosystem consistency.
+2. **Minimal, Call-Site-Justified Dependencies**: No dependency is declared
+   speculatively. (This project once aspired to a "Rusty Mill" ecosystem of
+   shared crates — `rusty_tokio`, `rusty-db`, `rusty_json`, `rusty-search`,
+   `rusty_http`, and others — declared as path dependencies against a
+   monorepo that never existed at those paths; the workspace failed to load,
+   and not one source file actually called into any of them. They were
+   removed. See the "Rusty Mill ecosystem dependencies" comment in the
+   workspace `Cargo.toml` for the full account, and re-adopt one only at the
+   point it gains a real call site.)
 3. **Data Parity with `remind-me`**: Identical SQLite Version 27 schema and JSON tool signatures for drop-in interoperability. The schema is generated from the reference rather than transcribed (§5); the version here is the one `remind_me` itself reports, and a mismatch is what makes a database silently unreadable to it.
 4. **Thread Safety & Async Execution**: Thread-safe database access using `Arc<Database>` wrapped in `Mutex<rusqlite::Connection>`, safe for multi-threaded `tokio::spawn` task execution.
 
@@ -22,14 +30,18 @@ Key Architectural Tenets:
 graph TD
     CLI[remind_me_cli binary] --> MCP[remind_me_mcp protocol]
     CLI --> API[remind_me_api REST server]
+    CLI --> REMOTE[remind_me_remote Streamable HTTP connector]
     MCP --> CORE[remind_me_core engine]
     API --> CORE
-    CORE --> RM_DB[Rusty Mill: rusty-db / rusqlite]
-    CORE --> RM_SEARCH[Rusty Mill: rusty-search]
-    CORE --> RM_TOKIO[Rusty Mill: rusty_tokio]
-    CORE --> RM_JSON[Rusty Mill: rusty_json]
-    API --> RM_HTTP[Rusty Mill: rusty_http]
+    REMOTE --> MCP
+    HUB[remind_me_hub binary: rusty-remind-me-hub] --> CORE
+    CORE --> RUSQLITE[rusqlite / SQLite]
+    HUB -.->|optional postgres-store feature| POSTGRES[Postgres]
 ```
+
+`remind_me_hub` is its own binary (`rusty-remind-me-hub`), not reached
+through the `remind_me_cli` dispatch — it is the central sync point nodes
+push to and pull from, not a mode of the client CLI.
 
 ### Crate Roles
 - **`remind_me_core`**: The domain core containing:
@@ -44,9 +56,20 @@ graph TD
   - Stdio JSON-RPC protocol loop (`initialize`, `tools/list`, `tools/call`).
   - Input payload validation & error formatting.
 - **`remind_me_api`**: The REST API layer:
-  - Async HTTP daemon built with `rusty_http` and `tokio`.
-  - Routes: `/health`, `/stats`, `/api/v1/memories`, `/api/v1/search`.
-- **`remind_me_cli`**: The unified CLI binary executable (`rusty-remind-me`) handling command line flags and subcommand dispatch (`server`, `api`, `add`, `search`, `get`, `entity`, `wiki-write`, `wiki-read`, `wiki-import`, `stats`).
+  - Synchronous HTTP daemon hand-rolled on `std::net::TcpListener` — no
+    framework, not even `tokio` (matches this workspace's tenet 2: the
+    project's aspirational `rusty_http` dependency was never real; see
+    above).
+  - Routes span far beyond the original four (`/health`, `/stats`,
+    `/api/v1/memories`, `/api/v1/search`); `crates/remind_me_api/tests/`
+    (bulk ops, dashboard, entities, import/export, reminders, versions, ...)
+    is the current, authoritative route inventory — this document does not
+    duplicate it for the same reason §5 stopped duplicating the schema DDL.
+- **`remind_me_cli`**: The unified CLI binary executable (`rusty-remind-me`) handling command line flags and subcommand dispatch (`server`, `api`, `remote`, `configure`, `add`, `search`, `get`, `entity`, `wiki-write`, `wiki-read`, `wiki-import`, `stats`).
+- **`remind_me_remote`**: The Streamable HTTP MCP connector, on `tokio` + `axum` + `rmcp` (the one place this workspace takes on that async stack — every other crate stays synchronous, a deliberate boundary; see `crates/remind_me_remote/src/lib.rs`'s module doc):
+  - Secret-path/bearer auth (FT-05) and, when an issuer is configured, a hand-rolled OAuth 2.1 authorization server (FT-07, `docs/adr/0011`).
+  - `RemindMeHandler` adapts `remind_me_mcp::McpServer::handle_request` (synchronous) to `rmcp`'s async `ServerHandler` trait via `spawn_blocking`, rather than reimplementing tool/resource/prompt dispatch.
+- **`remind_me_hub`**: The central multi-node sync server (`rusty-remind-me-hub` binary) speaking the same push/pull peer protocol `remind_me_core::sync` serves node-to-node, over a pluggable storage trait backed by SQLite or Postgres (`docs/adr/0015`). A hub never pulls; nodes push to and pull from it.
 
 ---
 
