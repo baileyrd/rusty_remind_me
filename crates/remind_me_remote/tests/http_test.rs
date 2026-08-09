@@ -347,3 +347,127 @@ async fn a_2025_11_25_client_still_uses_the_legacy_session_lifecycle() {
         "2025-11-25 is still legacy-lifecycle and must get a session id"
     );
 }
+
+#[tokio::test]
+async fn a_2026_07_28_client_calls_a_mutating_tool_in_one_post_with_no_session_at_all() {
+    // The one `tools/call` coverage this file already had
+    // (`bearer_auth_reuses_a_session_...`) runs entirely over the legacy
+    // session lifecycle. This is the discover-lifecycle counterpart:
+    // `tools/call` also carries an SEP-2243 `Mcp-Name` header (`tools/call`
+    // is in `NAME_FROM_NAME`, sourced from `params.name`), unlike
+    // `tools/list` above.
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "tools/call".parse().unwrap());
+    headers.insert("Mcp-Name", "remind_me_add".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "remind_me_add",
+                "arguments": { "content": "written through the discover lifecycle" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the tools/call response must be among the SSE payloads");
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("call_tool result content must carry the stored memory as text");
+    assert!(
+        text.contains("written through the discover lifecycle"),
+        "expected the round-tripped memory content, got: {text}"
+    );
+    assert_ne!(result["result"]["isError"], json!(true));
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_reads_the_stats_resource_with_no_session() {
+    // `resources/read`'s `Mcp-Name` is sourced from `params.uri` (it's in
+    // `NAME_FROM_URI`, not `NAME_FROM_NAME`) -- the one SEP-2243 header
+    // shape neither of the other two new tests exercises.
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "resources/read".parse().unwrap());
+    headers.insert("Mcp-Name", "memory://stats".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": { "uri": "memory://stats" }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the resources/read response must be among the SSE payloads");
+    assert_eq!(result["result"]["contents"][0]["uri"], "memory://stats");
+}
+
+#[tokio::test]
+async fn a_2026_07_28_client_lists_prompts_with_no_session() {
+    let addr = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let mut headers = mcp_headers();
+    headers.insert("MCP-Protocol-Version", "2026-07-28".parse().unwrap());
+    headers.insert("Mcp-Method", "prompts/list".parse().unwrap());
+
+    let response = client
+        .post(format!("http://{addr}/mcp/{TOKEN}"))
+        .headers(headers)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "prompts/list" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+
+    let body = response.text().await.unwrap();
+    let payloads = sse_json_payloads(&body);
+    let result = payloads
+        .iter()
+        .find(|p| p.get("id") == Some(&json!(1)))
+        .expect("the prompts/list response must be among the SSE payloads");
+    let prompts = result["result"]["prompts"]
+        .as_array()
+        .expect("prompts/list result must carry a prompts array");
+    assert!(
+        prompts.iter().any(|p| p["name"] == "recall_context"),
+        "expected the real prompt list dispatched through RemindMeHandler, got: {prompts:?}"
+    );
+}
