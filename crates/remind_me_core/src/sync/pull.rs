@@ -12,6 +12,7 @@ use super::graph::{
 };
 use super::http;
 use super::record::{canon_ts, upsert_record, SyncRecord};
+use super::record_pull;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
@@ -247,6 +248,7 @@ pub fn pull_remote(
                 body.trim()
             )));
         }
+        record_pull(conn, remote_id);
         let parsed: Value = serde_json::from_str(&body)
             .map_err(|e| PullError(format!("pull response from {} was not JSON: {}", url, e)))?;
         let records = parsed
@@ -361,7 +363,12 @@ fn pull_graph_table(
         );
         let (status, body) = http::get(&url, secret)?;
         if status == 404 {
-            // An older peer that predates this endpoint -- not an error.
+            // An older peer that predates this endpoint -- not an error,
+            // and deliberately not recorded either: writing even an
+            // attempt-only row here would make `sync_log` claim contact
+            // with a feature that was never really reached, the same
+            // reasoning that already keeps this branch from writing a
+            // cursor.
             break;
         }
         if !(200..300).contains(&status) {
@@ -372,6 +379,7 @@ fn pull_graph_table(
                 body.trim()
             )));
         }
+        record_pull(conn, cursor_key);
         let parsed: Value = serde_json::from_str(&body)
             .map_err(|e| PullError(format!("pull response from {} was not JSON: {}", url, e)))?;
         let records = parsed

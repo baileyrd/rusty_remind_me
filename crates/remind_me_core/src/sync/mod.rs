@@ -306,3 +306,39 @@ pub fn prune_outbox(conn: &Connection) -> Result<usize> {
     )?;
     Ok(removed)
 }
+
+/// Records a real, successful HTTP round trip with `remote_id` (a push
+/// destination like `"hub"`, or a namespaced pull cursor key like
+/// `"hub#entities"`) -- setting `last_attempt_at` and `last_push_at`.
+///
+/// `sync_status`'s and `reconcile`'s docs both promise these `_at` columns
+/// "advance every cycle" so a quiet-but-healthy remote is distinguishable
+/// from a wedged one — a promise nothing wrote until now, which left every
+/// remote reading as permanently stuck at whatever value it last held
+/// (`1970-01-01` for one that has genuinely never answered, and otherwise
+/// whatever the last write happened to be, however old). Best-effort: a
+/// write failure here is telemetry, not correctness, and must not turn a
+/// successful sync into a reported failure.
+pub(crate) fn record_push(conn: &Connection, remote_id: &str) {
+    let now = Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "INSERT INTO sync_log (remote_id, last_attempt_at, last_push_at) VALUES (?, ?, ?)
+         ON CONFLICT(remote_id) DO UPDATE SET
+             last_attempt_at = excluded.last_attempt_at,
+             last_push_at = excluded.last_push_at",
+        params![remote_id, now, now],
+    );
+}
+
+/// Same as [`record_push`], but for a successful pull -- sets
+/// `last_attempt_at` and `last_pull_at` instead.
+pub(crate) fn record_pull(conn: &Connection, remote_id: &str) {
+    let now = Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "INSERT INTO sync_log (remote_id, last_attempt_at, last_pull_at) VALUES (?, ?, ?)
+         ON CONFLICT(remote_id) DO UPDATE SET
+             last_attempt_at = excluded.last_attempt_at,
+             last_pull_at = excluded.last_pull_at",
+        params![remote_id, now, now],
+    );
+}
