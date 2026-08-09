@@ -25,6 +25,127 @@ mistake this document exists to prevent from repeating.
 
 ---
 
+## Feature parity gaps (found scoping a cutover on `home-pc-win`, 2026-08-08)
+
+This host's topology differs from the inventory below: one shared process
+(Windows Task Scheduler task `remind-me-mcp-http`, launching
+`~/.remind-me/serve-mcp.ps1`) serves the MCP HTTP endpoint
+(`127.0.0.1:8767`), the peer-sync receiver (`0.0.0.0:8766`), and the hub
+push/pull worker all at once — every local client (Claude Desktop via
+`mcp-remote`, Claude Code natively, this harness's own `remind-me-win` MCP
+entry) points at that one fixed URL, so a cutover here needs zero client
+config edits, only a backend-process swap. A second Task Scheduler process
+(`python -m remind_me_mcp --serve-ui --ui-port 5199`) is the dashboard
+sidecar, riding the first process's Windows Job object.
+
+`rusty-remind-me remote` (port-overridden to 8767) already replicates the
+combined shape: `McpServer::new` wires up `SyncPeer` (the port-8766
+receiver, gated on `REMIND_ME_SYNC_SECRET`) and `SyncWorker` (the hub
+push/pull loop, gated on node_id + hub_url + secret) unconditionally
+(`crates/remind_me_mcp/src/lib.rs:351-357`) — no separate "sync" subcommand
+needed.
+
+The cutover was **deliberately deferred** on this host: `serve-mcp.ps1` also
+sets `REMIND_ME_RERANK=onnx` and `REMIND_ME_QUERY_EXPANSION=hyde`, and the
+Rust port's support for those was not at parity.
+
+1. **Reranking — now closed.** `remind_me_core::reranker` supports it, but
+   only behind `cargo build --features remind_me_core/rerank` (not in a
+   default build) and only against a `.rten`-format model — the reference's
+   HuggingFace cache
+   (`~/.remind-me/models/models--cross-encoder--ms-marco-MiniLM-L6-v2`) is
+   ONNX/safetensors, not `.rten`. Converted directly from the cached ONNX
+   export, no re-download and no PyTorch needed:
+   ```bash
+   pip install --target <short-path-dir> rten-convert   # onnx export already in the HF cache
+   python -m rten_convert <cache>/onnx/model.onnx out.rten --no-infer-shapes
+   ```
+   `--no-infer-shapes` works around a Windows-only bug in `rten-convert`
+   0.22.0: `onnx.shape_inference.infer_shapes_path` writes through a
+   `tempfile.NamedTemporaryFile` handle that is still open when its own C
+   extension tries to reopen the same path, so the default (shape-inference
+   on) path always raises `PermissionError` on Windows. Skipping inference
+   costs a runtime graph optimization, not correctness.
+   Verified against real weights (`cargo run -p remind_me_core --example
+   verify_rerank --features rerank`, deleted after use): a deliberately
+   RRF-inverted 4-candidate list was correctly reordered, on-topic
+   candidates first, with sane cross-encoder logits (`status() == Ready`).
+   Converted model kept at `~/.remind-me/rerank/ms-marco-MiniLM-L6-v2.rten`
+   + `~/.remind-me/rerank/tokenizer.json`; point
+   `REMIND_ME_RERANK_MODEL_PATH`/`REMIND_ME_RERANK_TOKENIZER_PATH` at those
+   and build with `--features remind_me_core/rerank` (or add a
+   `rerank = ["remind_me_core/rerank"]` passthrough to
+   `remind_me_cli/Cargo.toml` so plain `--features rerank` works from the
+   `rusty-remind-me` package without the `package/feature` qualifier).
+
+2. **Query expansion (HyDE) — now closed.** Implemented from scratch —
+   `remind_me_core::query_expansion`, ported from the reference's
+   `query_expansion.py`: `REMIND_ME_QUERY_EXPANSION=hyde` sends the query to
+   a local Ollama daemon's `/api/generate` (`REMIND_ME_HYDE_MODEL`, default
+   `llama3.2`; `REMIND_ME_HYDE_TIMEOUT`, default 15s) for a short
+   hypothetical passage, capped at 600 chars, cached per query (bounded
+   LRU). Any failure — daemon down, model missing, timeout, empty response —
+   silently falls back to the plain query, never an error. The expansion
+   text is fused into the search vector by
+   `remind_me_core::vectors::fuse_query_embedding` (query text embedded with
+   `EmbedRole::Query`, expansion text with `EmbedRole::Passage`, mean then
+   L2-renormalised — the reference's own `db._fuse_query_embedding`), wired
+   into `search_memories_budgeted` ahead of `semantic_search_scored`.
+   One deliberate simplification: the reference coalesces concurrent
+   callers racing the same uncached query behind a `threading.Event`, so two
+   threads never both pay a redundant generation; this port omits that
+   (cache-only, no coalescing) since it changes resource cost, not any
+   caller-visible result — see the module's own doc comment if that ever
+   needs revisiting. Ollama was not running on this host to verify against
+   a real LLM, so the HTTP client contract (request shape, response
+   parsing, timeout/failure fallback, cache hit avoiding a second request)
+   is covered by 11 tests against a fake `/api/generate` server
+   (`tests/query_expansion_test.rs`), the same pattern
+   `ollama_embedder_test.rs` already established for `OllamaEmbedder`. The
+   fusion math and its effect on real rankings is covered separately
+   (`tests/vectors_test.rs`): a fake embedder proves an expansion text can
+   flip which of two candidates wins over the plain query alone.
+
+3. **Embeddings — now closed.** Added `remind_me_core::embedder::OnnxEmbedder`
+   (`REMIND_ME_EMBEDDING_BACKEND=onnx`), an in-process ONNX bi-encoder via
+   `rten` — the same pure-Rust runtime `reranker`/`ocr` already use, behind
+   a new `local-embed` feature — mean-pooled over non-padding tokens and
+   L2-normalised, matching the reference's `_Embedder._embed_forward`
+   exactly. Takes explicit `REMIND_ME_ONNX_MODEL_PATH`/
+   `REMIND_ME_ONNX_TOKENIZER_PATH` (`.rten` + `tokenizer.json`), same
+   no-implicit-download convention as `rerank`. Converted the reference's
+   already-cached `sentence-transformers/all-MiniLM-L6-v2` ONNX export the
+   same way as the cross-encoder above (`rten-convert --no-infer-shapes`);
+   kept at `~/.remind-me/embed/all-MiniLM-L6-v2.rten` +
+   `~/.remind-me/embed/tokenizer.json`. Verified against real weights
+   (`cargo run -p remind_me_core --example verify_onnx_embed --features
+   local-embed`, deleted after use): 384-dimensional output, norms ~1.0,
+   and a real semantic gap — cosine similarity 0.53 between the query and
+   an on-topic passage vs. 0.016 against an off-topic one. `resolve_embedder`/
+   `available_embedder` now return `Box<dyn Embedder>` instead of the
+   concrete `OllamaEmbedder` so both backends share one call path — every
+   existing caller kept working via `&*embedder`/`&**embedder` at the few
+   sites that needed it (`Box<dyn Embedder>` does not `as`-cast to
+   `&dyn Embedder` directly; deref does). 6 tests cover backend dispatch and
+   graceful-failure paths for both build configurations
+   (`tests/onnx_embedder_test.rs`), plus 4 new `tests/vectors_test.rs` cases
+   for `fuse_query_embedding` itself; the full existing `vectors_test.rs`/
+   `reranker_test.rs`/`ollama_embedder_test.rs`/`injectable_embedder_test.rs`
+   suites (83 tests total across the six directly-touched files) pass
+   unchanged.
+
+Cutover on this host is no longer blocked by a missing Rust capability.
+What remains before actually cutting it over: rebuild with
+`--features "remind_me_core/rerank remind_me_core/local-embed"`, point
+`REMIND_ME_RERANK_MODEL_PATH`/`_TOKENIZER_PATH` and
+`REMIND_ME_ONNX_MODEL_PATH`/`_TOKENIZER_PATH` at the converted files above,
+and re-verify `REMIND_ME_QUERY_EXPANSION=hyde` against a real Ollama daemon
+(not done here — none was running on this host). The live Python process
+was **not** touched while closing these gaps — see the Runbook below when
+it is time to actually cut it over.
+
+---
+
 ## The consumer inventory
 
 Every process that can open `~/.remind-me/memory.db` or call into

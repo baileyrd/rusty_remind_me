@@ -1,5 +1,4 @@
 use crate::db::migrations;
-use crate::embedder::Embedder as _;
 use crate::vitality;
 use rusqlite::{Connection, Result};
 

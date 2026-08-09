@@ -533,7 +533,7 @@ fn apply_merges(
         if let Some(embedder) = embedder.as_ref() {
             let _ = crate::vectors::embed_and_store(
                 conn,
-                embedder,
+                &**embedder,
                 &canonical.id,
                 &merged.merged_content,
             );

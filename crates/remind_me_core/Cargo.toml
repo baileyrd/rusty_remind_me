@@ -71,6 +71,14 @@ audio = ["dep:whisper-rs", "dep:symphonia"]
 # the same reason: it is pure Rust and takes explicit model paths, so enabling
 # reranking can never turn a search into a model download.
 rerank = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
+# Local ONNX embedding backend (in-process, no daemon), matching the
+# reference's default `_Embedder` (sentence-transformers/all-MiniLM-L6-v2 by
+# convention, but any BERT-family bi-encoder exported to ONNX works). Shares
+# `rten`/`tokenizers` with `rerank` for the same reason `rerank` shares them
+# with `ocr`: one neural-network runtime, not a second. Takes explicit model
+# paths like `rerank` does — enabling it can never turn a search into an
+# implicit HuggingFace download.
+local-embed = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
 # Dump every thread's stack when a tool call hangs, matching the reference's
 # `faulthandler.dump_traceback_later`. Optional and Linux-only, and unlike
 # every other feature here it needs *system* libraries (`libunwind-dev` and
