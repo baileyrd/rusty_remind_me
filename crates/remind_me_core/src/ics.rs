@@ -156,11 +156,12 @@ pub fn build_ics(reminders: &[Memory], now: DateTime<Utc>) -> String {
 pub const ICS_TOKEN_ENV: &str = "REMIND_ME_ICS_TOKEN";
 pub const ICS_TOKEN_FILE_ENV: &str = "REMIND_ME_ICS_TOKEN_FILE";
 
-/// Default token file, beside the connector token this crate already writes.
+/// Default token file, beside the connector token this crate already writes
+/// (`~/.remind-me/ics_token`, alongside [`crate::db::DEFAULT_DIR_NAME`]).
 fn default_token_file() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".remind_me")
+        .join(crate::db::DEFAULT_DIR_NAME)
         .join("ics_token")
 }
 
@@ -226,4 +227,22 @@ pub fn feed_path(token: &str) -> String {
 /// what keeps `chrono` from leaking into callers that have no other use for it.
 pub fn build_ics_now(reminders: &[Memory]) -> String {
     build_ics(reminders, Utc::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_token_file_uses_the_hyphenated_data_directory() {
+        // Regression: this used to hardcode `.remind_me` (underscored), a
+        // directory nothing else in this port reads or writes -- see
+        // `remote::default_token_file`'s doc for the same fix applied there.
+        let path = default_token_file();
+        assert_eq!(path.file_name().unwrap(), "ics_token");
+        assert_eq!(
+            path.parent().unwrap().file_name().unwrap(),
+            crate::db::DEFAULT_DIR_NAME
+        );
+    }
 }
