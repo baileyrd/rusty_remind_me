@@ -105,10 +105,11 @@ impl std::fmt::Display for ApiKeyError {
 }
 impl std::error::Error for ApiKeyError {}
 
+/// `~/.remind-me/api_keys.json`, alongside [`crate::db::DEFAULT_DIR_NAME`].
 fn default_store_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".remind_me")
+        .join(crate::db::DEFAULT_DIR_NAME)
         .join("api_keys.json")
 }
 
@@ -275,4 +276,22 @@ pub fn verify(presented: &str) -> Option<VerifiedKey> {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_store_path_uses_the_hyphenated_data_directory() {
+        // Regression: this used to hardcode `.remind_me` (underscored), a
+        // directory nothing else in this port reads or writes -- see
+        // `remote::default_token_file`'s doc for the same fix applied there.
+        let path = default_store_path();
+        assert_eq!(path.file_name().unwrap(), "api_keys.json");
+        assert_eq!(
+            path.parent().unwrap().file_name().unwrap(),
+            crate::db::DEFAULT_DIR_NAME
+        );
+    }
 }

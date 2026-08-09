@@ -112,8 +112,9 @@ impl Wiki {
 
     /// The configured wiki directory.
     ///
-    /// `REMIND_ME_WIKI_DIR`, or `~/.remind_me/wiki`. Read at call time rather
-    /// than cached so a caller can relocate it without restarting.
+    /// `REMIND_ME_WIKI_DIR`, or `~/.remind-me/wiki` (alongside
+    /// [`crate::db::DEFAULT_DIR_NAME`]). Read at call time rather than
+    /// cached so a caller can relocate it without restarting.
     pub fn from_env() -> Self {
         let root = std::env::var(WIKI_DIR_ENV)
             .ok()
@@ -121,7 +122,7 @@ impl Wiki {
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
-                    .join(".remind_me")
+                    .join(crate::db::DEFAULT_DIR_NAME)
                     .join("wiki")
             });
         Self::new(root)

@@ -4,7 +4,7 @@ use remind_me_core::db::queries;
 use remind_me_core::wiki::WikiDeleteOutcome;
 use remind_me_core::wiki_fs::{
     extract_summary, extract_title, get_meta, parse_wikilinks, pending_compile_count, Wiki,
-    WikiCompile, COMPILE_WATERMARK_KEY, INDEX_FILE, LOG_FILE, SCHEMA_FILE,
+    WikiCompile, COMPILE_WATERMARK_KEY, INDEX_FILE, LOG_FILE, SCHEMA_FILE, WIKI_DIR_ENV,
 };
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
@@ -653,4 +653,32 @@ fn marking_integrated_moves_the_watermark_and_drops_the_pending_count() {
     assert_eq!(pending_compile_count(&conn).unwrap(), 1);
 
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn from_env_defaults_to_the_hyphenated_data_directory() {
+    // Regression: this used to hardcode `.remind_me` (underscored) when
+    // `REMIND_ME_WIKI_DIR` was unset -- a directory nothing else in this
+    // port reads or writes from. See `remote::default_token_file`'s doc
+    // for the full story behind the fix applied here.
+    let original_wiki_dir = std::env::var(WIKI_DIR_ENV).ok();
+    let original_home = std::env::var("HOME").ok();
+    std::env::remove_var(WIKI_DIR_ENV);
+    std::env::set_var("HOME", "/tmp/rrm-wiki-default-home-probe");
+
+    let wiki = Wiki::from_env();
+
+    match original_wiki_dir {
+        Some(v) => std::env::set_var(WIKI_DIR_ENV, v),
+        None => std::env::remove_var(WIKI_DIR_ENV),
+    }
+    match original_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+
+    assert_eq!(
+        wiki.root(),
+        std::path::Path::new("/tmp/rrm-wiki-default-home-probe/.remind-me/wiki")
+    );
 }
