@@ -12,11 +12,8 @@ use rusqlite::Connection;
 
 /// A scratch directory inside the default import root (the home directory).
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(format!(
-        "rrm_import_{}_{}",
-        name,
-        std::process::id()
-    ));
+    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
+        .join(format!("rrm_import_{}_{}", name, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -505,7 +502,7 @@ fn a_path_outside_the_roots_is_rejected_without_revealing_existence() {
 
 #[test]
 fn a_traversal_out_of_the_roots_is_rejected() {
-    let home = std::env::var("HOME").unwrap();
+    let home = remind_me_core::import_paths::home_dir_var().unwrap();
     assert!(matches!(
         validate_import_file(&format!("{}/../../etc/passwd", home)),
         Err(ImportPathError::OutsideRoots(_))
@@ -518,7 +515,7 @@ fn a_traversal_out_of_the_roots_is_rejected() {
 
 #[test]
 fn a_missing_file_inside_the_roots_reports_not_found() {
-    let home = std::env::var("HOME").unwrap();
+    let home = remind_me_core::import_paths::home_dir_var().unwrap();
     assert!(matches!(
         validate_import_file(&format!("{}/no_such_file_54321.md", home)),
         Err(ImportPathError::NotFound(_))
@@ -635,7 +632,7 @@ fn a_second_directory_run_skips_everything() {
 #[test]
 fn a_missing_directory_reports_a_failure_rather_than_erroring() {
     let db = Database::open_in_memory().unwrap();
-    let home = std::env::var("HOME").unwrap();
+    let home = remind_me_core::import_paths::home_dir_var().unwrap();
 
     let result = import_directory(
         &db.conn(),

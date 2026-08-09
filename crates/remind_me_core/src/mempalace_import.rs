@@ -59,7 +59,7 @@ pub const DEFAULT_CATEGORY: &str = "mempalace_import";
 const RESERVED_DOCUMENT_KEY: &str = "chroma:document";
 
 fn expand_home(raw: &str) -> String {
-    match (raw.strip_prefix("~/"), std::env::var("HOME")) {
+    match (raw.strip_prefix("~/"), crate::import_paths::home_dir_var()) {
         (Some(rest), Ok(home)) => format!("{}/{}", home.trim_end_matches('/'), rest),
         _ => raw.to_string(),
     }
