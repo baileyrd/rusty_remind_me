@@ -8,6 +8,13 @@ use remind_me_core::wiki_fs::{
 };
 use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
+use std::sync::Mutex;
+
+/// `WIKI_DIR_ENV`/`HOME` are process-global; only one test in this file
+/// touches them ([`from_env_defaults_to_the_hyphenated_data_directory`]),
+/// but a future one that does would silently race it without this guard --
+/// the same convention `sync_status_test.rs`'s own `ENV_LOCK` documents.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// A wiki rooted in its own scratch directory, so tests never share state.
 fn wiki(name: &str) -> (Wiki, std::path::PathBuf) {
@@ -657,6 +664,7 @@ fn marking_integrated_moves_the_watermark_and_drops_the_pending_count() {
 
 #[test]
 fn from_env_defaults_to_the_hyphenated_data_directory() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Regression: this used to hardcode `.remind_me` (underscored) when
     // `REMIND_ME_WIKI_DIR` was unset -- a directory nothing else in this
     // port reads or writes from. See `remote::default_token_file`'s doc
