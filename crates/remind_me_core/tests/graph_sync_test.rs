@@ -2,18 +2,20 @@
 //! `entities`, `entity_relations`, and `memory_entities` mention links over
 //! the same push/pull protocol the memories-only slice established.
 
+mod support;
+
 use remind_me_core::entity::{self, entity_id, entity_relation_id};
 use remind_me_core::sync::{
     apply_incoming_record, pull_entities, pull_entity_relations, pull_links, push_outbox,
     upsert_entity_record, upsert_entity_relation_record, upsert_link_record,
-    EntityRelationSyncRecord, EntitySyncRecord, LinkSyncRecord, PeerServerConfig,
+    EntityRelationSyncRecord, EntitySyncRecord, LinkSyncRecord,
 };
 use remind_me_core::{Database, EntityInput};
 use rusqlite::Connection;
 use serde_json::json;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use support::MockNode;
 
 const SECRET: &str = "hub-secret";
 
@@ -454,63 +456,16 @@ fn creating_a_relation_and_a_link_each_queue_their_own_tagged_outbox_row() {
 }
 
 // ---------------------------------------------------------------------------
-// Real push/pull round trip against a real peer server
+// Real push/pull round trip against a real peer server, via the shared
+// `support::MockNode` (`sync_test.rs` has the same pattern; no reason for a
+// second copy of it here).
 // ---------------------------------------------------------------------------
-
-struct TestHub {
-    url: String,
-    db: Arc<Database>,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl TestHub {
-    fn start(node_id: &str) -> Self {
-        let db = Arc::new(Database::open_in_memory().unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let config = PeerServerConfig::new("127.0.0.1", port, SECRET, node_id);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let thread_shutdown = Arc::clone(&shutdown);
-        let thread_db = Arc::clone(&db);
-        let handle = std::thread::spawn(move || {
-            while !thread_shutdown.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let conn = thread_db.conn();
-                        let _ = remind_me_core::sync::serve_once(&mut stream, &config, &conn);
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(10))
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Self {
-            url: format!("http://127.0.0.1:{}", port),
-            db,
-            shutdown,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for TestHub {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
 
 #[test]
 fn push_outbox_delivers_entities_relations_and_links_to_a_real_hub_in_one_pass() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("local-node");
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     let local_db = Database::open_in_memory().unwrap();
     let local_conn = local_db.conn();
 
@@ -568,7 +523,7 @@ fn pull_entities_applies_the_hubs_entities_and_persists_a_namespaced_cursor() {
     // filter would silently exclude it, producing a flaky `applied: 0`.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     disable_sync();
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     {
         let hub_conn = hub.db.conn();
         entity::upsert_entity(
@@ -607,7 +562,7 @@ fn pull_links_and_pull_entity_relations_apply_the_hubs_graph_rows() {
     // writes below stamp `node_id` from the process-wide `NODE_ID_ENV`.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     disable_sync();
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     {
         let hub_conn = hub.db.conn();
         entity::upsert_entity_relation(&hub_conn, "s1", "works_with", "o1").unwrap();
@@ -636,7 +591,7 @@ fn pull_links_and_pull_entity_relations_apply_the_hubs_graph_rows() {
 fn a_two_node_entity_round_trip_converges_on_the_union_of_aliases() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("node-a");
-    let hub = TestHub::start("hub-node");
+    let hub = MockNode::start("hub-node", SECRET);
     let node_a = Database::open_in_memory().unwrap();
     let node_a_conn = node_a.conn();
     entity::upsert_entity(
