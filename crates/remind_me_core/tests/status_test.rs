@@ -119,7 +119,12 @@ fn an_on_disk_database_reports_its_path_and_size() {
     assert!(report.database_bytes.unwrap() > 0);
     assert!(report.backup_dir.is_some());
 
+    // `conn` is a `MutexGuard` borrowed from `db` -- dropping it only
+    // releases the lock. The actual `rusqlite::Connection` (and its open
+    // handle on `path`) lives inside `db` itself, so `db` has to go too
+    // before Windows will allow deleting the directory that holds it.
     drop(conn);
+    drop(db);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -144,7 +149,9 @@ fn backups_are_inventoried_newest_first() {
         latest.filename
     );
 
+    // See the matching comment in `an_on_disk_database_reports_its_path_and_size`.
     drop(conn);
+    drop(db);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

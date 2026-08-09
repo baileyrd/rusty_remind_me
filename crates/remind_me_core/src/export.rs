@@ -40,16 +40,20 @@ pub fn export_roots() -> Vec<PathBuf> {
             .split(':')
             .map(str::trim)
             .filter(|r| !r.is_empty())
-            .map(|r| PathBuf::from(expand_home(r)))
+            .map(|r| crate::import_paths::resolve_lexically(&PathBuf::from(expand_home(r))))
             .collect(),
-        _ => std::env::var("HOME")
-            .map(|home| vec![PathBuf::from(home)])
+        // See `import_paths::roots_from`'s matching comment: the root must
+        // be resolved the same way a candidate path is, or `\\?\`-prefixed
+        // canonicalized candidates never match an un-resolved root on
+        // Windows.
+        _ => crate::import_paths::home_dir_var()
+            .map(|home| vec![crate::import_paths::resolve_lexically(&PathBuf::from(home))])
             .unwrap_or_default(),
     }
 }
 
 fn expand_home(raw: &str) -> String {
-    match (raw.strip_prefix("~/"), std::env::var("HOME")) {
+    match (raw.strip_prefix("~/"), crate::import_paths::home_dir_var()) {
         (Some(rest), Ok(home)) => format!("{}/{}", home.trim_end_matches('/'), rest),
         _ => raw.to_string(),
     }
@@ -193,6 +197,26 @@ fn resolve_lexically(path: &Path) -> PathBuf {
         resolved.push(name);
     }
     resolved
+}
+
+/// Strip Windows' `\\?\` verbatim-path prefix for display/reporting
+/// purposes only. `resolve_lexically`'s `canonicalize()` call adds that
+/// prefix on Windows (needed so long paths and symlink resolution both
+/// work correctly) but it is an implementation detail with no business
+/// leaking into a caller-facing result string like [`ExportResult::file`].
+/// A plain prefix strip (rather than rewriting `\\?\UNC\` to `\\`) is
+/// enough here: every path this module resolves descends from
+/// [`crate::import_paths::home_dir_var`] or a caller-supplied
+/// relative/absolute path, never a UNC share.
+#[cfg(windows)]
+fn display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+}
+
+#[cfg(not(windows))]
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
 }
 
 fn filters(input: &ExportInput) -> (String, Vec<Value>) {
@@ -423,7 +447,7 @@ pub fn export_memories(
             // meant to be identical across platforms for diffing and hashing.
             std::fs::write(&path, payload.as_bytes())?;
             result.bytes = Some(payload.len());
-            result.file = Some(path.display().to_string());
+            result.file = Some(display_path(&path));
         }
         None => result.content = Some(payload),
     }

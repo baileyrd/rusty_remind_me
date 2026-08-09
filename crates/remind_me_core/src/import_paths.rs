@@ -35,17 +35,40 @@ pub const IMAGE_SUFFIXES: [&str; 3] = ["png", "jpg", "jpeg"];
 /// Extensions transcribed by an audio import.
 pub const AUDIO_SUFFIXES: [&str; 4] = ["mp3", "m4a", "wav", "ogg"];
 
+/// Windows-portable stand-in for `std::env::var("HOME")`: Unix shells set
+/// `$HOME`, Windows does not (it has `%USERPROFILE%` instead), so a bare
+/// `std::env::var("HOME")` silently returns `NotPresent` on every Windows
+/// machine. `dirs::home_dir()` is already this crate's convention for
+/// resolving a home directory everywhere else one is needed
+/// (`db::resolve_db_path`, `api_keys::default_store_path`,
+/// `remote::default_token_file`) -- this just gives the other home-directory
+/// call sites in this module (and their duplicates in `export.rs` and
+/// `mempalace_import.rs`) the same portability without changing their
+/// `Result<String, VarError>`-shaped call sites at all: every existing
+/// `.unwrap()`/`.map(...)`/`.unwrap_or_else(...)` after `std::env::var("HOME")`
+/// keeps working unchanged, just pointed at this instead.
+pub fn home_dir_var() -> Result<String, std::env::VarError> {
+    dirs::home_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok_or(std::env::VarError::NotPresent)
+}
+
 fn roots_from(env: &str) -> Vec<PathBuf> {
     match std::env::var(env) {
         Ok(raw) if !raw.trim().is_empty() => raw
             .split(':')
             .map(str::trim)
             .filter(|r| !r.is_empty())
-            .map(|r| PathBuf::from(expand_home(r)))
+            .map(|r| resolve_lexically(&PathBuf::from(expand_home(r))))
             .collect(),
-        // Default to the home directory, matching the reference.
-        _ => std::env::var("HOME")
-            .map(|home| vec![PathBuf::from(home)])
+        // Default to the home directory, matching the reference. Resolved
+        // the same way `resolve_lexically` resolves candidate paths -- on
+        // Windows, `canonicalize()` prepends the `\\?\` verbatim-path
+        // prefix, so a root left un-resolved would never `starts_with()`
+        // match a resolved candidate even when they name the same
+        // directory (see this fix's own regression tests).
+        _ => home_dir_var()
+            .map(|home| vec![resolve_lexically(&PathBuf::from(home))])
             .unwrap_or_default(),
     }
 }
@@ -61,7 +84,7 @@ pub fn export_roots() -> Vec<PathBuf> {
 }
 
 pub fn expand_home(raw: &str) -> String {
-    match (raw.strip_prefix("~/"), std::env::var("HOME")) {
+    match (raw.strip_prefix("~/"), home_dir_var()) {
         (Some(rest), Ok(home)) => format!("{}/{}", home.trim_end_matches('/'), rest),
         _ => raw.to_string(),
     }

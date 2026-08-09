@@ -10,10 +10,10 @@ use remind_me_core::{Database, MemoryAddInput};
 use rusqlite::Connection;
 use std::sync::Mutex;
 
-/// `WIKI_DIR_ENV`/`HOME` are process-global; only one test in this file
-/// touches them ([`from_env_defaults_to_the_hyphenated_data_directory`]),
-/// but a future one that does would silently race it without this guard --
-/// the same convention `sync_status_test.rs`'s own `ENV_LOCK` documents.
+/// `WIKI_DIR_ENV` is process-global; only one test in this file touches it
+/// ([`from_env_defaults_to_the_hyphenated_data_directory`]), but a future
+/// one that does would silently race it without this guard -- the same
+/// convention `sync_status_test.rs`'s own `ENV_LOCK` documents.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// A wiki rooted in its own scratch directory, so tests never share state.
@@ -669,10 +669,16 @@ fn from_env_defaults_to_the_hyphenated_data_directory() {
     // `REMIND_ME_WIKI_DIR` was unset -- a directory nothing else in this
     // port reads or writes from. See `remote::default_token_file`'s doc
     // for the full story behind the fix applied here.
+    //
+    // Not steered via a `HOME` env var override: the default now resolves
+    // through `import_paths::home_dir_var` (`dirs::home_dir()`), which on
+    // Windows reads `%USERPROFILE%` and ignores `HOME` entirely -- the
+    // whole point of the fix this test guards. Asserting against that same
+    // function's real return value is what stays portable and still pins
+    // "hyphenated, not underscored" without depending on which OS this
+    // runs on.
     let original_wiki_dir = std::env::var(WIKI_DIR_ENV).ok();
-    let original_home = std::env::var("HOME").ok();
     std::env::remove_var(WIKI_DIR_ENV);
-    std::env::set_var("HOME", "/tmp/rrm-wiki-default-home-probe");
 
     let wiki = Wiki::from_env();
 
@@ -680,13 +686,7 @@ fn from_env_defaults_to_the_hyphenated_data_directory() {
         Some(v) => std::env::set_var(WIKI_DIR_ENV, v),
         None => std::env::remove_var(WIKI_DIR_ENV),
     }
-    match original_home {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
 
-    assert_eq!(
-        wiki.root(),
-        std::path::Path::new("/tmp/rrm-wiki-default-home-probe/.remind-me/wiki")
-    );
+    let home = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap());
+    assert_eq!(wiki.root(), home.join(".remind-me").join("wiki"));
 }

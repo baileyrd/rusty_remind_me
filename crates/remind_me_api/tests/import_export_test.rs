@@ -7,11 +7,8 @@ use serde_json::json;
 /// A scratch directory inside the default import/export root (the home
 /// directory) — matching `remind_me_core`'s own import test convention.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(format!(
-        "rrm_api_io_{}_{}",
-        name,
-        std::process::id()
-    ));
+    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
+        .join(format!("rrm_api_io_{}_{}", name, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

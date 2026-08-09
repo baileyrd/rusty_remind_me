@@ -14,11 +14,8 @@ use rusqlite::{params, Connection};
 
 /// A scratch directory inside the default import root (the home directory).
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(format!(
-        "rrm_dbs_{}_{}",
-        name,
-        std::process::id()
-    ));
+    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
+        .join(format!("rrm_dbs_{}_{}", name, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -833,5 +830,10 @@ fn the_archive_is_opened_read_only() {
         .unwrap();
     assert_eq!(remaining, 1);
 
+    // Windows refuses to delete a file (or its parent directory) while a
+    // handle to it is still open -- Unix allows this, so it never surfaced
+    // there. `reopened` is the one connection still holding the archive
+    // file open at this point.
+    drop(reopened);
     std::fs::remove_dir_all(&dir).unwrap();
 }
