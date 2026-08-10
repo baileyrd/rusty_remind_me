@@ -49,6 +49,12 @@ pub const DOCUMENT_CATEGORY: &str = "document";
 /// easy to transpose.
 struct ParsedImport {
     chunks: Vec<(String, Option<String>)>,
+    /// Per-chunk byte spans into the raw file, positionally aligned with
+    /// `chunks`. Empty for every kind but a chat export, and `None` within it
+    /// for the formats whose chunks do not trace to one contiguous region.
+    /// Consumed only by raw-transcript retention (#212); an empty vector just
+    /// means no memory records a source span.
+    spans: Vec<Option<(usize, usize)>>,
     raw_entries: usize,
     source: &'static str,
     category: String,
@@ -467,14 +473,29 @@ pub fn parse_document(
     pairs
 }
 
+/// A parsed unit of a chat export, and where in the raw file it came from.
+///
+/// `span` is a byte range into the `raw` that produced it, present only for
+/// formats where one unit traces to one contiguous region. JSONL does: one
+/// envelope per line. A whole-file JSON array does not — every message shares
+/// the one top-level value — and markdown role-splitting is a text transform
+/// whose output no longer indexes its input. Those get `None` rather than a
+/// guessed range, because a wrong span is worse than a missing one: it would
+/// hand a caller some other turn's bytes and look authoritative doing it.
+struct ChatChunk {
+    content: String,
+    span: Option<(usize, usize)>,
+}
+
 /// Parse a chat export into chunked content strings.
 fn parse_chat(
     raw: &str,
     suffix: &str,
     extract_mode: &str,
     max_length: usize,
-) -> (Vec<String>, usize) {
-    let mut contents: Vec<String> = Vec::new();
+) -> (Vec<ChatChunk>, usize) {
+    // (content, originating byte span) before chunking.
+    let mut contents: Vec<(String, Option<(usize, usize)>)> = Vec::new();
 
     match suffix {
         "json" => {
@@ -487,41 +508,66 @@ fn parse_chat(
                 if conversations {
                     for conversation in data.as_array().unwrap() {
                         let messages = extract_messages(conversation);
-                        contents.extend(filter_messages(&messages, extract_mode));
+                        contents.extend(
+                            filter_messages(&messages, extract_mode)
+                                .into_iter()
+                                .map(|c| (c, None)),
+                        );
                     }
                 } else {
-                    contents.extend(filter_messages(&extract_messages(&data), extract_mode));
+                    contents.extend(
+                        filter_messages(&extract_messages(&data), extract_mode)
+                            .into_iter()
+                            .map(|c| (c, None)),
+                    );
                 }
             }
         }
         "jsonl" => {
-            for line in raw.lines() {
-                let line = line.trim();
-                if line.is_empty() {
+            // Offsets are tracked against `raw` directly rather than via
+            // `lines()`, which discards the separator and so cannot say where
+            // a line began.
+            let mut offset = 0usize;
+            for line in raw.split_inclusive('\n') {
+                let start = offset;
+                offset += line.len();
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
                     continue;
                 }
                 // A malformed line is skipped rather than failing the import —
                 // one bad line in a long export should not lose the rest.
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
                     continue;
                 };
                 if value.get("record_type").is_some() {
                     continue;
                 }
-                contents.extend(filter_messages(&extract_messages(&value), extract_mode));
+                // The span covers the whole line, including the blocks
+                // `text_of` dropped — recovering those is the entire point.
+                let span = Some((start, offset));
+                contents.extend(
+                    filter_messages(&extract_messages(&value), extract_mode)
+                        .into_iter()
+                        .map(|c| (c, span)),
+                );
             }
         }
         _ => {
             let messages = split_chat_markdown(raw);
             contents = if messages.is_empty() {
-                // No structure found: the whole file is one memory.
+                // No structure found: the whole file is one memory — the one
+                // markdown case where the span *is* knowable.
                 if raw.trim().is_empty() {
                     Vec::new()
                 } else {
-                    vec![raw.trim().to_string()]
+                    vec![(raw.trim().to_string(), Some((0, raw.len())))]
                 }
             } else {
                 filter_messages(&messages, extract_mode)
+                    .into_iter()
+                    .map(|c| (c, None))
+                    .collect()
             };
         }
     }
@@ -532,8 +578,17 @@ fn parse_chat(
     let raw_entries = contents.len();
     let chunks = contents
         .iter()
-        .filter(|c| !c.trim().is_empty())
-        .flat_map(|c| chunk_text(c, max_length))
+        .filter(|(c, _)| !c.trim().is_empty())
+        // Every chunk of a message inherits that message's span: they all came
+        // from the same envelope, and the drill-down unit is the envelope.
+        .flat_map(|(c, span)| {
+            chunk_text(c, max_length)
+                .into_iter()
+                .map(move |content| ChatChunk {
+                    content,
+                    span: *span,
+                })
+        })
         .collect();
     (chunks, raw_entries)
 }
@@ -730,6 +785,7 @@ pub fn import_content(
         source,
         category,
         extras,
+        spans,
         frontmatter,
     } = match effective {
         ImportKind::Pdf => {
@@ -764,6 +820,7 @@ pub fn import_content(
                 // answer to "how much of this document was readable".
                 raw_entries: pages_with_text,
                 extras,
+                spans: Vec::new(),
                 frontmatter: serde_json::Map::new(),
                 source: crate::pdf_import::PDF_SOURCE,
                 category: if category.is_empty() || category == CHAT_SOURCE {
@@ -793,6 +850,7 @@ pub fn import_content(
                 // "how much of this image was readable".
                 raw_entries: lines,
                 extras,
+                spans: Vec::new(),
                 frontmatter: serde_json::Map::new(),
                 source: crate::image_import::IMAGE_SOURCE,
                 category: if category.is_empty() || category == CHAT_SOURCE {
@@ -841,6 +899,7 @@ pub fn import_content(
                 // Segments transcribed, not chunks produced.
                 raw_entries: segment_count,
                 extras,
+                spans: Vec::new(),
                 frontmatter: serde_json::Map::new(),
                 source: crate::audio_import::AUDIO_SOURCE,
                 category: if category.is_empty() || category == CHAT_SOURCE {
@@ -878,6 +937,7 @@ pub fn import_content(
                 chunks,
                 raw_entries,
                 extras,
+                spans: Vec::new(),
                 frontmatter: serde_json::Map::new(),
                 source: crate::readwise_import::READWISE_SOURCE,
                 category: if category.is_empty() || category == CHAT_SOURCE {
@@ -904,6 +964,7 @@ pub fn import_content(
                 chunks,
                 raw_entries,
                 extras,
+                spans: Vec::new(),
                 frontmatter,
                 source: crate::obsidian_import::OBSIDIAN_SOURCE,
                 // Same rule as a document: the chat-shaped default gets
@@ -922,6 +983,7 @@ pub fn import_content(
                 chunks,
                 raw_entries,
                 extras: Vec::new(),
+                spans: Vec::new(),
                 frontmatter: serde_json::Map::new(),
                 source: DOCUMENT_SOURCE,
                 // A document left under the chat-shaped default category gets
@@ -935,10 +997,12 @@ pub fn import_content(
         }
         _ => {
             let (contents, raw_entries) = parse_chat(raw, suffix, extract_mode, max_length);
+            let spans = contents.iter().map(|c| c.span).collect();
             ParsedImport {
-                chunks: contents.into_iter().map(|c| (c, None)).collect(),
+                chunks: contents.into_iter().map(|c| (c.content, None)).collect(),
                 raw_entries,
                 extras: Vec::new(),
+                spans,
                 frontmatter: serde_json::Map::new(),
                 source: CHAT_SOURCE,
                 category: category.to_string(),
@@ -949,6 +1013,22 @@ pub fn import_content(
     let now = Utc::now().to_rfc3339();
     let import_id = format!("imp_{}", uuid::Uuid::new_v4().simple());
     let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+
+    // Raw-transcript retention (#212). A no-op unless REMIND_ME_ARCHIVE_DIR is
+    // set. A failure here is swallowed on purpose: the memories below are the
+    // import, and an unwritable archive directory must not turn a working
+    // import into a failing one.
+    let archived = crate::archive::store(conn, &import_id, filename, hash, raw_bytes)
+        .unwrap_or(None)
+        .is_some();
+
+    // Spans index into `raw`; the blob holds `raw_bytes`. They agree only when
+    // `raw` is that byte sequence rather than a lossy decode of it — true for
+    // every text chat format, false for a PDF, whose spans are empty anyway.
+    // Comparing outright rather than reasoning about which kinds are text
+    // keeps a future binary connector from silently recording offsets into a
+    // string that no longer indexes the file.
+    let spans_addressable = archived && raw.as_bytes() == raw_bytes;
 
     let mut created = 0;
     for (chunk_index, (content, section)) in chunks.iter().enumerate() {
@@ -1008,6 +1088,14 @@ pub fn import_content(
             ],
         )?;
         created += 1;
+
+        // Point this memory back at the bytes it came from, so a caller can
+        // recover the tool_use/thinking blocks `text_of` dropped.
+        if spans_addressable {
+            if let Some(Some((start, end))) = spans.get(chunk_index) {
+                crate::archive::record_span(conn, &memory_id, &import_id, *start, *end)?;
+            }
+        }
 
         // Each wikilink in this chunk becomes an entity the memory mentions,
         // which is what makes the vault's own link graph traversable. Entity

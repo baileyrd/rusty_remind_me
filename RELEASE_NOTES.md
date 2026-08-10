@@ -2,6 +2,67 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — Raw transcript retention: an addressable L0 archive (#212)
+
+### Added
+- **`REMIND_ME_ARCHIVE_DIR` retains the bytes an import was derived from.**
+  `extract_messages` pulls `{role, content}` out of a chat export and
+  `text_of` then drops `tool_use`, `tool_result`, `thinking` and image
+  blocks; the envelope's own `uuid`, `parentUuid`, `sessionId`, per-message
+  timestamps and token usage were never read at all. That flattening is
+  correct — tool chatter stored as memories buries the recallable facts —
+  but it was also terminal. With retention on, the source file is kept
+  content-addressed under the configured directory and every memory records
+  the byte span it came from, so the discarded material is recoverable
+  without changing a single memory the import produces.
+- **`remind_me_source { memory_id }`** returns the raw envelope behind a
+  memory, capped at 256KB with truncation reported rather than silent. A
+  memory marked `sensitive` yields nothing unless `include_sensitive` — the
+  raw source discloses strictly more than the memory distilled from it. All
+  "nothing to show" cases share one message, so the refusal cannot be used
+  to probe which memories are flagged.
+- **Off unless configured**, matching the folder watcher (#55), webhook
+  (#56) and embedder convention. With `REMIND_ME_ARCHIVE_DIR` unset an
+  import is byte-identical to before.
+
+### Behaviour
+- Spans are recorded only where one memory traces to one contiguous region.
+  JSONL qualifies — one envelope per line — and so does a whole-file
+  markdown import. A JSON array of conversations and markdown role-splitting
+  do not, and record no span rather than a guessed one: a wrong span would
+  hand back some other turn's bytes and look authoritative doing it.
+- Offsets are counted over `split_inclusive('\n')`, so a malformed line the
+  importer skips does not slide every subsequent span.
+- Spans are only recorded when `raw.as_bytes() == raw_bytes` — they index
+  the decoded string, the blob holds the original bytes, and the two agree
+  only when the decode was not lossy.
+- `undo_import` now drops an import's archive rows and blob alongside its
+  tracking row, under exactly the same "nothing of this import survives"
+  condition the tracking-row delete uses. A blob shared by two imports of
+  the same file is unlinked only when the last one goes.
+- Archives are node-local and never sync: the tables carry no triggers and
+  `sync/` enumerates the reference's tables, not this crate's.
+
+### Schema
+- Two **target-only** tables, `import_archives` and
+  `import_archive_spans`, created by `archive::ensure_schema` at open time
+  in the same way `vectors::ensure_schema` creates `vec_embeddings`.
+  Deliberately **not** a column on `chat_imports`: `schema_tables.sql` is
+  generated verbatim from the reference and would revert the addition on
+  the next `regenerate_schema.py` run. `SCHEMA_VERSION` is untouched at 29,
+  and `migration_pending` only iterates reference tables, so reconciliation
+  never sees these.
+
+### Verified
+- `cargo test --workspace`: all suites pass, 0 failed.
+- `crates/remind_me_core/tests/archive_test.rs` asserts the property the
+  feature exists for rather than that a file appeared: after importing a
+  Claude Code transcript, the memory holds only the flattened text while
+  `source_for` returns the `thinking` block, the `tool_use` call,
+  `sessionId` and `parentUuid`. Two-line and malformed-line fixtures pin
+  that each memory gets *its own* envelope, not the whole file.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
 ## 2026-08-10 — Raise busy_timeout to 30s to survive concurrent cold-start DB opens (#252)
 
 ### Fixed

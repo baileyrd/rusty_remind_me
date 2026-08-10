@@ -169,15 +169,41 @@ fn forget_tracking(
             // the surviving half, so an import only loses its tracking row once
             // nothing of it is left.
             let marks = vec!["?"; doc_ids.len()].join(",");
+            const SURVIVORS: &str = "SELECT doc_id FROM memories
+                             WHERE doc_id IS NOT NULL AND deleted_at IS NULL";
+
+            // Retained raw transcripts (#212) go with the tracking row, and are
+            // read out *before* the delete because the archive row is what
+            // holds the blob's path. Selected with the same NOT IN clause the
+            // delete uses rather than a looser one: forgetting the archive of
+            // an import whose chunks survive would strand memories pointing at
+            // a file that is no longer there.
+            let doomed: Vec<String> = {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT import_id FROM chat_imports
+                      WHERE import_id IN ({marks})
+                        AND import_id NOT IN ({SURVIVORS})",
+                    marks = marks,
+                    SURVIVORS = SURVIVORS
+                ))?;
+                // Bound rather than returned directly: as the block's tail
+                // expression the iterator's temporary outlives `stmt`.
+                let rows = stmt
+                    .query_map(params_from_iter(doc_ids.iter()), |r| r.get(0))?
+                    .collect::<Result<Vec<String>>>()?;
+                rows
+            };
+            for import_id in &doomed {
+                crate::archive::forget_import(conn, import_id)?;
+            }
+
             let affected = conn.execute(
                 &format!(
                     "DELETE FROM chat_imports
                       WHERE import_id IN ({marks})
-                        AND import_id NOT IN (
-                            SELECT doc_id FROM memories
-                             WHERE doc_id IS NOT NULL AND deleted_at IS NULL
-                        )",
-                    marks = marks
+                        AND import_id NOT IN ({SURVIVORS})",
+                    marks = marks,
+                    SURVIVORS = SURVIVORS
                 ),
                 params_from_iter(doc_ids.iter()),
             )?;

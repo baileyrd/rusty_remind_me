@@ -720,6 +720,18 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_source",
+                                "description": "Retrieve the raw imported bytes a memory was derived from — the original transcript envelope, including the tool calls, reasoning blocks and session metadata that importing deliberately strips out. Only available for memories imported while REMIND_ME_ARCHIVE_DIR was set; returns nothing otherwise.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string", "description": "The memory whose source to fetch" },
+                                        "include_sensitive": { "type": "boolean", "default": false, "description": "Return the source even when the memory is marked sensitive. The raw source discloses more than the memory does, so this is off by default." }
+                                    },
+                                    "required": ["memory_id"]
+                                }
+                            },
+                            {
                                 "name": "remind_me_normalize_batch",
                                 "description": "Fetch raw imported memories (document/chat imports) that have not been normalized yet, so they can be distilled into a {question, summary, resolution?} shape. The raw memory is kept, not replaced.",
                                 "inputSchema": {
@@ -1818,6 +1830,38 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Get capture error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_source" => {
+                        let memory_id =
+                            args.get("memory_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let include_sensitive = args
+                            .get("include_sensitive")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        match remind_me_core::archive::source_for(
+                            &conn,
+                            memory_id,
+                            include_sensitive,
+                        ) {
+                            Ok(Some(found)) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&found).unwrap() }] })
+                            }
+                            // One message for every "nothing to show" case, on
+                            // purpose. Distinguishing "retention was off" from
+                            // "this memory is sensitive" would let a caller
+                            // probe the sensitive flag of memories it is being
+                            // refused, which is the one thing the refusal is
+                            // for.
+                            Ok(None) => {
+                                json!({ "content": [{ "type": "text", "text": format!(
+                                    "No archived source for memory {:?}. Raw retention is only recorded for file imports made while REMIND_ME_ARCHIVE_DIR was set.",
+                                    memory_id
+                                ) }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Source lookup error: {}", e) }] })
                             }
                         }
                     }

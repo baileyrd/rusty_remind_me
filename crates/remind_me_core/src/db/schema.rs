@@ -38,6 +38,12 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     // is a plain table rather than `sqlite-vec`'s `vec0`.
     crate::vectors::ensure_schema(conn)?;
 
+    // Also not part of the generated schema: raw-transcript retention (#212).
+    // Created even with retention off, so the read path never has to tolerate
+    // a missing table. See `archive.rs` for why this cannot be a column on
+    // `chat_imports`.
+    crate::archive::ensure_schema(conn)?;
+
     // Embedding-model versioning (#96): detect a changed
     // REMIND_ME_EMBEDDING_BACKEND/OLLAMA_EMBED_MODEL/EMBEDDING_DIM at every
     // open and clear now-invalid vectors -- the same "check at startup"

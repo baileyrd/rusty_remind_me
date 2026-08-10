@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod ann_index;
 pub mod api_keys;
+pub mod archive;
 pub mod audio_import;
 pub mod backup;
 pub mod capture;
