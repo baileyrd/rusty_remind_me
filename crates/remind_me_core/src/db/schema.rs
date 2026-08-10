@@ -13,7 +13,15 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         PRAGMA journal_mode=WAL;
-        PRAGMA busy_timeout=5000;
+        -- Two independent processes (the `remote` MCP server and the `api`
+        -- dashboard, per docs' serve-mcp-rust.ps1 launcher) commonly cold-open
+        -- the same database within moments of each other. On a database in
+        -- the hundreds-of-MB range, one side's open-time checks can hold the
+        -- write lock past a short timeout, which surfaced as both processes
+        -- crashing with SqliteFailure(DatabaseBusy) instead of one simply
+        -- waiting its turn. 5s wasn't enough headroom; 30s comfortably covers
+        -- a slow cold open without masking a genuinely stuck lock.
+        PRAGMA busy_timeout=30000;
         PRAGMA foreign_keys=ON;
         ",
     )?;

@@ -2,6 +2,27 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — Raise busy_timeout to 30s to survive concurrent cold-start DB opens (#252)
+
+### Fixed
+- **`remote` (MCP server) and `api` (dashboard) crashed together on cold
+  start.** They are launched as two independent processes against the same
+  SQLite database (`serve-mcp-rust.ps1`). On the current ~427MB `memory.db`,
+  both processes cold-opening within moments of each other could hold the
+  write lock past `PRAGMA busy_timeout=5000`, so one side lost the race:
+  both crashed with `SqliteFailure(DatabaseBusy)` / "database is locked"
+  simultaneously, taking down the locally-hosted `remind-me-win`/`remind-me`
+  MCP connections until the scheduled task was manually restarted.
+  `busy_timeout` is now 30000ms (`crates/remind_me_core/src/db/schema.rs`),
+  so one process's open-time checks wait out the other's instead of
+  failing. A companion out-of-repo fix staggers the two launches by 5s in
+  `serve-mcp-rust.ps1`.
+
+### Verified
+- `cargo test -p remind_me_core`: 1276 passed, 0 failed.
+- Rebuilt release binary, redeployed to the live scheduled task; clean
+  startup log and a real `initialize` MCP handshake against the token URL.
+
 ## 2026-08-09 — Discover-lifecycle (SEP-2567, protocol version 2026-07-28) support in the remote connector (#246)
 
 ### Added
