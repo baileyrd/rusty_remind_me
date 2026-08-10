@@ -399,6 +399,31 @@ pub fn vitality_report(report: &remind_me_core::vitality::VitalityReport) -> Str
 /// pipeline work rather than rendering work, so this deliberately renders less
 /// than the reference rather than inventing substitutes that would look right
 /// and mean something else.
+/// One line saying the deadline changed what this search did, or `None` when
+/// it ran in full (#257).
+///
+/// Names the stages rather than saying "timed out", because the two skips mean
+/// different things to a reader: no semantic stage means these are keyword
+/// matches only — so "there is nothing about this topic" is *not* a safe
+/// inference — while no rerank means the ordering is RRF's rather than the
+/// cross-encoder's, which is worse but not misleading.
+fn degradation_note(res: &MemorySearchResponse) -> Option<String> {
+    if !res.timing.degraded() {
+        return None;
+    }
+    let limit = res
+        .timing
+        .deadline_ms
+        .map(|ms| format!("{ms}ms deadline"))
+        .unwrap_or_else(|| "deadline".to_string());
+    Some(format!(
+        "⏱ _Degraded: skipped {} after {}ms ({}). Results are incomplete rather than exhaustive._\n",
+        res.timing.skipped.join(" and "),
+        res.timing.elapsed_ms,
+        limit
+    ))
+}
+
 pub fn search_response(res: &MemorySearchResponse) -> String {
     let bootstrap = res.bootstrap.as_ref().filter(|b| !b.is_empty());
 
@@ -407,8 +432,16 @@ pub fn search_response(res: &MemorySearchResponse) -> String {
     // tell you" stopped being the same statement the moment #255 landed —
     // returning the bare empty case here would throw away context the caller
     // explicitly asked for and already paid budget for.
+    // A search that ran out of time and found nothing is not the same as one
+    // that looked everywhere and found nothing, and the bare empty case reads
+    // as the second. Saying so matters most here: with results on screen a
+    // caller might notice the ranking is off, but "no memories" looks
+    // authoritative and is the answer they are most likely to act on.
     if res.memories.is_empty() && bootstrap.is_none() {
-        return "_No memories found._".to_string();
+        return match degradation_note(res) {
+            Some(note) => format!("_No memories found._\n\n{note}"),
+            None => "_No memories found._".to_string(),
+        };
     }
 
     let mut parts: Vec<String> = Vec::new();
@@ -434,6 +467,9 @@ pub fn search_response(res: &MemorySearchResponse) -> String {
 
     if res.memories.is_empty() {
         parts.push("_No memories matched the query._".to_string());
+        if let Some(note) = degradation_note(res) {
+            parts.push(note);
+        }
         return parts.join("\n---\n");
     }
     // The reference names the retrieval method here. Without a per-result
@@ -441,6 +477,12 @@ pub fn search_response(res: &MemorySearchResponse) -> String {
     // a claim rather than a report -- so the count is stated and the method is
     // not.
     parts.push(format!("**{} results**", res.returned));
+    // Ahead of the budget envelope, because it qualifies the result set more
+    // strongly than the trim does: trimming drops results that were found,
+    // whereas a skipped stage means results that were never looked for.
+    if let Some(note) = degradation_note(res) {
+        parts.push(note);
+    }
     if res.trimmed > 0 {
         parts.push(format!(
             "_{} of {} candidates (trimmed {}, ~{}/{} tokens)_\n",
@@ -547,6 +589,7 @@ mod bootstrap_rendering {
             trimmed: 0,
             tokens_used: 0,
             budget: 800,
+            timing: Default::default(),
             bootstrap,
             related_via_entities: None,
             related_via_neighbors: None,
@@ -608,5 +651,69 @@ mod bootstrap_rendering {
             omitted: 1,
         })));
         assert!(rendered.contains("1 further statement omitted"));
+    }
+}
+
+#[cfg(test)]
+mod deadline_rendering {
+    use super::*;
+    use remind_me_core::retrieval::SearchTiming;
+
+    fn response(timing: SearchTiming, hits: usize) -> MemorySearchResponse {
+        MemorySearchResponse {
+            memories: Vec::new(),
+            total_candidates: hits,
+            returned: hits,
+            trimmed: 0,
+            tokens_used: 0,
+            budget: 800,
+            timing,
+            bootstrap: None,
+            related_via_entities: None,
+            related_via_neighbors: None,
+            related_via_co_retrieval: None,
+        }
+    }
+
+    fn degraded() -> SearchTiming {
+        SearchTiming {
+            elapsed_ms: 1200,
+            deadline_ms: Some(1000),
+            skipped: vec!["semantic".to_string()],
+        }
+    }
+
+    #[test]
+    fn a_clean_run_says_nothing_about_timing() {
+        let rendered = search_response(&response(SearchTiming::default(), 0));
+        assert_eq!(rendered, "_No memories found._");
+        assert!(!rendered.contains("Degraded"));
+    }
+
+    #[test]
+    fn finding_nothing_after_a_timeout_does_not_read_as_finding_nothing() {
+        let rendered = search_response(&response(degraded(), 0));
+        // The dangerous case: "no memories" looks authoritative, and a caller
+        // is most likely to act on it.
+        assert!(rendered.contains("_No memories found._"));
+        assert!(rendered.contains("Degraded"));
+        assert!(rendered.contains("semantic"));
+        assert!(rendered.contains("1000ms deadline"));
+    }
+
+    #[test]
+    fn the_note_names_the_stages_rather_than_saying_timed_out() {
+        let rendered = search_response(&response(
+            SearchTiming {
+                elapsed_ms: 2000,
+                deadline_ms: Some(500),
+                skipped: vec!["semantic".to_string(), "rerank".to_string()],
+            },
+            0,
+        ));
+        // Which stage was lost changes what the reader may infer: no semantic
+        // means "nothing about this topic" is not a safe conclusion, whereas
+        // no rerank only means the order is worse.
+        assert!(rendered.contains("semantic and rerank"));
     }
 }

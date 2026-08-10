@@ -764,6 +764,40 @@ pub fn search_memories_budgeted(
     input: &MemorySearchInput,
     embedder: Option<&dyn crate::embedder::Embedder>,
 ) -> Result<crate::retrieval::TrimOutcome> {
+    // Reading the deadline here rather than inside means the clock starts
+    // before any work — including the FTS query, which is not free on a large
+    // store.
+    search_memories_deadlined(
+        conn,
+        input,
+        embedder,
+        crate::retrieval::Deadline::from_env(),
+    )
+}
+
+/// [`search_memories_budgeted`] with the wall-clock deadline supplied rather
+/// than read from the environment (#257).
+///
+/// Exists for the same reason [`search_memories_with_embedder`] does: the
+/// environment-reading wrapper is convenient and untestable. A deadline from
+/// `REMIND_ME_SEARCH_DEADLINE_MS` starts its clock when the search starts, so
+/// from outside there is no way to arrange for it to have already passed
+/// except by making the search itself slow — which is a race, not a test.
+///
+/// Also useful in production: a background saved-search poll can afford a
+/// longer budget than an interactive query, and passing one beats mutating a
+/// process-global.
+pub fn search_memories_deadlined(
+    conn: &Connection,
+    input: &MemorySearchInput,
+    embedder: Option<&dyn crate::embedder::Embedder>,
+    deadline: crate::retrieval::Deadline,
+) -> Result<crate::retrieval::TrimOutcome> {
+    let mut timing = crate::retrieval::SearchTiming {
+        deadline_ms: deadline.limit_ms(),
+        ..Default::default()
+    };
+
     let weights = choose_rrf_weights(&input.query, input.strategy);
 
     // Raw user text is not a valid FTS5 MATCH expression — ordinary punctuation
@@ -772,7 +806,10 @@ pub fn search_memories_budgeted(
     // searchable; MATCH on an empty string is itself an error.
     let match_expr = sanitize_fts_query(&input.query);
     if match_expr.is_empty() {
-        return Ok(trim_by_token_budget(Vec::new(), input.token_budget));
+        let mut outcome = trim_by_token_budget(Vec::new(), input.token_budget);
+        timing.elapsed_ms = deadline.elapsed_ms();
+        outcome.timing = timing;
+        return Ok(outcome);
     }
 
     // Derived from MEMORY_COLUMNS rather than spelled out, so adding a column
@@ -828,6 +865,24 @@ pub fn search_memories_budgeted(
     // rejects the query text, say) degrades the same way rather than
     // failing the keyword search it would otherwise still have been able to
     // answer.
+    // The deadline gates *entry* to the semantic stage. Once inside, the
+    // embedder's own socket timeouts bound it and this cannot preempt them —
+    // see `Deadline`'s doc comment. What this prevents is a search that has
+    // already spent its budget on the keyword half going on to spend a
+    // connect-timeout more on a daemon that is not answering.
+    //
+    // Degrading to keyword-only rather than erroring is the same choice the
+    // `None` arm below already makes for an unconfigured embedder: partial
+    // results with an honest label beat a killed query.
+    let embedder = match embedder {
+        Some(e) if deadline.expired() => {
+            timing.skipped.push("semantic".to_string());
+            let _ = e;
+            None
+        }
+        other => other,
+    };
+
     let (semantic_memories, semantic_similarity) = match embedder {
         Some(embedder) => {
             let extra_texts = crate::query_expansion::expand_query(&input.query);
@@ -886,10 +941,32 @@ pub fn search_memories_budgeted(
     // cutoff. Feedback runs first so its nudge perturbs the order feeding the
     // cross-encoder, leaving the cross-encoder with the final say.
     ranked.truncate(crate::reranker::pool_size(input.limit));
-    let mut ranked = crate::reranker::maybe_rerank(&input.query, ranked);
+    // Second gate. The reranker is in-process rather than networked, so this
+    // is not about a hung daemon — it is about not spending cross-encoder CPU
+    // reordering results for a caller who has already waited longer than they
+    // agreed to. The results stay in RRF order, which is a worse ranking, not
+    // a wrong one.
+    //
+    // Guarded on **both** `available()` and `enabled()`, which mean different
+    // things: `enabled()` is the setting and defaults to *true*, while
+    // `available()` is `cfg!(feature = "rerank")` and is false on a default
+    // build. Guarding on `enabled()` alone would report "skipped rerank" on
+    // every expired-deadline search in a build with no reranker compiled in —
+    // a fabricated degradation signal, and precisely the failure this line
+    // exists to avoid.
+    let rerank_would_run = crate::reranker::available() && crate::reranker::enabled();
+    let mut ranked = if rerank_would_run && deadline.expired() {
+        timing.skipped.push("rerank".to_string());
+        ranked
+    } else {
+        crate::reranker::maybe_rerank(&input.query, ranked)
+    };
     ranked.truncate(input.limit);
 
-    Ok(trim_by_token_budget(ranked, input.token_budget))
+    let mut outcome = trim_by_token_budget(ranked, input.token_budget);
+    timing.elapsed_ms = deadline.elapsed_ms();
+    outcome.timing = timing;
+    Ok(outcome)
 }
 
 /// Category/tag conditions shared by both branches of [`search_paginated`].
@@ -1142,6 +1219,7 @@ pub fn search_with_expansions(
         } else {
             None
         },
+        timing: outcome.timing,
         bootstrap,
         memories,
         total_candidates: outcome.total_candidates,
