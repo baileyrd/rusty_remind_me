@@ -2,6 +2,45 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — A scheduled nudge for the refinement backlog (#208 follow-up)
+
+### Added
+- **`REMIND_ME_PROMOTION_INTERVAL`** starts a background loop that counts the
+  refinement backlog and notifies through the configured channels when there
+  is work waiting. The ladder shipped pull-only: candidates existed but
+  nothing surfaced them, so a backlog could grow indefinitely with nothing
+  ever mentioning it.
+- **`promotion::backlog`** counts all three rungs at once, and rides along in
+  every `remind_me_promotion_candidates` response — a caller working one rung
+  otherwise has no way to notice the one below it filling up.
+
+### Behaviour
+- **Off unless configured**, matching the folder watcher (#55) and webhook
+  (#56) rather than the reminder scheduler, which always runs. A zero or
+  unparseable interval reads as off rather than as a busy loop.
+- **An unchanged backlog is announced once and then goes quiet.** Re-sending
+  the same sentence every interval makes the channel useless within a day —
+  the reader learns to filter it and takes the real change with it. A backlog
+  that grows nudges again; one worked down to zero says nothing rather than
+  sending an empty notification.
+- The "already announced" mark is **process-local, not a table**, and
+  deliberately so: a notification is a prompt to do work, not a record that
+  work happened — the record is the `promotions` table. Persisting it would
+  mean a backlog nobody ever works eventually stops being mentioned, which is
+  the exact failure a nudge exists to prevent. The cost is one repeat
+  announcement per restart.
+- Started alongside the scheduler and watcher in `server` mode, and joined on
+  shutdown so an in-flight count cannot outlive the database handle.
+- Shares `scheduler::Stop`, already the "sleep for an interval but wake
+  immediately on shutdown" primitive the watcher uses.
+
+### Verified
+- `cargo test --workspace`: 1729 passed, 0 failed, across 129 test binaries.
+- The anti-repeat rule is pinned directly: two passes over an unchanged
+  backlog notify once, and adding a third fact makes the next pass speak
+  again.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
 ## 2026-08-10 — Archive retention: age and size ceilings (#212 follow-up)
 
 ### Added

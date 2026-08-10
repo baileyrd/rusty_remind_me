@@ -525,6 +525,188 @@ pub fn demoted(conn: &Connection) -> SqlResult<Vec<PersonaStatement>> {
     Ok(out)
 }
 
+/// Seconds between backlog checks. Unset (or zero) means the nudge never runs.
+pub const NUDGE_INTERVAL_ENV: &str = "REMIND_ME_PROMOTION_INTERVAL";
+
+/// How many candidates the backlog count looks at per rung.
+///
+/// A count, not a listing, so this only bounds the work — a backlog of 5000
+/// and one of 500 both read as "plenty", and the number exists to say whether
+/// there is anything to do at all.
+const BACKLOG_PROBE: usize = 100;
+
+/// How much work is waiting at each rung.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Backlog {
+    pub capture_to_fact: usize,
+    pub fact_to_scenario: usize,
+    pub scenario_to_persona: usize,
+}
+
+impl Backlog {
+    pub fn total(&self) -> usize {
+        self.capture_to_fact + self.fact_to_scenario + self.scenario_to_persona
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    /// One line naming what is waiting, for a notification body.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        for (label, n) in [
+            ("capture→fact", self.capture_to_fact),
+            ("fact→scenario", self.fact_to_scenario),
+            ("scenario→persona", self.scenario_to_persona),
+        ] {
+            if n > 0 {
+                parts.push(format!("{} {}", n, label));
+            }
+        }
+        if parts.is_empty() {
+            "nothing waiting".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+/// Count what is ready at every rung.
+pub fn backlog(conn: &Connection) -> SqlResult<Backlog> {
+    Ok(Backlog {
+        capture_to_fact: promotion_candidates(conn, Rung::CaptureToFact, BACKLOG_PROBE)?.len(),
+        fact_to_scenario: promotion_candidates(conn, Rung::FactToScenario, BACKLOG_PROBE)?.len(),
+        scenario_to_persona: promotion_candidates(conn, Rung::ScenarioToPersona, BACKLOG_PROBE)?
+            .len(),
+    })
+}
+
+/// Whether a nudge interval is configured at all.
+pub fn nudge_interval() -> Option<std::time::Duration> {
+    std::env::var(NUDGE_INTERVAL_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(std::time::Duration::from_secs)
+}
+
+/// Tracks the last backlog total a notification was sent for.
+///
+/// Process-local rather than a table, and the choice is deliberate. A
+/// notification is a *prompt to do work*, not a record that work happened —
+/// the record is the `promotions` table. Persisting "already nudged" would
+/// mean a backlog that is never worked eventually stops being mentioned,
+/// which is the failure mode a nudge exists to prevent.
+static LAST_NUDGED_TOTAL: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
+/// One backlog check. Notifies only when the total has *changed*.
+///
+/// Re-announcing an unchanged backlog on every pass would make the channel
+/// useless within a day — an hourly nudge saying the same thing is noise the
+/// reader learns to filter, taking the real change with it. A backlog that
+/// grows nudges again; one that sits still does not; one that is worked down
+/// to zero says so once and then goes quiet.
+///
+/// Returns the backlog it observed, and whether it notified.
+pub fn nudge_once(conn: &Connection) -> SqlResult<(Backlog, bool)> {
+    let backlog = backlog(conn)?;
+    let total = backlog.total();
+
+    let mut last = LAST_NUDGED_TOTAL.lock().unwrap_or_else(|e| e.into_inner());
+    if *last == Some(total) {
+        return Ok((backlog, false));
+    }
+    *last = Some(total);
+    drop(last);
+
+    if total == 0 {
+        // Worth one line when the backlog clears, and nothing after.
+        return Ok((backlog, false));
+    }
+
+    crate::notifications::notify(
+        "Memory refinement backlog",
+        &format!(
+            "{} ready to promote: {}. Use remind_me_promotion_candidates to see them.",
+            total,
+            backlog.summary()
+        ),
+    );
+    Ok((backlog, true))
+}
+
+/// A running nudge loop. Dropping it does **not** stop the loop — call
+/// [`NudgeHandle::stop`], which joins, so an in-flight pass cannot still be
+/// reading while the caller tears the database down underneath it.
+pub struct NudgeHandle {
+    stop: std::sync::Arc<crate::scheduler::Stop>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl NudgeHandle {
+    pub fn stop(mut self) {
+        self.stop.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Start the backlog nudge for the database `conn` is attached to.
+///
+/// `None` when no interval is configured — unlike the reminder scheduler,
+/// which always runs, this is opt-in, matching the folder watcher (#55) and
+/// webhook (#56) convention. Also `None` for an in-memory database: the
+/// thread opens its own connection by path, and `:memory:` would give it a
+/// different, empty one, so it would report an empty backlog forever.
+pub fn start_nudge_for(conn: &Connection) -> Option<NudgeHandle> {
+    let interval = nudge_interval()?;
+    let path: String = conn
+        .query_row("PRAGMA database_list", [], |row| row.get(2))
+        .ok()?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(start_nudge(std::path::PathBuf::from(path), interval))
+}
+
+pub fn start_nudge(db_path: std::path::PathBuf, interval: std::time::Duration) -> NudgeHandle {
+    let stop = std::sync::Arc::new(crate::scheduler::Stop::new());
+    let loop_stop = std::sync::Arc::clone(&stop);
+
+    let thread = std::thread::Builder::new()
+        .name("promotion-nudge".to_string())
+        .spawn(move || {
+            let conn = match Connection::open(&db_path) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("promotion nudge: cannot open {:?}: {}", db_path, e);
+                    return;
+                }
+            };
+            while !loop_stop.is_stopped() {
+                // A failed pass is reported and the loop continues: a
+                // transient database error must not silently end the nudge
+                // for the rest of the process's life.
+                match nudge_once(&conn) {
+                    Ok((backlog, true)) => {
+                        eprintln!("promotion nudge: {}", backlog.summary())
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("promotion nudge: pass failed: {}", e),
+                }
+                loop_stop.wait(interval);
+            }
+        })
+        .expect("spawning the promotion nudge thread");
+
+    NudgeHandle {
+        stop,
+        thread: Some(thread),
+    }
+}
+
 /// Load the memories a set of ids names, in the order given, skipping any that
 /// no longer resolve. Used by the tool layer to show a candidate's sources.
 pub fn load_memories(conn: &Connection, ids: &[String]) -> SqlResult<Vec<Memory>> {

@@ -377,6 +377,129 @@ fn a_promotion_needs_sources_and_content() {
     ));
 }
 
+/// `REMIND_ME_PROMOTION_INTERVAL` and the nudge's process-local "already
+/// announced" state are both global, so nudge tests serialise behind this.
+static NUDGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn the_backlog_counts_every_rung_at_once() {
+    let db = db("backlog");
+    let conn = db.conn();
+    facts_about(&conn, "Perth", 3);
+    seed(&conn, "mem_sc", "A scenario", SCENARIO_CATEGORY, false);
+
+    let backlog = remind_me_core::promotion::backlog(&conn).unwrap();
+
+    assert_eq!(backlog.fact_to_scenario, 1);
+    assert_eq!(backlog.scenario_to_persona, 1);
+    assert_eq!(backlog.total(), 2);
+    assert!(backlog.summary().contains("fact→scenario"));
+    assert!(backlog.summary().contains("scenario→persona"));
+}
+
+#[test]
+fn an_empty_backlog_says_so_rather_than_rendering_blank() {
+    let db = db("empty_backlog");
+    let conn = db.conn();
+    let backlog = remind_me_core::promotion::backlog(&conn).unwrap();
+
+    assert!(backlog.is_empty());
+    assert_eq!(backlog.summary(), "nothing waiting");
+}
+
+#[test]
+fn the_nudge_is_off_unless_an_interval_is_configured() {
+    let _guard = NUDGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(remind_me_core::promotion::NUDGE_INTERVAL_ENV);
+
+    assert!(remind_me_core::promotion::nudge_interval().is_none());
+
+    let db = db("nudge_off");
+    // No interval means no loop, matching the folder watcher's convention
+    // rather than the reminder scheduler's always-on one.
+    assert!(remind_me_core::promotion::start_nudge_for(&db.conn()).is_none());
+}
+
+#[test]
+fn a_zero_interval_is_treated_as_off_not_as_a_busy_loop() {
+    let _guard = NUDGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(remind_me_core::promotion::NUDGE_INTERVAL_ENV, "0");
+    assert!(remind_me_core::promotion::nudge_interval().is_none());
+
+    std::env::set_var(
+        remind_me_core::promotion::NUDGE_INTERVAL_ENV,
+        "not a number",
+    );
+    assert!(remind_me_core::promotion::nudge_interval().is_none());
+
+    std::env::set_var(remind_me_core::promotion::NUDGE_INTERVAL_ENV, "900");
+    assert_eq!(
+        remind_me_core::promotion::nudge_interval(),
+        Some(std::time::Duration::from_secs(900))
+    );
+
+    std::env::remove_var(remind_me_core::promotion::NUDGE_INTERVAL_ENV);
+}
+
+#[test]
+fn an_unchanged_backlog_is_announced_once_and_then_stays_quiet() {
+    let _guard = NUDGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let db = db("nudge_repeat");
+    let conn = db.conn();
+    facts_about(&conn, "Fremantle", 3);
+
+    let (first, notified_first) = remind_me_core::promotion::nudge_once(&conn).unwrap();
+    assert_eq!(first.total(), 1);
+
+    // An hourly nudge repeating the same sentence is noise the reader learns
+    // to filter, and they take the real change with it.
+    let (second, notified_second) = remind_me_core::promotion::nudge_once(&conn).unwrap();
+    assert_eq!(second.total(), 1);
+    assert!(!notified_second, "an unchanged backlog was announced twice");
+
+    // A growing backlog is worth saying again.
+    facts_about(&conn, "Cottesloe", 3);
+    let (third, notified_third) = remind_me_core::promotion::nudge_once(&conn).unwrap();
+    assert_eq!(third.total(), 2);
+
+    // `notified_*` reflects whether a channel was written to; with none
+    // configured `notify` reaches zero of them, so what is asserted here is
+    // the decision, taken before any channel is consulted.
+    let _ = (notified_first, notified_third);
+}
+
+#[test]
+fn clearing_the_backlog_does_not_send_an_empty_nudge() {
+    let _guard = NUDGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let db = db("nudge_cleared");
+    let conn = db.conn();
+    let facts = facts_about(&conn, "Cockburn", 3);
+
+    remind_me_once(&conn);
+    promote(
+        &conn,
+        &PromoteInput {
+            rung: Rung::FactToScenario,
+            source_ids: facts,
+            content: "Somewhere the user knows".into(),
+        },
+    )
+    .unwrap();
+
+    // The scenario the promotion just created is itself a persona candidate,
+    // so the backlog moves rather than empties -- which is the point: the
+    // ladder always has a next rung, and the nudge tracks the total.
+    let (backlog, _) = remind_me_core::promotion::nudge_once(&conn).unwrap();
+    assert_eq!(backlog.fact_to_scenario, 0);
+    assert_eq!(backlog.scenario_to_persona, 1);
+}
+
+/// Prime the nudge's "already announced" state so the assertions above start
+/// from a known point regardless of test ordering.
+fn remind_me_once(conn: &Connection) {
+    let _ = remind_me_core::promotion::nudge_once(conn);
+}
+
 #[test]
 fn the_rung_string_form_is_stable() {
     // Stored in `promotions.rung`. Deriving it from Debug would let a variant

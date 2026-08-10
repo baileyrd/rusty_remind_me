@@ -1944,10 +1944,19 @@ impl McpServer {
                                     &conn, rung, limit,
                                 ) {
                                     Ok(found) => {
+                                        // The whole backlog rides along, not
+                                        // just this rung's: a caller working
+                                        // one rung has no other way to notice
+                                        // the one below it filling up.
+                                        let backlog = remind_me_core::promotion::backlog(&conn)
+                                            .unwrap_or_default();
                                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
                                             "rung": rung,
                                             "count": found.len(),
                                             "candidates": found,
+                                            "backlog": backlog,
+                                            "backlog_summary": backlog.summary(),
+                                            "nudge_enabled": remind_me_core::promotion::nudge_interval().is_some(),
                                         })).unwrap() }] })
                                     }
                                     Err(e) => {
