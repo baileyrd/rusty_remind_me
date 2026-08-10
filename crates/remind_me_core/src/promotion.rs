@@ -525,6 +525,129 @@ pub fn demoted(conn: &Connection) -> SqlResult<Vec<PersonaStatement>> {
     Ok(out)
 }
 
+/// Fraction of a search's token budget the L2/L3 bootstrap may spend.
+pub const BOOTSTRAP_RESERVE_ENV: &str = "REMIND_ME_BOOTSTRAP_RESERVE";
+
+/// Default share of the budget reserved for the bootstrap.
+pub const BOOTSTRAP_RESERVE_DEFAULT: f64 = 0.25;
+
+/// Hard ceiling on the reserve, applied after the environment is read.
+///
+/// This is the floor under the hits, expressed from the other side. A caller
+/// who sets the reserve to `0.9` — or to `4.0` by fat-fingering a percentage —
+/// gets `0.5`, so the ranked results always keep at least half the budget. A
+/// bootstrap that can crowd out the answer to the actual query is worse than
+/// no bootstrap: the caller asked a question, and the persona is context for
+/// it rather than a substitute for it.
+pub const BOOTSTRAP_RESERVE_MAX: f64 = 0.5;
+
+/// Resolved reserve fraction, read fresh from the environment.
+///
+/// Read at call time rather than cached, matching `REMIND_ME_RRF_*`
+/// ([`crate::retrieval`]) — a test that sets the variable must not depend on
+/// having done so before some other test read it first.
+///
+/// Anything unparseable, negative or NaN falls back to the default rather than
+/// erroring: this sits on the search hot path, and failing a search because a
+/// tuning knob is malformed trades a small misconfiguration for a total
+/// outage.
+pub fn bootstrap_reserve_fraction() -> f64 {
+    let raw = match std::env::var(BOOTSTRAP_RESERVE_ENV) {
+        Ok(v) => v,
+        Err(_) => return BOOTSTRAP_RESERVE_DEFAULT,
+    };
+    match raw.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => v.min(BOOTSTRAP_RESERVE_MAX),
+        _ => BOOTSTRAP_RESERVE_DEFAULT,
+    }
+}
+
+/// The L2/L3 context bootstrap for one search, and what it cost.
+///
+/// `omitted` is the same kind of number as [`crate::retrieval::TrimOutcome`]'s
+/// `trimmed`, and exists for the same reason: a bootstrap cut down to fit is
+/// otherwise indistinguishable from a persona that is genuinely that short.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Bootstrap {
+    /// Statements that fit, most vital first.
+    pub statements: Vec<PersonaStatement>,
+    /// Estimated tokens across `statements`.
+    pub tokens_used: usize,
+    /// Surviving statements that did not fit the reserve.
+    pub omitted: usize,
+}
+
+impl Bootstrap {
+    pub fn is_empty(&self) -> bool {
+        self.statements.is_empty()
+    }
+}
+
+/// Assemble the persona bootstrap for a search with `token_budget` to spend.
+///
+/// # Why this goes through [`persona`]
+///
+/// It would be marginally cheaper to select the persona rows directly here.
+/// Doing so would also duplicate two rules that are easy to get wrong and
+/// invisible when wrong: demotion (a statement whose sources have all been
+/// superseded is withheld) and the unconditional sensitive exclusion. A second
+/// query would eventually drift from the first, and the failure mode is a
+/// withdrawn — or sensitive — statement being injected into *every* search
+/// while `remind_me_persona` correctly reports it as gone. One code path means
+/// that cannot happen, and #255's acceptance asks for exactly that guarantee.
+///
+/// # Budget
+///
+/// `token_budget` is the search's whole budget; the reserve is taken from it
+/// here so callers cannot forget to apply the ceiling. A budget of `0` means
+/// unlimited, matching [`crate::retrieval::trim_by_token_budget`], and the
+/// bootstrap is then uncapped too — the caller has said they want everything.
+///
+/// Statements are taken in `persona`'s order (most vital first), so what
+/// survives a tight reserve is the most durable part of the persona rather
+/// than whichever rows happened to sort first.
+pub fn bootstrap(conn: &Connection, token_budget: usize) -> SqlResult<Bootstrap> {
+    let statements = persona(conn)?;
+    let total = statements.len();
+
+    if token_budget == 0 {
+        let tokens_used = statements
+            .iter()
+            .map(|s| crate::retrieval::estimated_content_tokens(&s.content))
+            .sum();
+        return Ok(Bootstrap {
+            statements,
+            tokens_used,
+            omitted: 0,
+        });
+    }
+
+    let reserve = (token_budget as f64 * bootstrap_reserve_fraction()).floor() as usize;
+
+    let mut tokens_used = 0usize;
+    let mut kept = Vec::new();
+    for statement in statements {
+        let cost = crate::retrieval::estimated_content_tokens(&statement.content);
+        // No `!kept.is_empty()` escape hatch, unlike `trim_by_token_budget`:
+        // there, returning zero results would be a useless answer to a
+        // question, so the first result is admitted over budget. Here an empty
+        // bootstrap is a perfectly good outcome — the caller still gets their
+        // search — and admitting one oversized statement anyway is how a
+        // reserve stops being a bound.
+        if tokens_used + cost > reserve {
+            break;
+        }
+        tokens_used += cost;
+        kept.push(statement);
+    }
+
+    Ok(Bootstrap {
+        omitted: total - kept.len(),
+        statements: kept,
+        tokens_used,
+    })
+}
+
 /// Seconds between backlog checks. Unset (or zero) means the nudge never runs.
 pub const NUDGE_INTERVAL_ENV: &str = "REMIND_ME_PROMOTION_INTERVAL";
 

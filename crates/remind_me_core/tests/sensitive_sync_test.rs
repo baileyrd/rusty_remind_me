@@ -59,6 +59,7 @@ fn search_ids(conn: &Connection, query: &str, include_sensitive: bool) -> Vec<St
             expand_entities: false,
             include_neighbors: false,
             expand_co_retrieval: false,
+            bootstrap: false,
             include_sensitive,
         },
     )

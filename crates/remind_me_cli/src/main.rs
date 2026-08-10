@@ -708,6 +708,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     expand_entities: false,
                     include_neighbors: false,
                     expand_co_retrieval: false,
+                    // Only `search_with_expansions` assembles a bootstrap, and
+                    // this path calls `search_memories`. Set true here it
+                    // would be silently ignored, so it stays false until the
+                    // CLI grows a flag and the call to match.
+                    bootstrap: false,
                 };
                 let conn = db.conn();
                 let results = queries::search_memories(&conn, &search_input)?;

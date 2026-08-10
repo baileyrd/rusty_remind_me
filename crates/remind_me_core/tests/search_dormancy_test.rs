@@ -53,6 +53,7 @@ fn search(conn: &Connection, query: &str, include_dormant: bool, min_vitality: f
         expand_entities: false,
         include_neighbors: false,
         expand_co_retrieval: false,
+        bootstrap: false,
     };
     queries::search_memories(conn, &input)
         .unwrap()

@@ -207,6 +207,17 @@ pub struct MemorySearchInput {
     /// regardless — see [`crate::expansion::record_co_retrieval`].
     #[serde(default)]
     pub expand_co_retrieval: bool,
+    /// Prepend the L2/L3 persona as a context bootstrap (#255).
+    ///
+    /// Off by default. The bootstrap is injected *regardless of whether it
+    /// matches the query*, which is the whole point of it — promoted rows are
+    /// ordinary memories and already reachable by keyword or vector match, so
+    /// a flag that merely let them rank would add nothing. It also means the
+    /// bootstrap spends budget on every search that asks for it, which is why
+    /// it is opt-in and why the reserve is capped
+    /// ([`crate::promotion::BOOTSTRAP_RESERVE_MAX`]).
+    #[serde(default)]
+    pub bootstrap: bool,
 }
 
 impl Default for MemorySearchInput {
@@ -229,6 +240,7 @@ impl Default for MemorySearchInput {
             include_sensitive: false,
             strategy: RetrievalStrategy::default(),
             expand_co_retrieval: false,
+            bootstrap: false,
         }
     }
 }

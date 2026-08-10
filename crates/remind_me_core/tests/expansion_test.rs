@@ -67,6 +67,7 @@ fn search(
         expand_entities: false,
         include_neighbors: false,
         expand_co_retrieval: false,
+        bootstrap: false,
     };
     configure(&mut input);
     queries::search_with_expansions(conn, &input).unwrap()

@@ -51,6 +51,7 @@ fn search(conn: &Connection, query: &str, include_sensitive: bool) -> Vec<String
             expand_entities: false,
             include_neighbors: false,
             expand_co_retrieval: false,
+            bootstrap: false,
             include_sensitive,
         },
     )

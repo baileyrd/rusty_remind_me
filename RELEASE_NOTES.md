@@ -2,6 +2,54 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — Layered retrieval: the persona as a context bootstrap (#255)
+
+### Added
+- **`bootstrap` on `remind_me_search`** prepends the durable persona (L3) to a
+  search, *whether or not it matches the query*. #254 built the refinement
+  ladder and nothing read from it: promoted rows are ordinary memories, so
+  they could always match like anything else, but nothing ever injected them
+  deliberately. The ladder's whole payoff is L2/L3 arriving as context, and it
+  was going unrealised.
+- **`promotion::bootstrap`** assembles that context under a token reserve, and
+  reports what it withheld.
+- **`REMIND_ME_BOOTSTRAP_RESERVE`** sets the share of `token_budget` the
+  bootstrap may spend. Default `0.25`.
+
+### Behaviour
+- **Off unless asked for.** The bootstrap spends budget on every search that
+  requests it, so it is opt-in rather than ambient.
+- **The reserve is capped at half the budget, whatever the environment says.**
+  A bootstrap that can crowd out the answer is worse than no bootstrap — the
+  caller asked a question, and the persona is context for it rather than a
+  substitute. `0.9`, `90` and `4.0` all clamp to `0.5`; malformed values fall
+  back to the default rather than failing the search around them.
+- **The reported `budget` stays the one the caller set.** Reserving from it is
+  an internal split, and reporting the remainder would tell someone who asked
+  for 800 that they asked for 600.
+- **One code path with `remind_me_persona`.** The bootstrap calls `persona()`
+  rather than re-querying, so demotion on lost provenance and the
+  unconditional sensitive exclusion apply identically. A second query would
+  eventually drift, and the failure mode is a withdrawn — or sensitive —
+  statement being injected into every search while `remind_me_persona`
+  correctly reports it gone.
+- **A bootstrap with no hits is still an answer.** A search that matches
+  nothing but carries persona context now renders that context plus `_No
+  memories matched the query._`, rather than the bare `_No memories found._`
+  that would discard what the caller paid budget for.
+
+### Not included
+- **L2 scenarios are not injected.** Unlike the persona, scenarios are
+  numerous and topical, and there is no notion of "current project" to select
+  the relevant ones — injecting all of them would be unbounded and mostly off
+  topic. They already reach callers through ranked retrieval, being ordinary
+  rows with `category = 'scenario'`.
+- **`digest.rs` is untouched.** A digest that omits the persona is arguably
+  incomplete, but that is a second surface with its own exclusion rules and
+  belongs in its own change.
+- The CLI's `search` calls `search_memories`, which has no bootstrap; only
+  `search_with_expansions` assembles one.
+
 ## 2026-08-10 — A scheduled nudge for the refinement backlog (#208 follow-up)
 
 ### Added

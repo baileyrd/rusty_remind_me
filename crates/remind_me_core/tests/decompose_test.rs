@@ -338,6 +338,7 @@ fn a_superseded_fact_drops_out_of_search() {
             expand_entities: false,
             include_neighbors: false,
             expand_co_retrieval: false,
+            bootstrap: false,
         },
     )
     .unwrap()

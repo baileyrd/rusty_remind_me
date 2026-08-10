@@ -400,11 +400,42 @@ pub fn vitality_report(report: &remind_me_core::vitality::VitalityReport) -> Str
 /// than the reference rather than inventing substitutes that would look right
 /// and mean something else.
 pub fn search_response(res: &MemorySearchResponse) -> String {
-    if res.memories.is_empty() {
+    let bootstrap = res.bootstrap.as_ref().filter(|b| !b.is_empty());
+
+    // A bootstrap without hits is still an answer. The persona was assembled
+    // regardless of the query, so "nothing matched" and "there is nothing to
+    // tell you" stopped being the same statement the moment #255 landed —
+    // returning the bare empty case here would throw away context the caller
+    // explicitly asked for and already paid budget for.
+    if res.memories.is_empty() && bootstrap.is_none() {
         return "_No memories found._".to_string();
     }
 
     let mut parts: Vec<String> = Vec::new();
+
+    // Ahead of the results, and outside the ranked list: this is context for
+    // the query rather than an answer to it, and interleaving it with the hits
+    // would misreport durable statements as things that matched.
+    if let Some(b) = bootstrap {
+        let mut section = String::from("**Persona** (durable context, not query matches):\n");
+        for statement in &b.statements {
+            section.push_str(&format!("- {}\n", statement.content.trim()));
+        }
+        if b.omitted > 0 {
+            section.push_str(&format!(
+                "\n_{} further statement{} omitted to stay inside the bootstrap reserve (~{} tokens)._\n",
+                b.omitted,
+                if b.omitted == 1 { "" } else { "s" },
+                b.tokens_used
+            ));
+        }
+        parts.push(section);
+    }
+
+    if res.memories.is_empty() {
+        parts.push("_No memories matched the query._".to_string());
+        return parts.join("\n---\n");
+    }
     // The reference names the retrieval method here. Without a per-result
     // method tag this port cannot say which ran, and guessing "hybrid" would be
     // a claim rather than a report -- so the count is stated and the method is
@@ -490,4 +521,92 @@ fn expansion_section(heading: &str, related: &[RelatedMemory], via_entities: boo
         }
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod bootstrap_rendering {
+    use super::*;
+    use remind_me_core::promotion::Bootstrap;
+    use remind_me_core::PersonaStatement;
+
+    fn statement(content: &str) -> PersonaStatement {
+        PersonaStatement {
+            id: "mem_p".to_string(),
+            content: content.to_string(),
+            vitality: 1.0,
+            created_at: "2026-08-10T00:00:00Z".to_string(),
+            surviving_sources: 1,
+        }
+    }
+
+    fn response(bootstrap: Option<Bootstrap>) -> MemorySearchResponse {
+        MemorySearchResponse {
+            memories: Vec::new(),
+            total_candidates: 0,
+            returned: 0,
+            trimmed: 0,
+            tokens_used: 0,
+            budget: 800,
+            bootstrap,
+            related_via_entities: None,
+            related_via_neighbors: None,
+            related_via_co_retrieval: None,
+        }
+    }
+
+    #[test]
+    fn nothing_at_all_still_renders_the_reference_empty_case() {
+        assert_eq!(search_response(&response(None)), "_No memories found._");
+    }
+
+    #[test]
+    fn an_empty_bootstrap_is_not_treated_as_a_bootstrap() {
+        // Asking for one and getting nothing must read the same as not asking.
+        // Otherwise every search on a store with no persona yet would carry an
+        // empty heading.
+        assert_eq!(
+            search_response(&response(Some(Bootstrap::default()))),
+            "_No memories found._"
+        );
+    }
+
+    #[test]
+    fn a_bootstrap_without_hits_is_still_an_answer() {
+        let rendered = search_response(&response(Some(Bootstrap {
+            statements: vec![statement("Ships small changes.")],
+            tokens_used: 5,
+            omitted: 0,
+        })));
+
+        assert!(rendered.contains("Ships small changes."));
+        // The distinction the change exists for: the query matched nothing,
+        // but the caller was not told there is nothing to tell them.
+        assert!(rendered.contains("_No memories matched the query._"));
+        assert!(!rendered.contains("_No memories found._"));
+        assert!(
+            rendered.find("Ships small changes.") < rendered.find("_No memories matched"),
+            "context comes before the report of what matched"
+        );
+    }
+
+    #[test]
+    fn a_trimmed_bootstrap_says_how_much_it_withheld() {
+        let rendered = search_response(&response(Some(Bootstrap {
+            statements: vec![statement("Ships small changes.")],
+            tokens_used: 5,
+            omitted: 3,
+        })));
+        // A count, not a boolean -- same reasoning as the trim envelope.
+        assert!(rendered.contains("3 further statements omitted"));
+    }
+
+    #[test]
+    fn one_withheld_statement_is_not_pluralised() {
+        let rendered = search_response(&response(Some(Bootstrap {
+            statements: vec![statement("Ships small changes.")],
+            tokens_used: 5,
+            omitted: 1,
+        })));
+        assert!(rendered.contains("1 further statement omitted"));
+    }
 }
