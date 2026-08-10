@@ -222,6 +222,128 @@ are the *other* — Linux — host; see Lesson 1, rebuild before reusing):
 
 ---
 
+## work-pc-win cutover, executed (2026-08-10)
+
+A second, independently-scoped host — `work-pc-win`, not the same machine as
+`home-pc-win` above. Its topology was different again: no shared HTTP process
+and no Task Scheduler entry at all. Two consumers, both spawning their own
+process:
+
+| Consumer | Config | Transport (before) | Transport (after) |
+| --- | --- | --- | --- |
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` → `mcpServers.remind-me` | stdio, `C:\dev\remind_me\.venv\Scripts\python.exe -m remind_me_mcp` | stdio, `rusty-remind-me.exe server` |
+| Claude Code / omp (this harness) | `~/.claude.json` → `mcpServers.remind-me` | Streamable HTTP, `http://127.0.0.1:8767/mcp` (Python `--serve-mcp`, unauthenticated-by-design, started by hand via `start-mcp-http.vbs`) | stdio, `rusty-remind-me.exe server` |
+
+**Design decision: collapse the HTTP consumer to stdio instead of adopting
+`remind_me_remote`'s token-gated mode.** home-pc-win needed the HTTP
+standalone port because one process served MCP *and* the peer-sync receiver
+*and* the dashboard for three consumers at once — killing it meant killing
+all three. Here, the port-8767 process served exactly one consumer (Claude
+Code) and nothing else depended on it: no dashboard, no Task Scheduler entry,
+not even autostart (`start-mcp-http.vbs` had to be run by hand, and per
+`mcp-http.log` the last process had already exited five days earlier). With
+no shared-process constraint, stdio is strictly simpler than standing up
+`remind_me_remote` for a single local caller: no port, no token, no
+"unauthenticated by design" gap to close, one fewer moving part. Claude
+Desktop was already stdio; Claude Code now matches it. `start-mcp-http.ps1`/
+`.cmd`/`.vbs` and the stale `mcp_server.pid` moved to
+`~/.remind-me/legacy-python-mcp-http/` rather than deleted.
+
+**What actually happened:**
+1. Built `--features "remind_me_core/rerank remind_me_core/local-embed"`.
+   Neither client config set `REMIND_ME_RERANK`/`REMIND_ME_QUERY_EXPANSION`/
+   `REMIND_ME_EMBEDDING_BACKEND`, meaning both ran on the reference's
+   defaults — reranking on (`BAAI/bge-reranker-base`) and ONNX embeddings on
+   (`sentence-transformers/all-MiniLM-L6-v2`) — so parity needed both, not
+   neither. Converted both from the already-cached ONNX exports the same way
+   as home-pc-win (`rten-convert --no-infer-shapes`; the Windows
+   `shape_inference` `PermissionError` bug is still live). HyDE was never
+   configured on this host either, same as home-pc-win.
+2. **Toolchain was broken, not just missing.** `rust-toolchain.toml` pins
+   1.97.0; rustup's installed copy of it was missing the `cargo`/`rustc`
+   components outright (`cargo.exe`: "is not installed for the toolchain"),
+   and reinstalling the component hit `detected conflict:
+   lib\rustlib\manifest-cargo-*` — a corrupted local install, not a network
+   or config problem. Building against the already-complete
+   `stable-x86_64-pc-windows-msvc` toolchain instead (`cargo
+   +stable-x86_64-pc-windows-msvc`) hit a second, unrelated problem: this
+   host's PATH resolves `link.exe` to Git for Windows' coreutils `link`
+   (hard-link creation) ahead of any MSVC linker, and there is no Visual
+   Studio C++ workload installed to fall back to at all (`link.exe` under
+   either Visual Studio Program Files tree: zero matches). Building against
+   `stable-x86_64-pc-windows-gnu` instead — already fully installed, and
+   rustup's own default toolchain on this host — sidestepped both problems:
+   it links with the bundled MinGW `gcc`/`ld`, never touches `link.exe`, and
+   needed no repair. `rust-version = "1.94"` in the workspace `Cargo.toml`
+   already says the 1.97 pin is aspirational, not a hard floor.
+3. Verified against a copy first, not the live file (Lesson 4): copied the
+   real 289 MB `memory.db`, ran `stats`/`search` against the copy, watched
+   the schema auto-migrate v27 → v29 cleanly (this host's Python checkout —
+   `C:\dev\remind_me`, `pyproject.toml` says 1.54.0 — only ever wrote up to
+   v27; the reference's own drift from v27 to v29 documented earlier in this
+   file had never reached this particular clone). Confirmed the embedder and
+   reranker actually produce real signal, not just "configured": on a
+   throwaway 3-memory database, `vec_score`/`rerank_score` came back
+   populated (`null` on the full copy at first, because CLI `search` and a
+   no-op `remind_me_reindex` don't exercise them — `remind_me_reindex` has no
+   `limit` argument despite one being a reasonable guess, so passing one is
+   silently ignored and reindexes the whole store) — and the reranker
+   ordered a solar-panel/board-meeting/pizza-topping triple correctly by
+   actual relevance, with sane cross-encoder logits.
+4. **A newly-built binary run from a path under `C:\Users\<user>\...` was
+   blocked outright, not slow.** This host runs Trellix (McAfee) Endpoint
+   Security with an Exploit Prevention rule, "Running files from common user
+   folders" (T1562.001), that denies execution of anything launched from
+   under the user profile — including `~/.remind-me/bin/`, a directory this
+   pass created for exactly this purpose. `os error 5` ("Access is denied")
+   gave no indication why; the actual cause only showed up in
+   `Get-WinEvent`/the Application log (Trellix Endpoint Security, event
+   1092). Not worked around — moved the binary to `C:\tools\lang\
+   rusty-remind-me\rusty-remind-me.exe`, the same non-profile convention
+   every other dev tool on this host already uses (`rustup`, `uv`, `git`),
+   which is unaffected by the rule. Confirmed via the same event log that no
+   corresponding block fired for that path. A second, unrelated ~40s stall
+   right after (running `stats` against the real file with no timeout
+   override) was not this rule — it was the real v27→v29 migration actually
+   running against the live 290 MB file, confirmed by `PRAGMA user_version`
+   still reading 27 immediately after an artificially-truncated attempt, and
+   29 with intact row counts and `PRAGMA integrity_check` after letting it
+   finish. Worth remembering as its own lesson: a "hang" on a freshly-cut-over
+   binary can be legitimate first-touch migration cost, not a fault — check
+   `PRAGMA user_version` and `integrity_check` before assuming otherwise.
+5. Updated both `claude_desktop_config.json` and `.claude.json` in place —
+   same env var names throughout (`REMIND_ME_NODE_ID`/`_CLIENT`/`_HUB_URL`/
+   `_SYNC_SECRET`/`_PEER_PORT`/`_SYNC_INTERVAL`/`_STATIC_PEERS` unchanged from
+   what Python was already reading), plus `REMIND_ME_DEFAULT_RESPONSE_FORMAT=
+   markdown` (the reference always rendered Markdown for MCP tool text; this
+   port defaults to JSON) and the four rerank/embed model-path variables.
+   Not run through `rusty-remind-me configure`: that subcommand only knows
+   Claude Desktop/Antigravity/Cursor/Codex, not `~/.claude.json`, and writes
+   an additive `mcpServers.rusty-remind-me` key rather than replacing the
+   existing `remind-me` entry — a cutover wants the latter.
+6. Verified after, against the real file, by spawning each config's exact
+   `command`/`args`/`env` and driving the real MCP stdio protocol
+   (`initialize` → `remind_me_server_status`) rather than trusting the JSON
+   edit: both report `schema: v29 (expected v29)`, `embeddings: active`,
+   `mcp: active`, `memories: 14627`, `backups: 9` (the pre-migration
+   snapshot fired automatically).
+
+**Not migrated in this pass:** `REMIND_ME_QUERY_EXPANSION`/HyDE — unused
+under Python on this host already, so still a no-op, not a regression.
+
+**Not stopped, because nothing was running.** Unlike home-pc-win, no live
+Python process needed killing — the standalone HTTP server (PID from a stale
+`mcp_server.pid`) had already exited days earlier, and Claude Desktop's
+stdio Python child dies with the parent app, which was not running during
+this pass. Per Lesson 3, both edits take effect on each client's *next*
+restart, not this session — this omp session itself still holds whatever
+connection (or lack of one) it started with.
+
+`uv tool` still has `remind-me-mcp v1.54.0` installed globally and
+`C:\dev\remind_me` still exists untouched — kept per Lesson 7, not removed
+cold.
+---
+
 ## The consumer inventory
 
 Every process that can open `~/.remind-me/memory.db` or call into
