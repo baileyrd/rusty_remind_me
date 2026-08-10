@@ -720,6 +720,31 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_skeleton_write",
+                                "description": "Attach a Mermaid diagram of a capture's structure, so the conversation's shape can be read without reading the transcript. Each node maps to an inclusive, 1-based line range in the capture's dialog; remind_me_skeleton_read then drills into one node at a time. Ranges are validated against the dialog and the write is refused if any is out of bounds.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "capture_id": { "type": "string", "description": "The capture to describe" },
+                                        "mermaid": { "type": "string", "minLength": 1, "maxLength": 100000, "description": "Mermaid source, e.g. 'graph TD\\n  n1[Ask] --> n2[Investigate]'" },
+                                        "nodes": { "type": "object", "description": "Node id to [start_line, end_line], inclusive and 1-based, into the dialog. e.g. {\"n1\": [1, 12]}" }
+                                    },
+                                    "required": ["capture_id", "mermaid", "nodes"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_skeleton_read",
+                                "description": "Read a capture's skeleton. Without 'node' this returns the Mermaid diagram and its node map — the cheap view of a long conversation. With 'node' it returns only that node's lines of the dialog, which is how to drill in without pulling the whole transcript.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "capture_id": { "type": "string" },
+                                        "node": { "type": "string", "description": "A node id from the diagram. Omit for the diagram itself." }
+                                    },
+                                    "required": ["capture_id"]
+                                }
+                            },
+                            {
                                 "name": "remind_me_source",
                                 "description": "Retrieve the raw imported bytes a memory was derived from — the original transcript envelope, including the tool calls, reasoning blocks and session metadata that importing deliberately strips out. Only available for memories imported while REMIND_ME_ARCHIVE_DIR was set; returns nothing otherwise.",
                                 "inputSchema": {
@@ -1830,6 +1855,68 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Get capture error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_skeleton_write" => {
+                        let parsed: std::result::Result<remind_me_core::SkeletonWriteInput, _> =
+                            serde_json::from_value(args.clone());
+                        match parsed {
+                            Ok(input) => {
+                                match remind_me_core::skeleton::write_skeleton(&conn, &input) {
+                                    Ok(written) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&written).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Skeleton write error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid skeleton input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_skeleton_read" => {
+                        let capture_id = args
+                            .get("capture_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        // An empty `node` is treated as absent rather than as a
+                        // node named "": a client that sends the field
+                        // unconditionally should get the diagram, not a
+                        // not-found for a node nobody could have written.
+                        let node = args
+                            .get("node")
+                            .and_then(|v| v.as_str())
+                            .filter(|n| !n.trim().is_empty());
+                        match node {
+                            Some(node) => {
+                                match remind_me_core::skeleton::node_slice(&conn, capture_id, node)
+                                {
+                                    Ok(Some(slice)) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&slice).unwrap() }] })
+                                    }
+                                    Ok(None) => {
+                                        json!({ "content": [{ "type": "text", "text": format!("No node {:?} in the skeleton for capture {:?}.", node, capture_id) }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Skeleton read error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            None => {
+                                match remind_me_core::skeleton::read_skeleton(&conn, capture_id) {
+                                    Ok(Some(skeleton)) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&skeleton).unwrap() }] })
+                                    }
+                                    Ok(None) => {
+                                        json!({ "content": [{ "type": "text", "text": format!("No skeleton for capture {:?}. Write one with remind_me_skeleton_write.", capture_id) }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Skeleton read error: {}", e) }] })
+                                    }
+                                }
                             }
                         }
                     }

@@ -42,6 +42,7 @@ pub mod retrieval;
 pub mod saved_searches;
 pub mod scheduler;
 pub mod sidecars;
+pub mod skeleton;
 pub mod stats;
 pub mod status;
 pub mod sync;

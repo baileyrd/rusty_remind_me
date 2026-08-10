@@ -1133,10 +1133,14 @@ pub fn search_with_expansions(
 /// backlog. And a memory needs to be missing *both* signals — one that has
 /// entities but no triple is already considered annotated, so an `OR` here
 /// would keep re-offering work that is done.
+///
+/// `skeleton` is excluded on the same grounds and then some (#207): it is
+/// Mermaid source describing a conversation's shape, so there is no fact in it
+/// to extract and offering one costs a model call to find that out.
 fn unannotated_where() -> &'static str {
     "m.superseded_by IS NULL
      AND m.deleted_at IS NULL
-     AND m.category != 'dialog'
+     AND m.category NOT IN ('dialog', 'skeleton')
      AND m.subject IS NULL AND m.predicate IS NULL AND m.object IS NULL
      AND NOT EXISTS (SELECT 1 FROM memory_entities me WHERE me.memory_id = m.id)"
 }

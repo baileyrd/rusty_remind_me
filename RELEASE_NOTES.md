@@ -2,6 +2,59 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — Symbolic compression: a capture skeleton with drill-down (#207)
+
+### Added
+- **`remind_me_skeleton_write` / `remind_me_skeleton_read`.** A capture has
+  had two altitudes since it existed — the verbatim dialog and a summary —
+  and nothing in between. A caller wanting more than the summary had to read
+  the whole transcript. A **skeleton** is a third artifact at that missing
+  altitude: a Mermaid diagram of the conversation's structure whose nodes
+  each name a line range in the dialog. Reading the diagram costs a diagram;
+  following one node costs one turn; neither costs the transcript.
+- **Drill-down.** `remind_me_skeleton_read { capture_id, node }` returns
+  exactly that node's lines. Without `node` it returns the diagram and its
+  node map.
+
+### Behaviour
+- **Nodes address the dialog by inclusive, 1-based line range, not character
+  offset.** The diagram is drawn by the calling agent's model, the way
+  `remind_me_decompose`'s facts already are. A model can count lines; a
+  character offset wrong by forty is indistinguishable from a correct one
+  until someone reads the slice it returns.
+- **Ranges are validated against the dialog at write time and the write is
+  refused if any is out of bounds** — including a 0 start, so a model that
+  emitted 0-based offsets fails on its first node instead of returning one
+  line too many forever. A rejected write stores nothing.
+- Writing again **replaces**: a capture has one shape, not a history of them.
+- A skeleton is stored as a third memory sharing the `capture_id`,
+  distinguished by its metadata `type` exactly as the dialog and summary are.
+  So `remind_me_get_capture` already carries it (under `other`, an existing
+  field documented for precisely this), sync already replicates it, and
+  deleting a capture already takes it along. `Capture`'s serialized shape is
+  unchanged, so the reference-parity tool's response is untouched.
+- `skeleton` joins `dialog` in the `extract_batch` exclusion: Mermaid source
+  has no triple in it, and offering one would spend a model call to find that
+  out. This is a target-only category, so a shared database sees no
+  difference unless skeletons are actually written.
+
+### Verified
+- `cargo test --workspace`: 1707 passed, 0 failed, across 128 test binaries.
+- `crates/remind_me_core/tests/skeleton_test.rs` asserts the two properties
+  that pull against each other: drill-down returns *exactly* its node's lines
+  and nothing from the neighbouring turns, and reading the skeleton of a
+  120-turn transcript costs **more than 20x less** than the dialog — asserted
+  as a ratio so a later change that inlines the transcript fails here rather
+  than quietly costing every caller the saving.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
+### Fixed
+- **`schema_test`'s `OWN_ADDITIONS` now lists #212's archive tables.** They
+  were added in the previous entry without being registered here, so the four
+  schema tests failed from that commit until this one. The list is the
+  mechanism that distinguishes a deliberate target-only table from schema
+  drift, and a new one has to be declared to it.
+
 ## 2026-08-10 — Raw transcript retention: an addressable L0 archive (#212)
 
 ### Added

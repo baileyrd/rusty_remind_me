@@ -688,10 +688,57 @@ fn default_capture_category() -> String {
 /// excludes this category, so getting the two the wrong way round would flood
 /// the annotation backlog with raw transcripts.
 pub const DIALOG_CATEGORY: &str = "dialog";
+/// Category the structural skeleton of a capture is stored under.
+///
+/// Excluded from `extract_batch` for the same reason [`DIALOG_CATEGORY`] is,
+/// and more so: a skeleton is structure, not prose. There are no facts in it
+/// to extract, and offering one to the annotation loop would spend a model
+/// call to discover that.
+pub const SKELETON_CATEGORY: &str = "skeleton";
 /// `source` both halves of a capture are stored under.
 pub const CAPTURE_SOURCE: &str = "auto_capture";
 /// Longest title derived from a summary when none is supplied.
 pub const CAPTURE_TITLE_CHARS: usize = 80;
+
+/// Write (or replace) the structural skeleton of a capture.
+///
+/// # Why the ranges are lines and not characters
+///
+/// A skeleton is produced by the calling agent's model, the same way
+/// `remind_me_decompose`'s facts are. Asking a model for exact character
+/// offsets into a long transcript invites off-by-N errors that are invisible
+/// at write time and surface later as a drill-down returning the middle of
+/// someone else's sentence. Lines are countable, checkable by eye against the
+/// stored dialog, and are the unit a transcript is already structured in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletonWriteInput {
+    pub capture_id: String,
+    /// Mermaid source for the diagram.
+    pub mermaid: String,
+    /// Node id to inclusive, 1-based line range in the capture's dialog.
+    #[serde(default)]
+    pub nodes: std::collections::BTreeMap<String, (usize, usize)>,
+}
+
+/// A capture's skeleton: the diagram, and what each node points at.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skeleton {
+    pub capture_id: String,
+    pub skeleton_id: String,
+    pub mermaid: String,
+    pub nodes: std::collections::BTreeMap<String, (usize, usize)>,
+}
+
+/// The slice of dialog one skeleton node stands for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletonSlice {
+    pub capture_id: String,
+    pub node: String,
+    /// Inclusive, 1-based.
+    pub start_line: usize,
+    pub end_line: usize,
+    pub content: String,
+}
 
 /// The two linked memories a capture produces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
