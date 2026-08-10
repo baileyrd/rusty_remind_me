@@ -2,6 +2,54 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — A wall-clock deadline for search (#257)
+
+### Added
+- **`REMIND_ME_SEARCH_DEADLINE_MS`** bounds how long a search spends. The
+  reference caps retrieval by item count, character budget *and* timeout; this
+  port had the first two and no clock at all.
+- **`retrieval::SearchTiming`** rides on every search response with the elapsed
+  time, the deadline in force, and which stages were skipped.
+- **`queries::search_memories_deadlined`** takes the deadline as an argument
+  instead of reading the environment, in the shape
+  `search_memories_with_embedder` already established.
+
+### Behaviour
+- **Unbounded unless configured**, and unset, `0` and unparseable all mean
+  unbounded. Zero is treated as unset rather than "expire immediately", since a
+  zero-length deadline would silently reduce every search to keyword-only.
+- **Degrades rather than fails.** Past the deadline the semantic stage is
+  skipped and the keyword half still answers — the same choice already made for
+  an unreachable embedder.
+- **Skipped stages are named, not counted.** Losing the semantic stage means
+  "there is nothing about this topic" is *not* a safe inference; losing the
+  rerank only means the ordering is RRF's rather than the cross-encoder's.
+  Those warrant different reactions, so the report names them.
+- **A timeout is reported even when the result set is empty.** `_No memories
+  found._` reads as authoritative and is the answer a caller is most likely to
+  act on, so a search that ran out of time before finishing says so.
+- The rerank gate is guarded on `reranker::available()` **and** `enabled()`.
+  `enabled()` defaults to true while `available()` is `cfg!(feature =
+  "rerank")`; guarding on the setting alone reported a skipped rerank on builds
+  with no reranker compiled in.
+
+### Known limit
+- **This gates stage entry; it does not interrupt work already running.** A
+  socket read inside the embedder is bounded by that embedder's own
+  `IO_TIMEOUT` (60s), not by this, so the worst case is the deadline plus one
+  in-flight stage. What it prevents is *compounding*: a search that already
+  spent 60s failing to reach Ollama will not then spend more on a rerank nobody
+  is waiting for. Bounding the blocking call itself means deriving the socket
+  timeout from the remaining budget inside `Embedder`, which is a public
+  signature change and separate work. There is a test that pins this contract
+  down, so a later change to it is visible rather than silent.
+
+### Corrected
+- #257 claimed a stalled embedder had "no ceiling". It does — `CONNECT_TIMEOUT`
+  is 5s and `IO_TIMEOUT` 60s, both already applied. The real problem is that
+  60s is far too long for an interactive search and that stages compound, not
+  that the call was unbounded.
+
 ## 2026-08-10 — Layered retrieval: the persona as a context bootstrap (#255)
 
 ### Added

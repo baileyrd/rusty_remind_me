@@ -100,6 +100,13 @@ pub struct MemorySearchResponse {
     pub tokens_used: usize,
     /// The budget that was in force. `0` means unlimited.
     pub budget: usize,
+    /// What the wall-clock deadline did to this search (#257).
+    ///
+    /// Always present, unlike the expansions: "no deadline, nothing skipped"
+    /// is a fact worth stating on every response, and a caller checking
+    /// `degraded()` should not have to distinguish absent from clean.
+    #[serde(default)]
+    pub timing: crate::retrieval::SearchTiming,
     /// The L2/L3 persona bootstrap, when one was asked for (#255).
     ///
     /// `None` and `Some(empty)` are deliberately different answers: the first

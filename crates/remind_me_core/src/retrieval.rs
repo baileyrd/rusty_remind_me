@@ -1,5 +1,6 @@
 use crate::models::{Memory, MemorySearchResult, RetrievalStrategy};
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Configuration (REMIND_ME_RRF_* environment variables)
@@ -567,6 +568,147 @@ pub struct TrimOutcome {
     pub trimmed: usize,
     /// Estimated tokens across what was kept.
     pub tokens_used: usize,
+    /// What the wall-clock deadline did to this search (#257).
+    ///
+    /// Default (no deadline, nothing skipped) for a bare trim; the search path
+    /// fills it in. It rides here because [`TrimOutcome`] is already the one
+    /// channel out of `search_memories_budgeted`, and a second return value
+    /// would have to be threaded through three public signatures to say one
+    /// thing.
+    pub timing: SearchTiming,
+}
+
+/// Wall-clock budget for one search.
+pub const SEARCH_DEADLINE_ENV: &str = "REMIND_ME_SEARCH_DEADLINE_MS";
+
+/// What the deadline did to a search.
+///
+/// Separate from the trim envelope because they answer different questions: a
+/// trimmed search returned less than it *found*, a timed-out one returned less
+/// than it would have *looked for*. Reporting the second as the first would
+/// tell a caller to raise `token_budget` when the fix is a longer deadline —
+/// or a reachable embedder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SearchTiming {
+    /// Wall-clock spent in the search.
+    pub elapsed_ms: u64,
+    /// The deadline in force, if any. `None` means unbounded — today's
+    /// behaviour, and still the default.
+    pub deadline_ms: Option<u64>,
+    /// Stages not run because the deadline had already passed, in the order
+    /// they would have run.
+    ///
+    /// A **list, not a boolean**, for the reason `trimmed` is a count: "we
+    /// skipped the semantic stage" and "we skipped semantic and rerank" call
+    /// for different responses from a caller deciding whether to trust the
+    /// result set.
+    pub skipped: Vec<String>,
+}
+
+impl SearchTiming {
+    /// Whether the deadline changed what this search did.
+    pub fn degraded(&self) -> bool {
+        !self.skipped.is_empty()
+    }
+}
+
+/// A wall-clock budget, checked between stages.
+///
+/// # What this does and does not bound
+///
+/// It gates **stage entry**: before starting the semantic stage or the
+/// reranker, the search asks whether the deadline has passed and skips the
+/// stage if so. It cannot preempt work already running — a socket read inside
+/// the embedder is bounded by that embedder's own `IO_TIMEOUT` (60s at the
+/// time of writing), not by this. So the worst case is the deadline *plus* one
+/// in-flight stage, not the deadline.
+///
+/// That is a real limit and the reason this is not called a timeout. What it
+/// buys is that a slow stage cannot *compound*: a search that spent 60s
+/// failing to reach Ollama will not then spend more on a cross-encoder rerank
+/// nobody is waiting for any more. Bounding the blocking call itself means
+/// deriving the socket timeout from the remaining budget, which needs the
+/// deadline threaded into [`crate::embedder::Embedder`] — a public signature
+/// change, and a separate piece of work.
+#[derive(Debug, Clone, Copy)]
+pub struct Deadline {
+    started: Instant,
+    limit: Option<Duration>,
+}
+
+impl Deadline {
+    /// Start a deadline from `REMIND_ME_SEARCH_DEADLINE_MS`.
+    ///
+    /// Read fresh at call time rather than cached, matching the
+    /// `REMIND_ME_RRF_*` vars above. Unset, zero, or unparseable all mean
+    /// **unbounded**: this sits on the search hot path, and refusing to search
+    /// because a tuning knob is malformed trades a small misconfiguration for
+    /// an outage. Zero is treated as unset rather than as "expire
+    /// immediately", since a zero-length deadline would silently reduce every
+    /// search to keyword-only.
+    pub fn from_env() -> Self {
+        let limit = std::env::var(SEARCH_DEADLINE_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis);
+        Self {
+            started: Instant::now(),
+            limit,
+        }
+    }
+
+    /// An explicitly unbounded deadline, for callers that never want one.
+    pub fn unbounded() -> Self {
+        Self {
+            started: Instant::now(),
+            limit: None,
+        }
+    }
+
+    /// A deadline of `limit` starting now.
+    ///
+    /// Lets a caller set its own budget instead of inheriting the global one —
+    /// a background poll can afford longer than an interactive search — and,
+    /// as with [`crate::db::queries::search_memories_with_embedder`], it is
+    /// what makes the behaviour testable at all. A deadline read from the
+    /// environment starts its clock when the search starts, so from outside
+    /// there is no way to arrange for it to have passed except by making the
+    /// search itself slow, which is a race rather than a test.
+    pub fn starting_now(limit: Option<Duration>) -> Self {
+        Self {
+            started: Instant::now(),
+            limit,
+        }
+    }
+
+    /// A deadline that has already passed.
+    ///
+    /// `Duration::ZERO` rather than a `from_env` value, deliberately: env
+    /// parsing treats `0` as *unset* so nobody configures an accidental
+    /// keyword-only mode, but a caller (or a test) asking for this by name has
+    /// unambiguously said what they mean.
+    pub fn already_passed() -> Self {
+        Self {
+            started: Instant::now(),
+            limit: Some(Duration::ZERO),
+        }
+    }
+
+    pub fn expired(&self) -> bool {
+        match self.limit {
+            Some(limit) => self.started.elapsed() >= limit,
+            None => false,
+        }
+    }
+
+    pub fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    pub fn limit_ms(&self) -> Option<u64> {
+        self.limit.map(|d| d.as_millis() as u64)
+    }
 }
 
 /// Estimated token cost of a piece of content.
@@ -605,6 +747,7 @@ pub fn trim_by_token_budget(results: Vec<MemorySearchResult>, token_budget: usiz
             tokens_used,
             total_candidates,
             results,
+            timing: SearchTiming::default(),
         };
     }
 
@@ -626,6 +769,7 @@ pub fn trim_by_token_budget(results: Vec<MemorySearchResult>, token_budget: usiz
         tokens_used,
         total_candidates,
         results: kept,
+        timing: SearchTiming::default(),
     }
 }
 
