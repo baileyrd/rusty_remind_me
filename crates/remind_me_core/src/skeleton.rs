@@ -178,12 +178,13 @@ pub fn write_skeleton(
     let base_weight = get_type_prior(SKELETON_CATEGORY) * get_source_prior(CAPTURE_SOURCE);
     let vitality = calculate_vitality(base_weight, 0, decay_rate, &now_iso, now);
 
+    let (node_id, client) = crate::sync::memory_provenance();
     conn.execute(
         "INSERT INTO memories (
             id, content, category, tags, source, metadata, capture_id,
             created_at, updated_at, decay_rate, vitality, base_weight,
-            access_count, accessed_at
-         ) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            access_count, accessed_at, node_id, client
+         ) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
         params![
             skeleton_id,
             input.mermaid,
@@ -197,6 +198,8 @@ pub fn write_skeleton(
             vitality,
             base_weight,
             now_iso,
+            node_id,
+            client,
         ],
     )?;
 

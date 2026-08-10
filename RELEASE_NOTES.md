@@ -2,6 +2,58 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — Record who wrote each memory, on every write path (#258)
+
+### Fixed
+- **Five of the six paths that create memories recorded no writer at all.**
+  `add_memory` set `client` and `node_id`; `auto_capture`, its `decompose`
+  half, `promote`, `write_skeleton` and `apply_normalizations` set neither, so
+  `client` fell back to the schema default `'unknown'` and `node_id` to `NULL`.
+  All six now go through `sync::memory_provenance()`.
+- That mattered beyond attribution: **`node_id` rides the sync outbox payload**
+  (`schema_triggers.sql`), so per-node counts on the hub silently saw only
+  manually-added memories. Anything captured, decomposed, promoted, skeletoned
+  or normalized synced with a NULL origin.
+
+### Added
+- **The MCP `initialize` handshake's `clientInfo` is now recorded.** The
+  handler read `protocolVersion` and discarded the rest, while `client` was
+  filled from an environment variable defaulting to `"unknown"` — the calling
+  agent's identity was on the wire and being thrown away. Stored as
+  `name/version`.
+- **`sync::memory_provenance()`** returns the `(node_id, client)` pair every
+  new memory is stamped with, so the next write path added cannot quietly omit
+  them the way these five did.
+
+### Behaviour
+- **Precedence: handshake, then `REMIND_ME_CLIENT`, then `"unknown"`.** The
+  handshake wins because it is *observed* rather than *configured* — one server
+  serving several clients has one env value and many real callers. Non-MCP
+  paths (CLI, dashboard, importer) never handshake and keep the configured
+  value.
+- **Advisory, not authentication.** A client supplies its own name and nothing
+  verifies it. That is sufficient for "which agent wrote this" and is not a
+  basis for any access decision; this store has none.
+- A blank or absent client name falls through to the configured value rather
+  than recording a client called `""`.
+- **Nothing is backfilled.** Existing rows keep `'unknown'` / NULL, which is
+  the honest record — a backfill would invent a writer for memories whose
+  writer was never captured.
+
+### Corrected
+- #258 said nothing recorded which client. The column existed and one path
+  populated it; the real fault was that it was *inconsistently* populated,
+  which is worse — `'unknown'` could not be told apart from "nobody configured
+  a client".
+- The issue also asked for "which tool". That is already recorded: `source`
+  distinguishes `manual`, `capture`, `decomposition`, `promotion`,
+  `normalization`.
+
+### Not included
+- **The model.** MCP conveys no model identifier in any message, so there is
+  nothing to record. Adding a field the protocol cannot fill would produce
+  exactly the ambiguous `'unknown'` this change exists to remove.
+
 ## 2026-08-10 — A wall-clock deadline for search (#257)
 
 ### Added

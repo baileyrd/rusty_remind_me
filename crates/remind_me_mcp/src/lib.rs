@@ -334,6 +334,29 @@ pub struct McpServer {
     wiki: Wiki,
 }
 
+/// `"name/version"` from an MCP `initialize`, or `None` if it said nothing
+/// useful.
+///
+/// The version is appended when present because "which agent" and "which
+/// build of it" are different questions, and a provenance field that answers
+/// only the first goes stale the moment the interesting difference is between
+/// two releases of the same client.
+///
+/// A blank or absent name yields `None` rather than an empty string, so
+/// `configured_client` falls through to the configured value instead of
+/// recording a client called "".
+fn client_identity(req: &serde_json::Value) -> Option<String> {
+    let info = req.get("params")?.get("clientInfo")?;
+    let name = info.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    match info.get("version").and_then(|v| v.as_str()).map(str::trim) {
+        Some(version) if !version.is_empty() => Some(format!("{name}/{version}")),
+        _ => Some(name.to_string()),
+    }
+}
+
 impl McpServer {
     pub fn new(db: Database) -> Self {
         Self::with_wiki(db, Wiki::from_env())
@@ -383,6 +406,18 @@ impl McpServer {
                     .and_then(|p| p.get("protocolVersion"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("2024-11-05");
+
+                // The handshake carries who is calling, and this handler used
+                // to read `protocolVersion` and drop the rest. Meanwhile every
+                // memory recorded `client` from an environment variable
+                // defaulting to "unknown" — the identity was on the wire and
+                // being thrown away (#258).
+                //
+                // Advisory, not authentication: a client supplies its own name
+                // and nothing verifies it. Good enough for "which agent wrote
+                // this", which is the question `client` answers; not a basis
+                // for any access decision, and this store has none anyway.
+                remind_me_core::sync::set_handshake_client(client_identity(&req));
 
                 Some(json!({
                     "jsonrpc": "2.0",
@@ -4355,5 +4390,51 @@ mod tests {
             prompt_resp["result"]["prompts"][0]["name"],
             "recall_context"
         );
+    }
+}
+
+#[cfg(test)]
+mod handshake_identity {
+    use super::client_identity;
+    use serde_json::json;
+
+    fn parse(params: serde_json::Value) -> Option<String> {
+        client_identity(&json!({ "method": "initialize", "params": params }))
+    }
+
+    #[test]
+    fn name_and_version_are_joined() {
+        // Both, because "which agent" and "which build of it" are different
+        // questions and the interesting difference is often between releases.
+        assert_eq!(
+            parse(json!({ "clientInfo": { "name": "claude-code", "version": "2.1.0" } })),
+            Some("claude-code/2.1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn a_missing_version_still_yields_the_name() {
+        assert_eq!(
+            parse(json!({ "clientInfo": { "name": "claude-code" } })),
+            Some("claude-code".to_string())
+        );
+        assert_eq!(
+            parse(json!({ "clientInfo": { "name": "claude-code", "version": "  " } })),
+            Some("claude-code".to_string())
+        );
+    }
+
+    #[test]
+    fn nothing_usable_yields_none_rather_than_an_empty_client() {
+        // `None` matters: it makes `configured_client` fall through to the
+        // configured value. An empty string would be recorded as the client
+        // and would outrank a correctly-set REMIND_ME_CLIENT.
+        assert_eq!(parse(json!({})), None);
+        assert_eq!(parse(json!({ "clientInfo": {} })), None);
+        assert_eq!(parse(json!({ "clientInfo": { "name": "" } })), None);
+        assert_eq!(parse(json!({ "clientInfo": { "name": "   " } })), None);
+        assert_eq!(parse(json!({ "clientInfo": { "name": 42 } })), None);
+        // A handshake with no params at all must not panic.
+        assert_eq!(client_identity(&json!({ "method": "initialize" })), None);
     }
 }
