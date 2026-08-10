@@ -2,6 +2,47 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — Archive retention: age and size ceilings (#212 follow-up)
+
+### Added
+- **`REMIND_ME_ARCHIVE_MAX_AGE_DAYS` and `REMIND_ME_ARCHIVE_MAX_BYTES`.**
+  Raw-transcript retention shipped earlier today with no bound at all — the
+  archive grew forever. Both ceilings are now enforced, oldest-first.
+- **`remind_me_archive_prune`**, defaulting to `dry_run: true`. This is the
+  one tool in the set that destroys data the caller cannot get back, so the
+  destructive reading is the explicit one.
+
+### Behaviour
+- **Unset means unlimited, for both.** Anyone already running with
+  `REMIND_ME_ARCHIVE_DIR` set has an archive they chose to keep, and switching
+  on silent deletion underneath them during an upgrade is the wrong way round.
+  The report carries `limits_configured` so zero removals cannot be misread as
+  "nothing was old enough".
+- **Totals are summed over distinct blob hashes, not rows.** Storage is
+  content-addressed, so two imports of the same file are two rows pointing at
+  one file; summing rows would over-count the duplicate and evict history to
+  reclaim bytes that were never on disk. A shared blob is unlinked only when
+  the last row referencing it goes — the same rule `undo_import` already
+  follows.
+- **Pruning runs after each archived import**, so the archive cannot outrun
+  its ceiling between manual passes. A no-op when no limit is set, and a
+  failure is swallowed: retention housekeeping must never fail the import it
+  is decorating.
+- **Only the archive is dropped, never the memories.** `source_for` already
+  reads a missing blob as "no source" rather than an error, so a pruned import
+  degrades exactly like one made before retention was switched on.
+- A row whose `archived_at` will not parse sorts as epoch, so an age limit
+  removes it first. Skipping it would make the one row least worth keeping
+  permanently unprunable.
+
+### Verified
+- `cargo test --workspace`: 1723 passed, 0 failed, across 129 test binaries.
+- Age eviction removes the archive and leaves the memories; the size ceiling
+  evicts oldest-first and keeps the newest (the one most likely to be drilled
+  into); a dry run reports what it would remove and then does not; and with no
+  limits set a 4000-day-old archive survives.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
 ## 2026-08-10 — The refinement ladder: capture → fact → scenario → persona (#208)
 
 ### Added

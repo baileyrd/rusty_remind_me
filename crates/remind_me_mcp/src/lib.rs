@@ -720,6 +720,16 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_archive_prune",
+                                "description": "Enforce the raw-transcript archive's retention limits (REMIND_ME_ARCHIVE_MAX_AGE_DAYS, REMIND_ME_ARCHIVE_MAX_BYTES), removing oldest-first. Runs automatically after each archived import; call it directly to reclaim space now or, with dry_run, to see what would go. Removes archives only — the memories derived from them are untouched.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "dry_run": { "type": "boolean", "default": true, "description": "Report what would be removed without removing it. Defaults to true — deletion is opt-in." }
+                                    }
+                                }
+                            },
+                            {
                                 "name": "remind_me_promotion_candidates",
                                 "description": "List what is ready to move up a rung of the refinement ladder (capture -> fact -> scenario -> persona). Each entry names the source memories, a snippet, and why it qualifies. Already-promoted sources are excluded, so re-running after promoting returns a shorter list rather than the same one.",
                                 "inputSchema": {
@@ -1901,6 +1911,23 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Get capture error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_archive_prune" => {
+                        // Defaults to a dry run: this is the one tool here
+                        // that deletes data the caller cannot get back, so
+                        // the destructive reading must be the explicit one.
+                        let dry_run = args
+                            .get("dry_run")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        match remind_me_core::archive::prune(&conn, dry_run) {
+                            Ok(report) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Archive prune error: {}", e) }] })
                             }
                         }
                     }

@@ -6,7 +6,9 @@
 //! in. Asserting only that "an archive file appeared" would pass with the
 //! spans wired to the wrong lines, which is the failure worth catching.
 
-use remind_me_core::archive::{self, ARCHIVE_DIR_ENV};
+use remind_me_core::archive::{
+    self, ARCHIVE_DIR_ENV, ARCHIVE_MAX_AGE_DAYS_ENV, ARCHIVE_MAX_BYTES_ENV,
+};
 use remind_me_core::importer::import_chat;
 use remind_me_core::undo_import::undo_import;
 use remind_me_core::{
@@ -269,6 +271,193 @@ fn undoing_an_import_takes_its_archive_with_it() {
         "the blob itself should be gone too"
     );
 
+    std::env::remove_var(ARCHIVE_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Backdate an archive row so age-based retention has something to bite on.
+/// Faster and more deterministic than waiting a day.
+fn backdate(conn: &Connection, import_id: &str, days: i64) {
+    let when = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+    conn.execute(
+        "UPDATE import_archives SET archived_at = ? WHERE import_id = ?",
+        rusqlite::params![when, import_id],
+    )
+    .unwrap();
+}
+
+fn archive_rows(conn: &Connection) -> i64 {
+    conn.query_row("SELECT count(*) FROM import_archives", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn clear_limits() {
+    std::env::remove_var(ARCHIVE_MAX_AGE_DAYS_ENV);
+    std::env::remove_var(ARCHIVE_MAX_BYTES_ENV);
+}
+
+#[test]
+fn with_no_limits_configured_pruning_removes_nothing() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_limits();
+
+    let dir = scratch("nolimits");
+    std::env::set_var(ARCHIVE_DIR_ENV, dir.join("archive"));
+
+    let path = dir.join("chat.jsonl");
+    std::fs::write(&path, transcript_line("a fact", "t", "/one")).unwrap();
+    let db = open(&dir);
+    let conn = db.conn();
+    let import_id = match import(&conn, &path) {
+        ImportOutcome::Imported { import_id, .. } => import_id,
+        other => panic!("expected an import, got {:?}", other),
+    };
+    backdate(&conn, &import_id, 4000);
+
+    let report = archive::prune(&conn, false).unwrap();
+
+    // Someone already running with an archive chose to keep it. Turning on
+    // silent deletion underneath them during an upgrade is the wrong way
+    // round, so unset means unlimited — and the report says so, because zero
+    // removals otherwise reads as "nothing was old enough".
+    assert!(!report.limits_configured);
+    assert_eq!(report.removed_for_age, 0);
+    assert_eq!(archive_rows(&conn), 1);
+
+    std::env::remove_var(ARCHIVE_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_archive_past_the_age_limit_is_removed_but_its_memories_are_not() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_limits();
+
+    let dir = scratch("age");
+    std::env::set_var(ARCHIVE_DIR_ENV, dir.join("archive"));
+
+    let path = dir.join("chat.jsonl");
+    std::fs::write(&path, transcript_line("a fact", "a thought", "/one")).unwrap();
+    let db = open(&dir);
+    let conn = db.conn();
+    let import_id = match import(&conn, &path) {
+        ImportOutcome::Imported { import_id, .. } => import_id,
+        other => panic!("expected an import, got {:?}", other),
+    };
+    let ids = memory_ids(&conn);
+    let blob: String = conn
+        .query_row(
+            "SELECT archive_path FROM import_archives WHERE import_id = ?",
+            [&import_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    backdate(&conn, &import_id, 40);
+    std::env::set_var(ARCHIVE_MAX_AGE_DAYS_ENV, "30");
+
+    let report = archive::prune(&conn, false).unwrap();
+
+    assert!(report.limits_configured);
+    assert_eq!(report.removed_for_age, 1);
+    assert!(report.bytes_reclaimed > 0);
+    assert_eq!(archive_rows(&conn), 0);
+    assert!(!std::path::Path::new(&blob).exists());
+
+    // Pruning drops the archive, never the memories derived from it, and the
+    // read path degrades to "no source" exactly as it does for an import made
+    // before retention was switched on.
+    assert_eq!(memory_ids(&conn).len(), ids.len());
+    assert!(archive::source_for(&conn, &ids[0], false)
+        .unwrap()
+        .is_none());
+
+    clear_limits();
+    std::env::remove_var(ARCHIVE_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_dry_run_reports_without_removing() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_limits();
+
+    let dir = scratch("dryrun");
+    std::env::set_var(ARCHIVE_DIR_ENV, dir.join("archive"));
+
+    let path = dir.join("chat.jsonl");
+    std::fs::write(&path, transcript_line("a fact", "t", "/one")).unwrap();
+    let db = open(&dir);
+    let conn = db.conn();
+    let import_id = match import(&conn, &path) {
+        ImportOutcome::Imported { import_id, .. } => import_id,
+        other => panic!("expected an import, got {:?}", other),
+    };
+    backdate(&conn, &import_id, 40);
+    std::env::set_var(ARCHIVE_MAX_AGE_DAYS_ENV, "30");
+
+    let report = archive::prune(&conn, true).unwrap();
+
+    assert!(report.dry_run);
+    assert_eq!(report.removed_for_age, 1, "should say what it would remove");
+    assert_eq!(archive_rows(&conn), 1, "and then not remove it");
+
+    clear_limits();
+    std::env::remove_var(ARCHIVE_DIR_ENV);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_size_ceiling_evicts_oldest_first_and_keeps_the_newest() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_limits();
+
+    let dir = scratch("size");
+    std::env::set_var(ARCHIVE_DIR_ENV, dir.join("archive"));
+    let db = open(&dir);
+    let conn = db.conn();
+
+    // Three distinct imports, each a few hundred bytes.
+    let mut import_ids = Vec::new();
+    for n in 0..3 {
+        let path = dir.join(format!("chat{}.jsonl", n));
+        std::fs::write(&path, transcript_line(&format!("fact {}", n), "t", "/x")).unwrap();
+        match import(&conn, &path) {
+            ImportOutcome::Imported { import_id, .. } => import_ids.push(import_id),
+            other => panic!("expected an import, got {:?}", other),
+        }
+    }
+    for (age, id) in [(30, 0), (20, 1), (10, 2)] {
+        backdate(&conn, &import_ids[id], age);
+    }
+
+    let total: i64 = conn
+        .query_row("SELECT sum(byte_len) FROM import_archives", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let one_row: i64 = conn
+        .query_row("SELECT max(byte_len) FROM import_archives", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(total > one_row, "fixture needs distinct blobs");
+
+    // A ceiling that fits roughly one of the three.
+    std::env::set_var(ARCHIVE_MAX_BYTES_ENV, (one_row + 8).to_string());
+    let report = archive::prune(&conn, false).unwrap();
+
+    assert_eq!(report.removed_for_size, 2);
+    assert_eq!(report.removed_for_age, 0);
+    assert!(report.bytes_remaining <= (one_row + 8) as u64);
+
+    // The newest survives: it is the one most likely to be drilled into.
+    let survivor: String = conn
+        .query_row("SELECT import_id FROM import_archives", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(survivor, import_ids[2]);
+
+    clear_limits();
     std::env::remove_var(ARCHIVE_DIR_ENV);
     let _ = std::fs::remove_dir_all(&dir);
 }

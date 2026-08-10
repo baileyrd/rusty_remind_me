@@ -199,6 +199,12 @@ pub fn store(
         ],
     )?;
 
+    // Enforce retention at the point of growth, so an archive cannot outrun
+    // its ceiling between manual passes. A no-op unless a limit is set, and a
+    // failure is swallowed for the same reason the write above is: retention
+    // housekeeping must never fail the import it is decorating.
+    let _ = prune(conn, false);
+
     Ok(Some(path))
 }
 
@@ -364,6 +370,162 @@ pub fn forget_import(conn: &Connection, import_id: &str) -> SqlResult<usize> {
     }
 
     Ok(usize::from(std::fs::remove_file(&archive_path).is_ok()))
+}
+
+/// Retain nothing older than this many days. Unset means no age limit.
+pub const ARCHIVE_MAX_AGE_DAYS_ENV: &str = "REMIND_ME_ARCHIVE_MAX_AGE_DAYS";
+/// Keep total archive bytes at or under this. Unset means no size limit.
+pub const ARCHIVE_MAX_BYTES_ENV: &str = "REMIND_ME_ARCHIVE_MAX_BYTES";
+
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
+/// What a prune pass did, or would do.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PruneReport {
+    /// Archived imports considered.
+    pub examined: usize,
+    pub removed_for_age: usize,
+    pub removed_for_size: usize,
+    /// Distinct blob bytes freed. Two imports of one file share a blob, so
+    /// this is disk reclaimed, not the sum of the rows' `byte_len`.
+    pub bytes_reclaimed: u64,
+    /// Distinct blob bytes still retained afterwards.
+    pub bytes_remaining: u64,
+    /// Whether either limit is configured at all. False means this pass could
+    /// never remove anything, which is worth saying out loud — a report of
+    /// zero removals otherwise reads as "nothing was old enough".
+    pub limits_configured: bool,
+    pub dry_run: bool,
+}
+
+/// One archived import, as retention sees it.
+struct Retained {
+    import_id: String,
+    hash: String,
+    byte_len: u64,
+    archived_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Enforce the configured age and size ceilings.
+///
+/// # What "size" means here
+///
+/// Blobs are content-addressed, so two imports of the same file are two rows
+/// pointing at one file. Totals are therefore summed over **distinct hashes**,
+/// not over rows — summing rows would over-count a duplicated import and
+/// evict history to reclaim bytes that were never on disk.
+///
+/// # Eviction order
+///
+/// Oldest first, by `archived_at`. That keeps the newest transcript — the one
+/// most likely to be drilled into — and means a just-written archive survives
+/// unless it alone exceeds the ceiling.
+///
+/// # Unset means unlimited
+///
+/// Neither limit has a default. Someone already running with
+/// `REMIND_ME_ARCHIVE_DIR` set has an archive they chose to keep, and turning
+/// on silent deletion underneath them during an upgrade would be the wrong
+/// way round. `limits_configured` reports which state the caller is in.
+///
+/// Pruning drops the archive only — the memories derived from it are
+/// untouched, and [`source_for`] already reads a missing blob as "no source"
+/// rather than an error, so a pruned import degrades exactly like one imported
+/// before retention was switched on.
+pub fn prune(conn: &Connection, dry_run: bool) -> Result<PruneReport, ArchiveError> {
+    let max_age_days = env_u64(ARCHIVE_MAX_AGE_DAYS_ENV);
+    let max_bytes = env_u64(ARCHIVE_MAX_BYTES_ENV);
+
+    let mut report = PruneReport {
+        dry_run,
+        limits_configured: max_age_days.is_some() || max_bytes.is_some(),
+        ..Default::default()
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT import_id, hash, byte_len, archived_at
+           FROM import_archives
+          ORDER BY archived_at ASC",
+    )?;
+    let rows: Vec<Retained> = stmt
+        .query_map([], |r| {
+            let archived_at: String = r.get(3)?;
+            Ok(Retained {
+                import_id: r.get(0)?,
+                hash: r.get(1)?,
+                byte_len: r.get::<_, i64>(2)?.max(0) as u64,
+                // An unparseable timestamp is treated as epoch, so it sorts
+                // oldest and is the first thing an age limit removes. A row
+                // whose date cannot be read is exactly the row least worth
+                // keeping, and skipping it would make it permanently
+                // unprunable.
+                archived_at: chrono::DateTime::parse_from_rfc3339(&archived_at)
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .unwrap_or(chrono::DateTime::UNIX_EPOCH),
+            })
+        })?
+        .collect::<SqlResult<_>>()?;
+    drop(stmt);
+
+    report.examined = rows.len();
+    if !report.limits_configured {
+        report.bytes_remaining = distinct_bytes(rows.iter());
+        return Ok(report);
+    }
+
+    let now = chrono::Utc::now();
+    let mut doomed: Vec<&Retained> = Vec::new();
+    let mut keeping: Vec<&Retained> = Vec::new();
+
+    for row in &rows {
+        let too_old =
+            max_age_days.is_some_and(|days| (now - row.archived_at).num_days() > days as i64);
+        if too_old {
+            doomed.push(row);
+        } else {
+            keeping.push(row);
+        }
+    }
+    report.removed_for_age = doomed.len();
+
+    if let Some(ceiling) = max_bytes {
+        // `keeping` is oldest-first, so advancing the window start evicts in
+        // the right order. Recomputed per step rather than subtracted: a blob
+        // shared by two retained imports only stops costing bytes when the
+        // *last* of them goes, and running-total arithmetic gets that wrong.
+        let mut cut = 0;
+        while cut < keeping.len() && distinct_bytes(keeping[cut..].iter().copied()) > ceiling {
+            doomed.push(keeping[cut]);
+            report.removed_for_size += 1;
+            cut += 1;
+        }
+        keeping.drain(..cut);
+    }
+
+    report.bytes_remaining = distinct_bytes(keeping.iter().copied());
+    report.bytes_reclaimed = distinct_bytes(rows.iter()) - report.bytes_remaining;
+
+    if dry_run {
+        return Ok(report);
+    }
+
+    for row in doomed {
+        forget_import(conn, &row.import_id)?;
+    }
+    Ok(report)
+}
+
+/// Total bytes on disk for a set of retained imports, counting each distinct
+/// blob once.
+fn distinct_bytes<'a>(rows: impl Iterator<Item = &'a Retained>) -> u64 {
+    let mut seen = std::collections::HashSet::new();
+    rows.filter(|r| seen.insert(r.hash.clone()))
+        .map(|r| r.byte_len)
+        .sum()
 }
 
 #[cfg(test)]
