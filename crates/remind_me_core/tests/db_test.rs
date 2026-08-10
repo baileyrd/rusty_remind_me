@@ -43,6 +43,7 @@ fn test_database_creation_and_add_memory() {
         expand_entities: false,
         include_neighbors: false,
         expand_co_retrieval: false,
+        bootstrap: false,
     };
 
     let search_results = queries::search_memories(&conn, &search_input).expect("Search failed");

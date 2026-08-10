@@ -38,6 +38,7 @@ fn search(conn: &Connection, query: &str) -> Vec<String> {
         expand_entities: false,
         include_neighbors: false,
         expand_co_retrieval: false,
+        bootstrap: false,
     };
     queries::search_memories(conn, &input)
         .expect("search failed")

@@ -569,7 +569,7 @@ pub struct TrimOutcome {
     pub tokens_used: usize,
 }
 
-/// Estimated token cost of one result.
+/// Estimated token cost of a piece of content.
 ///
 /// `.max(1)` is this crate's existing behaviour and is deliberately kept: the
 /// reference uses a bare `len / 4`, which estimates zero for content under
@@ -577,8 +577,19 @@ pub struct TrimOutcome {
 /// budgeted response. That divergence changes *which memories come back*, not
 /// just the reported number, so it is left alone here rather than folded into
 /// a reporting fix — see the note in #200.
+///
+/// Public because the L2/L3 bootstrap ([`crate::promotion::bootstrap`], #255)
+/// spends from the same `token_budget` these results are trimmed against. Two
+/// estimators over one budget would let the reserve and the remainder disagree
+/// about how much was actually spent, and the discrepancy would show up as a
+/// response slightly over budget rather than as an obvious fault.
+pub fn estimated_content_tokens(content: &str) -> usize {
+    (content.len() / 4).max(1)
+}
+
+/// Estimated token cost of one result.
 fn estimated_tokens(result: &MemorySearchResult) -> usize {
-    (result.memory.content.len() / 4).max(1)
+    estimated_content_tokens(&result.memory.content)
 }
 
 pub fn trim_by_token_budget(results: Vec<MemorySearchResult>, token_budget: usize) -> TrimOutcome {

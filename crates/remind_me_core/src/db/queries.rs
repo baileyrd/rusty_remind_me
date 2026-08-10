@@ -1074,9 +1074,42 @@ pub fn search_with_expansions(
     input: &MemorySearchInput,
 ) -> Result<MemorySearchResponse> {
     let configured = crate::embedder::available_embedder();
+
+    // The bootstrap is assembled first because it *spends* from the same
+    // budget, and the hits are then searched against what is left. Doing it
+    // the other way round — search on the full budget, then prepend — would
+    // put the response over budget by exactly the size of the bootstrap,
+    // which is the failure #200 spent an issue making visible.
+    let bootstrap = if input.bootstrap {
+        Some(crate::promotion::bootstrap(conn, input.token_budget)?)
+    } else {
+        None
+    };
+
+    // Deliberately *not* shadowing `input`: the response reports the budget
+    // the caller set, and reading it off a locally-reduced copy would quietly
+    // report 600 to someone who asked for 800 and got a 200-token bootstrap.
+    //
+    // `saturating_sub` rather than a bare `-`: the reserve is capped at half
+    // the budget so this cannot currently go negative, but a future change to
+    // the cap should degrade to "no budget left for hits" rather than wrap to
+    // an enormous one. A budget of 0 (unlimited) stays 0 here, which is right
+    // — an unlimited search does not become limited by having a bootstrap.
+    let spent = bootstrap.as_ref().map_or(0, |b| b.tokens_used);
+    let hit_input;
+    let hit_input = if spent == 0 {
+        input
+    } else {
+        hit_input = MemorySearchInput {
+            token_budget: input.token_budget.saturating_sub(spent),
+            ..input.clone()
+        };
+        &hit_input
+    };
+
     let outcome = search_memories_budgeted(
         conn,
-        input,
+        hit_input,
         configured
             .as_ref()
             .map(|e| &**e as &dyn crate::embedder::Embedder),
@@ -1109,11 +1142,17 @@ pub fn search_with_expansions(
         } else {
             None
         },
+        bootstrap,
         memories,
         total_candidates: outcome.total_candidates,
         returned: outcome.returned,
         trimmed: outcome.trimmed,
+        // Hits only, matching this field's documented meaning. The bootstrap
+        // carries its own `tokens_used`, so the response total is the sum of
+        // the two rather than either one restated — see the renderer, which
+        // prints both.
         tokens_used: outcome.tokens_used,
+        // The budget the *caller* set, not what was left after the reserve.
         budget: input.token_budget,
     };
 

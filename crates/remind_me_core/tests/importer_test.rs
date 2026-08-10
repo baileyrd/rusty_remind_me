@@ -397,6 +397,7 @@ fn neighbour_expansion_finally_finds_something() {
             expand_entities: false,
             include_neighbors: true,
             expand_co_retrieval: false,
+            bootstrap: false,
         },
     )
     .unwrap();

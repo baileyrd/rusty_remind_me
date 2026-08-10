@@ -100,6 +100,15 @@ pub struct MemorySearchResponse {
     pub tokens_used: usize,
     /// The budget that was in force. `0` means unlimited.
     pub budget: usize,
+    /// The L2/L3 persona bootstrap, when one was asked for (#255).
+    ///
+    /// `None` and `Some(empty)` are deliberately different answers: the first
+    /// means the caller did not ask, the second that they asked and the
+    /// persona had nothing to give. Collapsing them would make "the ladder is
+    /// not producing anything" look identical to "the bootstrap is switched
+    /// off", which is the confusion this field exists to end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<crate::promotion::Bootstrap>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub related_via_entities: Option<Vec<RelatedMemory>>,
     #[serde(skip_serializing_if = "Option::is_none")]
