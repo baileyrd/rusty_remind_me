@@ -115,11 +115,15 @@ fn objects(conn: &Connection, kind: &str) -> BTreeMap<String, String> {
 /// have been reverted by the next `regenerate_schema.py` run. Target-only
 /// tables created by `archive::ensure_schema` instead, on the
 /// `vec_embeddings` pattern.
+/// `promotions` / `idx_promotions_source`: the refinement ladder's provenance
+/// (#208), linking a promoted artifact to the memories it was distilled from.
 const OWN_ADDITIONS: &[&str] = &[
     "vec_embeddings",
     "import_archives",
     "import_archive_spans",
     "idx_archive_spans_import",
+    "promotions",
+    "idx_promotions_source",
 ];
 
 /// Compare live objects of `kind` against the shipped schema, reporting only

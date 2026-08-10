@@ -720,6 +720,52 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_promotion_candidates",
+                                "description": "List what is ready to move up a rung of the refinement ladder (capture -> fact -> scenario -> persona). Each entry names the source memories, a snippet, and why it qualifies. Already-promoted sources are excluded, so re-running after promoting returns a shorter list rather than the same one.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "rung": { "type": "string", "enum": ["capture_to_fact", "fact_to_scenario", "scenario_to_persona"], "description": "capture_to_fact is reported here but promoted with remind_me_decompose." },
+                                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+                                    },
+                                    "required": ["rung"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_promote",
+                                "description": "Store a distillation of some memories as the rung above them, recording what it was built from. Provenance is mandatory: a promoted artifact with no sources could never be checked or demoted. Refuses capture_to_fact — that is remind_me_decompose — and refuses a sensitive source for a persona.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "rung": { "type": "string", "enum": ["fact_to_scenario", "scenario_to_persona"] },
+                                        "source_ids": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The memories this was distilled from" },
+                                        "content": { "type": "string", "minLength": 1, "maxLength": 50000, "description": "The distillation" }
+                                    },
+                                    "required": ["rung", "source_ids", "content"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_persona",
+                                "description": "The current persona: durable statements about the user whose grounds still hold. A statement whose sources have all been superseded or deleted is withheld automatically, so a contradicted fact demotes what was built on it. Set include_demoted to also see what is currently withheld and why.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "include_demoted": { "type": "boolean", "default": false, "description": "Also list statements currently withheld for lost provenance." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_provenance",
+                                "description": "What a memory was distilled from, and what was distilled from it. Walks the refinement ladder in both directions from one memory id.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" }
+                                    },
+                                    "required": ["memory_id"]
+                                }
+                            },
+                            {
                                 "name": "remind_me_skeleton_write",
                                 "description": "Attach a Mermaid diagram of a capture's structure, so the conversation's shape can be read without reading the transcript. Each node maps to an inclusive, 1-based line range in the capture's dialog; remind_me_skeleton_read then drills into one node at a time. Ranges are validated against the dialog and the write is refused if any is out of bounds.",
                                 "inputSchema": {
@@ -1855,6 +1901,90 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Get capture error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_promotion_candidates" => {
+                        let rung: std::result::Result<remind_me_core::Rung, _> =
+                            serde_json::from_value(
+                                args.get("rung").cloned().unwrap_or(serde_json::Value::Null),
+                            );
+                        let limit =
+                            args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                        match rung {
+                            Ok(rung) => {
+                                match remind_me_core::promotion::promotion_candidates(
+                                    &conn, rung, limit,
+                                ) {
+                                    Ok(found) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
+                                            "rung": rung,
+                                            "count": found.len(),
+                                            "candidates": found,
+                                        })).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Promotion candidates error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid rung: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_promote" => {
+                        let parsed: std::result::Result<remind_me_core::PromoteInput, _> =
+                            serde_json::from_value(args.clone());
+                        match parsed {
+                            Ok(input) => match remind_me_core::promotion::promote(&conn, &input) {
+                                Ok(result) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Promotion error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid promotion input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_persona" => {
+                        let include_demoted = args
+                            .get("include_demoted")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        match remind_me_core::promotion::persona(&conn) {
+                            Ok(statements) => {
+                                let demoted = if include_demoted {
+                                    remind_me_core::promotion::demoted(&conn).unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                let mut payload = json!({
+                                    "count": statements.len(),
+                                    "persona": statements,
+                                });
+                                if include_demoted {
+                                    payload["demoted"] = json!(demoted);
+                                }
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Persona error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_provenance" => {
+                        let memory_id =
+                            args.get("memory_id").and_then(|v| v.as_str()).unwrap_or("");
+                        match remind_me_core::promotion::provenance(&conn, memory_id) {
+                            Ok(found) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&found).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Provenance error: {}", e) }] })
                             }
                         }
                     }

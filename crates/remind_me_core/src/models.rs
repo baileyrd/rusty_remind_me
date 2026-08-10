@@ -832,6 +832,93 @@ pub const DECOMPOSE_FACTS_MAX: usize = 50;
 
 /// `category` every decomposed fact is stored under.
 pub const FACT_CATEGORY: &str = "fact";
+/// Category a scenario — knowledge organised around one entity or topic,
+/// synthesised from several facts — is stored under (#208).
+pub const SCENARIO_CATEGORY: &str = "scenario";
+/// Category a persona statement — something durably true about the user — is
+/// stored under (#208).
+pub const PERSONA_CATEGORY: &str = "persona";
+
+/// A step of the refinement ladder.
+///
+/// `CaptureToFact` is listed because the *backlog* for it is worth reporting
+/// alongside the others, not because this module promotes it —
+/// `remind_me_decompose` does, and `promote` refuses the rung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rung {
+    CaptureToFact,
+    FactToScenario,
+    ScenarioToPersona,
+}
+
+impl Rung {
+    /// Stable string form, used as the stored `rung` value. Written by hand
+    /// rather than derived from `Debug` so a rename of the variant cannot
+    /// silently orphan every row already stored under the old spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CaptureToFact => "capture_to_fact",
+            Self::FactToScenario => "fact_to_scenario",
+            Self::ScenarioToPersona => "scenario_to_persona",
+        }
+    }
+}
+
+/// Something ready to move up a rung.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionCandidate {
+    pub rung: Rung,
+    /// The memories a promotion would be built from.
+    pub source_ids: Vec<String>,
+    pub snippet: String,
+    /// Why this is a candidate, in words — a listing that only returns ids
+    /// makes the caller guess what it is looking at.
+    pub reason: String,
+    /// The entity or topic the group formed around, where one applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grouped_by: Option<String>,
+}
+
+/// Accept a distillation of some sources into the rung above them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteInput {
+    pub rung: Rung,
+    pub source_ids: Vec<String>,
+    /// The distilled text.
+    pub content: String,
+}
+
+/// What a promotion produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionResult {
+    pub promoted_id: String,
+    pub rung: Rung,
+    pub category: String,
+    pub source_ids: Vec<String>,
+}
+
+/// What a memory came from, and what was built on it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Provenance {
+    pub memory_id: String,
+    /// The rung below: memories this was promoted from.
+    pub sources: Vec<String>,
+    /// The rung above: memories promoted from this.
+    pub derived: Vec<String>,
+}
+
+/// One durable statement about the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaStatement {
+    pub id: String,
+    pub content: String,
+    pub vitality: f64,
+    pub created_at: String,
+    /// How many of its sources still stand. Zero means withheld — see
+    /// [`crate::promotion::persona`].
+    pub surviving_sources: usize,
+}
 /// `source` every decomposed fact is stored under.
 pub const DECOMPOSITION_SOURCE: &str = "decomposition";
 

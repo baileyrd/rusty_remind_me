@@ -44,6 +44,11 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     // `chat_imports`.
     crate::archive::ensure_schema(conn)?;
 
+    // Nor is the refinement ladder's provenance table (#208). Same reasoning:
+    // `schema_tables.sql` is generated verbatim, so a promoted artifact's
+    // links live in a table this crate owns outright.
+    crate::promotion::ensure_schema(conn)?;
+
     // Embedding-model versioning (#96): detect a changed
     // REMIND_ME_EMBEDDING_BACKEND/OLLAMA_EMBED_MODEL/EMBEDDING_DIM at every
     // open and clear now-invalid vectors -- the same "check at startup"

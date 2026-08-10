@@ -2,6 +2,82 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — The refinement ladder: capture → fact → scenario → persona (#208)
+
+### Added
+- **`remind_me_promotion_candidates`, `remind_me_promote`,
+  `remind_me_persona`, `remind_me_provenance`.** The rungs already existed —
+  `capture.rs` holds dialog, `remind_me_decompose` makes facts, `wiki.rs`
+  compiles topics, `consolidation.rs` merges duplicates — but every promotion
+  was agent-initiated and one-shot. Nothing walked the store asking which
+  captures were never decomposed, which facts had accumulated enough for a
+  scenario, or which scenarios were stable enough to say something durable.
+  `UndecomposedCapture` already existed: the backlog was visible and never
+  worked. This is the missing walk.
+- **Two new categories**, `scenario` and `persona`, and a target-only
+  `promotions` table recording what each promoted artifact was distilled from.
+- Nothing here calls an LLM. Candidates are reported, the distillation comes
+  back from the calling agent's model — the shape `remind_me_decompose`
+  already uses.
+
+### Behaviour
+- **Provenance is mandatory.** A promotion with no sources is refused: without
+  it a persona statement is unfalsifiable, since you cannot ask what it rests
+  on and therefore cannot tell whether it still holds. The table is indexed
+  both ways, so `remind_me_provenance` answers "what did this come from" and
+  "what was built on this" at the same cost.
+- **Demotion is automatic and needs no scheduler.** `remind_me_persona`
+  omits any statement whose sources have *all* been superseded or deleted, so
+  a fact contradicted through `supersede_contradicting_facts` withdraws what
+  was built on it at read time. One surviving source is enough to keep a
+  statement. Withheld statements are omitted, **not deleted** — a restored
+  fact brings its statement back, and the row remains the record of what was
+  once believed and why. `include_demoted` lists what is currently withheld,
+  so a statement that quietly stopped appearing is distinguishable from one
+  never written.
+- **Idempotency lives in the candidate query**, not in the caller's memory:
+  each rung excludes sources already promoted at that rung, so a second pass
+  over unchanged data finds nothing and a scheduled loop could not
+  re-promote forever.
+- **Rung 1 reports a backlog but refuses to promote**, naming
+  `remind_me_decompose` instead. That tool already links `source_capture_id`,
+  applies entity mentions and supersedes contradicted facts; a second write
+  path to one rung would be two implementations that drift.
+- **Sensitive memories are excluded at *candidate* time, not just at promote
+  time.** Refusing only at the end would invite a caller to spend a model call
+  on something certain to be rejected. `remind_me_persona` excludes sensitive
+  statements with no override, matching `digest.rs`: a persona is assembled to
+  be injected rather than asked for.
+- Scenarios cluster facts **by shared entity**, not by embedding similarity.
+  `consolidation.rs` already clusters on cosine distance to find things that
+  are *the same*; this rung wants things that are *related but distinct*, and
+  the entity graph is the existing structure that expresses that. Three facts
+  is the floor — two is a coincidence, and a lower bar makes the candidate
+  list one entry per entity in the store.
+
+### Considered and rejected
+- **Excluding `scenario`/`persona` from `extract_batch`**, on the theory that
+  derived content re-entering as source content would loop. It would not:
+  `extract_batch` writes triples and mentions *on* a memory, it does not mint
+  new fact memories, and the scenario candidate query filters on
+  `category = 'fact'`. Leaving both annotatable makes scenarios findable by
+  entity, which is strictly better.
+
+### Schema
+- `promotions` + `idx_promotions_source`, target-only, created by
+  `promotion::ensure_schema` on the `vec_embeddings` pattern and registered in
+  `schema_test`'s `OWN_ADDITIONS`. `SCHEMA_VERSION` stays at 29. No foreign
+  keys: a cascade would erase the provenance explaining why a persona
+  statement vanished, which is the record most worth keeping at that moment.
+
+### Verified
+- `cargo test --workspace`: 1719 passed, 0 failed, across 129 test binaries.
+- `crates/remind_me_core/tests/promotion_test.rs` pins the three properties
+  that make the ladder trustworthy rather than merely present: promoting
+  shortens the candidate list, provenance walks persona → scenario → fact and
+  back up again, and superseding the last source empties the persona.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
 ## 2026-08-10 — Symbolic compression: a capture skeleton with drill-down (#207)
 
 ### Added
