@@ -720,6 +720,99 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_archive_prune",
+                                "description": "Enforce the raw-transcript archive's retention limits (REMIND_ME_ARCHIVE_MAX_AGE_DAYS, REMIND_ME_ARCHIVE_MAX_BYTES), removing oldest-first. Runs automatically after each archived import; call it directly to reclaim space now or, with dry_run, to see what would go. Removes archives only — the memories derived from them are untouched.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "dry_run": { "type": "boolean", "default": true, "description": "Report what would be removed without removing it. Defaults to true — deletion is opt-in." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_promotion_candidates",
+                                "description": "List what is ready to move up a rung of the refinement ladder (capture -> fact -> scenario -> persona). Each entry names the source memories, a snippet, and why it qualifies. Already-promoted sources are excluded, so re-running after promoting returns a shorter list rather than the same one.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "rung": { "type": "string", "enum": ["capture_to_fact", "fact_to_scenario", "scenario_to_persona"], "description": "capture_to_fact is reported here but promoted with remind_me_decompose." },
+                                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+                                    },
+                                    "required": ["rung"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_promote",
+                                "description": "Store a distillation of some memories as the rung above them, recording what it was built from. Provenance is mandatory: a promoted artifact with no sources could never be checked or demoted. Refuses capture_to_fact — that is remind_me_decompose — and refuses a sensitive source for a persona.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "rung": { "type": "string", "enum": ["fact_to_scenario", "scenario_to_persona"] },
+                                        "source_ids": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The memories this was distilled from" },
+                                        "content": { "type": "string", "minLength": 1, "maxLength": 50000, "description": "The distillation" }
+                                    },
+                                    "required": ["rung", "source_ids", "content"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_persona",
+                                "description": "The current persona: durable statements about the user whose grounds still hold. A statement whose sources have all been superseded or deleted is withheld automatically, so a contradicted fact demotes what was built on it. Set include_demoted to also see what is currently withheld and why.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "include_demoted": { "type": "boolean", "default": false, "description": "Also list statements currently withheld for lost provenance." }
+                                    }
+                                }
+                            },
+                            {
+                                "name": "remind_me_provenance",
+                                "description": "What a memory was distilled from, and what was distilled from it. Walks the refinement ladder in both directions from one memory id.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" }
+                                    },
+                                    "required": ["memory_id"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_skeleton_write",
+                                "description": "Attach a Mermaid diagram of a capture's structure, so the conversation's shape can be read without reading the transcript. Each node maps to an inclusive, 1-based line range in the capture's dialog; remind_me_skeleton_read then drills into one node at a time. Ranges are validated against the dialog and the write is refused if any is out of bounds.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "capture_id": { "type": "string", "description": "The capture to describe" },
+                                        "mermaid": { "type": "string", "minLength": 1, "maxLength": 100000, "description": "Mermaid source, e.g. 'graph TD\\n  n1[Ask] --> n2[Investigate]'" },
+                                        "nodes": { "type": "object", "description": "Node id to [start_line, end_line], inclusive and 1-based, into the dialog. e.g. {\"n1\": [1, 12]}" }
+                                    },
+                                    "required": ["capture_id", "mermaid", "nodes"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_skeleton_read",
+                                "description": "Read a capture's skeleton. Without 'node' this returns the Mermaid diagram and its node map — the cheap view of a long conversation. With 'node' it returns only that node's lines of the dialog, which is how to drill in without pulling the whole transcript.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "capture_id": { "type": "string" },
+                                        "node": { "type": "string", "description": "A node id from the diagram. Omit for the diagram itself." }
+                                    },
+                                    "required": ["capture_id"]
+                                }
+                            },
+                            {
+                                "name": "remind_me_source",
+                                "description": "Retrieve the raw imported bytes a memory was derived from — the original transcript envelope, including the tool calls, reasoning blocks and session metadata that importing deliberately strips out. Only available for memories imported while REMIND_ME_ARCHIVE_DIR was set; returns nothing otherwise.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string", "description": "The memory whose source to fetch" },
+                                        "include_sensitive": { "type": "boolean", "default": false, "description": "Return the source even when the memory is marked sensitive. The raw source discloses more than the memory does, so this is off by default." }
+                                    },
+                                    "required": ["memory_id"]
+                                }
+                            },
+                            {
                                 "name": "remind_me_normalize_batch",
                                 "description": "Fetch raw imported memories (document/chat imports) that have not been normalized yet, so they can be distilled into a {question, summary, resolution?} shape. The raw memory is kept, not replaced.",
                                 "inputSchema": {
@@ -1818,6 +1911,210 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Get capture error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_archive_prune" => {
+                        // Defaults to a dry run: this is the one tool here
+                        // that deletes data the caller cannot get back, so
+                        // the destructive reading must be the explicit one.
+                        let dry_run = args
+                            .get("dry_run")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        match remind_me_core::archive::prune(&conn, dry_run) {
+                            Ok(report) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Archive prune error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_promotion_candidates" => {
+                        let rung: std::result::Result<remind_me_core::Rung, _> =
+                            serde_json::from_value(
+                                args.get("rung").cloned().unwrap_or(serde_json::Value::Null),
+                            );
+                        let limit =
+                            args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                        match rung {
+                            Ok(rung) => {
+                                match remind_me_core::promotion::promotion_candidates(
+                                    &conn, rung, limit,
+                                ) {
+                                    Ok(found) => {
+                                        // The whole backlog rides along, not
+                                        // just this rung's: a caller working
+                                        // one rung has no other way to notice
+                                        // the one below it filling up.
+                                        let backlog = remind_me_core::promotion::backlog(&conn)
+                                            .unwrap_or_default();
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
+                                            "rung": rung,
+                                            "count": found.len(),
+                                            "candidates": found,
+                                            "backlog": backlog,
+                                            "backlog_summary": backlog.summary(),
+                                            "nudge_enabled": remind_me_core::promotion::nudge_interval().is_some(),
+                                        })).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Promotion candidates error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid rung: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_promote" => {
+                        let parsed: std::result::Result<remind_me_core::PromoteInput, _> =
+                            serde_json::from_value(args.clone());
+                        match parsed {
+                            Ok(input) => match remind_me_core::promotion::promote(&conn, &input) {
+                                Ok(result) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Promotion error: {}", e) }] })
+                                }
+                            },
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid promotion input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_persona" => {
+                        let include_demoted = args
+                            .get("include_demoted")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        match remind_me_core::promotion::persona(&conn) {
+                            Ok(statements) => {
+                                let demoted = if include_demoted {
+                                    remind_me_core::promotion::demoted(&conn).unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                let mut payload = json!({
+                                    "count": statements.len(),
+                                    "persona": statements,
+                                });
+                                if include_demoted {
+                                    payload["demoted"] = json!(demoted);
+                                }
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Persona error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_provenance" => {
+                        let memory_id =
+                            args.get("memory_id").and_then(|v| v.as_str()).unwrap_or("");
+                        match remind_me_core::promotion::provenance(&conn, memory_id) {
+                            Ok(found) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&found).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Provenance error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_skeleton_write" => {
+                        let parsed: std::result::Result<remind_me_core::SkeletonWriteInput, _> =
+                            serde_json::from_value(args.clone());
+                        match parsed {
+                            Ok(input) => {
+                                match remind_me_core::skeleton::write_skeleton(&conn, &input) {
+                                    Ok(written) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&written).unwrap() }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Skeleton write error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid skeleton input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_skeleton_read" => {
+                        let capture_id = args
+                            .get("capture_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        // An empty `node` is treated as absent rather than as a
+                        // node named "": a client that sends the field
+                        // unconditionally should get the diagram, not a
+                        // not-found for a node nobody could have written.
+                        let node = args
+                            .get("node")
+                            .and_then(|v| v.as_str())
+                            .filter(|n| !n.trim().is_empty());
+                        match node {
+                            Some(node) => {
+                                match remind_me_core::skeleton::node_slice(&conn, capture_id, node)
+                                {
+                                    Ok(Some(slice)) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&slice).unwrap() }] })
+                                    }
+                                    Ok(None) => {
+                                        json!({ "content": [{ "type": "text", "text": format!("No node {:?} in the skeleton for capture {:?}.", node, capture_id) }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Skeleton read error: {}", e) }] })
+                                    }
+                                }
+                            }
+                            None => {
+                                match remind_me_core::skeleton::read_skeleton(&conn, capture_id) {
+                                    Ok(Some(skeleton)) => {
+                                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&skeleton).unwrap() }] })
+                                    }
+                                    Ok(None) => {
+                                        json!({ "content": [{ "type": "text", "text": format!("No skeleton for capture {:?}. Write one with remind_me_skeleton_write.", capture_id) }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Skeleton read error: {}", e) }] })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "remind_me_source" => {
+                        let memory_id =
+                            args.get("memory_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let include_sensitive = args
+                            .get("include_sensitive")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        match remind_me_core::archive::source_for(
+                            &conn,
+                            memory_id,
+                            include_sensitive,
+                        ) {
+                            Ok(Some(found)) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&found).unwrap() }] })
+                            }
+                            // One message for every "nothing to show" case, on
+                            // purpose. Distinguishing "retention was off" from
+                            // "this memory is sensitive" would let a caller
+                            // probe the sensitive flag of memories it is being
+                            // refused, which is the one thing the refusal is
+                            // for.
+                            Ok(None) => {
+                                json!({ "content": [{ "type": "text", "text": format!(
+                                    "No archived source for memory {:?}. Raw retention is only recorded for file imports made while REMIND_ME_ARCHIVE_DIR was set.",
+                                    memory_id
+                                ) }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Source lookup error: {}", e) }] })
                             }
                         }
                     }

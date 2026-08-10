@@ -569,16 +569,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `scan_once` ran only when a test invoked it — the status surface
         // reported a configured watcher that was never going to scan anything.
         let watcher = remind_me_core::watcher::start_watcher_for(&db.conn());
+        // Conditional like the watcher: `None` unless
+        // REMIND_ME_PROMOTION_INTERVAL is set. The refinement ladder's
+        // candidate queries are pull-only without this, so a backlog can grow
+        // indefinitely with nothing ever mentioning it (#208).
+        let nudge = remind_me_core::promotion::start_nudge_for(&db.conn());
         let server = McpServer::new(db);
         let result = server.run_stdio_loop();
-        // Both joined before the database goes out of scope, so an in-flight
-        // poll or scan cannot still be writing while the handle is torn down
-        // underneath it.
+        // All joined before the database goes out of scope, so an in-flight
+        // poll, scan or backlog count cannot still be running while the handle
+        // is torn down underneath it.
         if let Some(scheduler) = scheduler {
             scheduler.stop();
         }
         if let Some(watcher) = watcher {
             watcher.stop();
+        }
+        if let Some(nudge) = nudge {
+            nudge.stop();
         }
         result?;
     } else {

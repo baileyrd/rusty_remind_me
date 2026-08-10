@@ -2,6 +2,276 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-10 — A scheduled nudge for the refinement backlog (#208 follow-up)
+
+### Added
+- **`REMIND_ME_PROMOTION_INTERVAL`** starts a background loop that counts the
+  refinement backlog and notifies through the configured channels when there
+  is work waiting. The ladder shipped pull-only: candidates existed but
+  nothing surfaced them, so a backlog could grow indefinitely with nothing
+  ever mentioning it.
+- **`promotion::backlog`** counts all three rungs at once, and rides along in
+  every `remind_me_promotion_candidates` response — a caller working one rung
+  otherwise has no way to notice the one below it filling up.
+
+### Behaviour
+- **Off unless configured**, matching the folder watcher (#55) and webhook
+  (#56) rather than the reminder scheduler, which always runs. A zero or
+  unparseable interval reads as off rather than as a busy loop.
+- **An unchanged backlog is announced once and then goes quiet.** Re-sending
+  the same sentence every interval makes the channel useless within a day —
+  the reader learns to filter it and takes the real change with it. A backlog
+  that grows nudges again; one worked down to zero says nothing rather than
+  sending an empty notification.
+- The "already announced" mark is **process-local, not a table**, and
+  deliberately so: a notification is a prompt to do work, not a record that
+  work happened — the record is the `promotions` table. Persisting it would
+  mean a backlog nobody ever works eventually stops being mentioned, which is
+  the exact failure a nudge exists to prevent. The cost is one repeat
+  announcement per restart.
+- Started alongside the scheduler and watcher in `server` mode, and joined on
+  shutdown so an in-flight count cannot outlive the database handle.
+- Shares `scheduler::Stop`, already the "sleep for an interval but wake
+  immediately on shutdown" primitive the watcher uses.
+
+### Verified
+- `cargo test --workspace`: 1729 passed, 0 failed, across 129 test binaries.
+- The anti-repeat rule is pinned directly: two passes over an unchanged
+  backlog notify once, and adding a third fact makes the next pass speak
+  again.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
+## 2026-08-10 — Archive retention: age and size ceilings (#212 follow-up)
+
+### Added
+- **`REMIND_ME_ARCHIVE_MAX_AGE_DAYS` and `REMIND_ME_ARCHIVE_MAX_BYTES`.**
+  Raw-transcript retention shipped earlier today with no bound at all — the
+  archive grew forever. Both ceilings are now enforced, oldest-first.
+- **`remind_me_archive_prune`**, defaulting to `dry_run: true`. This is the
+  one tool in the set that destroys data the caller cannot get back, so the
+  destructive reading is the explicit one.
+
+### Behaviour
+- **Unset means unlimited, for both.** Anyone already running with
+  `REMIND_ME_ARCHIVE_DIR` set has an archive they chose to keep, and switching
+  on silent deletion underneath them during an upgrade is the wrong way round.
+  The report carries `limits_configured` so zero removals cannot be misread as
+  "nothing was old enough".
+- **Totals are summed over distinct blob hashes, not rows.** Storage is
+  content-addressed, so two imports of the same file are two rows pointing at
+  one file; summing rows would over-count the duplicate and evict history to
+  reclaim bytes that were never on disk. A shared blob is unlinked only when
+  the last row referencing it goes — the same rule `undo_import` already
+  follows.
+- **Pruning runs after each archived import**, so the archive cannot outrun
+  its ceiling between manual passes. A no-op when no limit is set, and a
+  failure is swallowed: retention housekeeping must never fail the import it
+  is decorating.
+- **Only the archive is dropped, never the memories.** `source_for` already
+  reads a missing blob as "no source" rather than an error, so a pruned import
+  degrades exactly like one made before retention was switched on.
+- A row whose `archived_at` will not parse sorts as epoch, so an age limit
+  removes it first. Skipping it would make the one row least worth keeping
+  permanently unprunable.
+
+### Verified
+- `cargo test --workspace`: 1723 passed, 0 failed, across 129 test binaries.
+- Age eviction removes the archive and leaves the memories; the size ceiling
+  evicts oldest-first and keeps the newest (the one most likely to be drilled
+  into); a dry run reports what it would remove and then does not; and with no
+  limits set a 4000-day-old archive survives.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
+## 2026-08-10 — The refinement ladder: capture → fact → scenario → persona (#208)
+
+### Added
+- **`remind_me_promotion_candidates`, `remind_me_promote`,
+  `remind_me_persona`, `remind_me_provenance`.** The rungs already existed —
+  `capture.rs` holds dialog, `remind_me_decompose` makes facts, `wiki.rs`
+  compiles topics, `consolidation.rs` merges duplicates — but every promotion
+  was agent-initiated and one-shot. Nothing walked the store asking which
+  captures were never decomposed, which facts had accumulated enough for a
+  scenario, or which scenarios were stable enough to say something durable.
+  `UndecomposedCapture` already existed: the backlog was visible and never
+  worked. This is the missing walk.
+- **Two new categories**, `scenario` and `persona`, and a target-only
+  `promotions` table recording what each promoted artifact was distilled from.
+- Nothing here calls an LLM. Candidates are reported, the distillation comes
+  back from the calling agent's model — the shape `remind_me_decompose`
+  already uses.
+
+### Behaviour
+- **Provenance is mandatory.** A promotion with no sources is refused: without
+  it a persona statement is unfalsifiable, since you cannot ask what it rests
+  on and therefore cannot tell whether it still holds. The table is indexed
+  both ways, so `remind_me_provenance` answers "what did this come from" and
+  "what was built on this" at the same cost.
+- **Demotion is automatic and needs no scheduler.** `remind_me_persona`
+  omits any statement whose sources have *all* been superseded or deleted, so
+  a fact contradicted through `supersede_contradicting_facts` withdraws what
+  was built on it at read time. One surviving source is enough to keep a
+  statement. Withheld statements are omitted, **not deleted** — a restored
+  fact brings its statement back, and the row remains the record of what was
+  once believed and why. `include_demoted` lists what is currently withheld,
+  so a statement that quietly stopped appearing is distinguishable from one
+  never written.
+- **Idempotency lives in the candidate query**, not in the caller's memory:
+  each rung excludes sources already promoted at that rung, so a second pass
+  over unchanged data finds nothing and a scheduled loop could not
+  re-promote forever.
+- **Rung 1 reports a backlog but refuses to promote**, naming
+  `remind_me_decompose` instead. That tool already links `source_capture_id`,
+  applies entity mentions and supersedes contradicted facts; a second write
+  path to one rung would be two implementations that drift.
+- **Sensitive memories are excluded at *candidate* time, not just at promote
+  time.** Refusing only at the end would invite a caller to spend a model call
+  on something certain to be rejected. `remind_me_persona` excludes sensitive
+  statements with no override, matching `digest.rs`: a persona is assembled to
+  be injected rather than asked for.
+- Scenarios cluster facts **by shared entity**, not by embedding similarity.
+  `consolidation.rs` already clusters on cosine distance to find things that
+  are *the same*; this rung wants things that are *related but distinct*, and
+  the entity graph is the existing structure that expresses that. Three facts
+  is the floor — two is a coincidence, and a lower bar makes the candidate
+  list one entry per entity in the store.
+
+### Considered and rejected
+- **Excluding `scenario`/`persona` from `extract_batch`**, on the theory that
+  derived content re-entering as source content would loop. It would not:
+  `extract_batch` writes triples and mentions *on* a memory, it does not mint
+  new fact memories, and the scenario candidate query filters on
+  `category = 'fact'`. Leaving both annotatable makes scenarios findable by
+  entity, which is strictly better.
+
+### Schema
+- `promotions` + `idx_promotions_source`, target-only, created by
+  `promotion::ensure_schema` on the `vec_embeddings` pattern and registered in
+  `schema_test`'s `OWN_ADDITIONS`. `SCHEMA_VERSION` stays at 29. No foreign
+  keys: a cascade would erase the provenance explaining why a persona
+  statement vanished, which is the record most worth keeping at that moment.
+
+### Verified
+- `cargo test --workspace`: 1719 passed, 0 failed, across 129 test binaries.
+- `crates/remind_me_core/tests/promotion_test.rs` pins the three properties
+  that make the ladder trustworthy rather than merely present: promoting
+  shortens the candidate list, provenance walks persona → scenario → fact and
+  back up again, and superseding the last source empties the persona.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
+## 2026-08-10 — Symbolic compression: a capture skeleton with drill-down (#207)
+
+### Added
+- **`remind_me_skeleton_write` / `remind_me_skeleton_read`.** A capture has
+  had two altitudes since it existed — the verbatim dialog and a summary —
+  and nothing in between. A caller wanting more than the summary had to read
+  the whole transcript. A **skeleton** is a third artifact at that missing
+  altitude: a Mermaid diagram of the conversation's structure whose nodes
+  each name a line range in the dialog. Reading the diagram costs a diagram;
+  following one node costs one turn; neither costs the transcript.
+- **Drill-down.** `remind_me_skeleton_read { capture_id, node }` returns
+  exactly that node's lines. Without `node` it returns the diagram and its
+  node map.
+
+### Behaviour
+- **Nodes address the dialog by inclusive, 1-based line range, not character
+  offset.** The diagram is drawn by the calling agent's model, the way
+  `remind_me_decompose`'s facts already are. A model can count lines; a
+  character offset wrong by forty is indistinguishable from a correct one
+  until someone reads the slice it returns.
+- **Ranges are validated against the dialog at write time and the write is
+  refused if any is out of bounds** — including a 0 start, so a model that
+  emitted 0-based offsets fails on its first node instead of returning one
+  line too many forever. A rejected write stores nothing.
+- Writing again **replaces**: a capture has one shape, not a history of them.
+- A skeleton is stored as a third memory sharing the `capture_id`,
+  distinguished by its metadata `type` exactly as the dialog and summary are.
+  So `remind_me_get_capture` already carries it (under `other`, an existing
+  field documented for precisely this), sync already replicates it, and
+  deleting a capture already takes it along. `Capture`'s serialized shape is
+  unchanged, so the reference-parity tool's response is untouched.
+- `skeleton` joins `dialog` in the `extract_batch` exclusion: Mermaid source
+  has no triple in it, and offering one would spend a model call to find that
+  out. This is a target-only category, so a shared database sees no
+  difference unless skeletons are actually written.
+
+### Verified
+- `cargo test --workspace`: 1707 passed, 0 failed, across 128 test binaries.
+- `crates/remind_me_core/tests/skeleton_test.rs` asserts the two properties
+  that pull against each other: drill-down returns *exactly* its node's lines
+  and nothing from the neighbouring turns, and reading the skeleton of a
+  120-turn transcript costs **more than 20x less** than the dialog — asserted
+  as a ratio so a later change that inlines the transcript fails here rather
+  than quietly costing every caller the saving.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
+### Fixed
+- **`schema_test`'s `OWN_ADDITIONS` now lists #212's archive tables.** They
+  were added in the previous entry without being registered here, so the four
+  schema tests failed from that commit until this one. The list is the
+  mechanism that distinguishes a deliberate target-only table from schema
+  drift, and a new one has to be declared to it.
+
+## 2026-08-10 — Raw transcript retention: an addressable L0 archive (#212)
+
+### Added
+- **`REMIND_ME_ARCHIVE_DIR` retains the bytes an import was derived from.**
+  `extract_messages` pulls `{role, content}` out of a chat export and
+  `text_of` then drops `tool_use`, `tool_result`, `thinking` and image
+  blocks; the envelope's own `uuid`, `parentUuid`, `sessionId`, per-message
+  timestamps and token usage were never read at all. That flattening is
+  correct — tool chatter stored as memories buries the recallable facts —
+  but it was also terminal. With retention on, the source file is kept
+  content-addressed under the configured directory and every memory records
+  the byte span it came from, so the discarded material is recoverable
+  without changing a single memory the import produces.
+- **`remind_me_source { memory_id }`** returns the raw envelope behind a
+  memory, capped at 256KB with truncation reported rather than silent. A
+  memory marked `sensitive` yields nothing unless `include_sensitive` — the
+  raw source discloses strictly more than the memory distilled from it. All
+  "nothing to show" cases share one message, so the refusal cannot be used
+  to probe which memories are flagged.
+- **Off unless configured**, matching the folder watcher (#55), webhook
+  (#56) and embedder convention. With `REMIND_ME_ARCHIVE_DIR` unset an
+  import is byte-identical to before.
+
+### Behaviour
+- Spans are recorded only where one memory traces to one contiguous region.
+  JSONL qualifies — one envelope per line — and so does a whole-file
+  markdown import. A JSON array of conversations and markdown role-splitting
+  do not, and record no span rather than a guessed one: a wrong span would
+  hand back some other turn's bytes and look authoritative doing it.
+- Offsets are counted over `split_inclusive('\n')`, so a malformed line the
+  importer skips does not slide every subsequent span.
+- Spans are only recorded when `raw.as_bytes() == raw_bytes` — they index
+  the decoded string, the blob holds the original bytes, and the two agree
+  only when the decode was not lossy.
+- `undo_import` now drops an import's archive rows and blob alongside its
+  tracking row, under exactly the same "nothing of this import survives"
+  condition the tracking-row delete uses. A blob shared by two imports of
+  the same file is unlinked only when the last one goes.
+- Archives are node-local and never sync: the tables carry no triggers and
+  `sync/` enumerates the reference's tables, not this crate's.
+
+### Schema
+- Two **target-only** tables, `import_archives` and
+  `import_archive_spans`, created by `archive::ensure_schema` at open time
+  in the same way `vectors::ensure_schema` creates `vec_embeddings`.
+  Deliberately **not** a column on `chat_imports`: `schema_tables.sql` is
+  generated verbatim from the reference and would revert the addition on
+  the next `regenerate_schema.py` run. `SCHEMA_VERSION` is untouched at 29,
+  and `migration_pending` only iterates reference tables, so reconciliation
+  never sees these.
+
+### Verified
+- `cargo test --workspace`: all suites pass, 0 failed.
+- `crates/remind_me_core/tests/archive_test.rs` asserts the property the
+  feature exists for rather than that a file appeared: after importing a
+  Claude Code transcript, the memory holds only the flattened text while
+  `source_for` returns the `thinking` block, the `tool_use` call,
+  `sessionId` and `parentUuid`. Two-line and malformed-line fixtures pin
+  that each memory gets *its own* envelope, not the whole file.
+- `cargo clippy --workspace --all-targets`: no warnings.
+
 ## 2026-08-10 — Raise busy_timeout to 30s to survive concurrent cold-start DB opens (#252)
 
 ### Fixed

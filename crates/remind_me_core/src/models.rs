@@ -688,10 +688,57 @@ fn default_capture_category() -> String {
 /// excludes this category, so getting the two the wrong way round would flood
 /// the annotation backlog with raw transcripts.
 pub const DIALOG_CATEGORY: &str = "dialog";
+/// Category the structural skeleton of a capture is stored under.
+///
+/// Excluded from `extract_batch` for the same reason [`DIALOG_CATEGORY`] is,
+/// and more so: a skeleton is structure, not prose. There are no facts in it
+/// to extract, and offering one to the annotation loop would spend a model
+/// call to discover that.
+pub const SKELETON_CATEGORY: &str = "skeleton";
 /// `source` both halves of a capture are stored under.
 pub const CAPTURE_SOURCE: &str = "auto_capture";
 /// Longest title derived from a summary when none is supplied.
 pub const CAPTURE_TITLE_CHARS: usize = 80;
+
+/// Write (or replace) the structural skeleton of a capture.
+///
+/// # Why the ranges are lines and not characters
+///
+/// A skeleton is produced by the calling agent's model, the same way
+/// `remind_me_decompose`'s facts are. Asking a model for exact character
+/// offsets into a long transcript invites off-by-N errors that are invisible
+/// at write time and surface later as a drill-down returning the middle of
+/// someone else's sentence. Lines are countable, checkable by eye against the
+/// stored dialog, and are the unit a transcript is already structured in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletonWriteInput {
+    pub capture_id: String,
+    /// Mermaid source for the diagram.
+    pub mermaid: String,
+    /// Node id to inclusive, 1-based line range in the capture's dialog.
+    #[serde(default)]
+    pub nodes: std::collections::BTreeMap<String, (usize, usize)>,
+}
+
+/// A capture's skeleton: the diagram, and what each node points at.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skeleton {
+    pub capture_id: String,
+    pub skeleton_id: String,
+    pub mermaid: String,
+    pub nodes: std::collections::BTreeMap<String, (usize, usize)>,
+}
+
+/// The slice of dialog one skeleton node stands for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletonSlice {
+    pub capture_id: String,
+    pub node: String,
+    /// Inclusive, 1-based.
+    pub start_line: usize,
+    pub end_line: usize,
+    pub content: String,
+}
 
 /// The two linked memories a capture produces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -785,6 +832,93 @@ pub const DECOMPOSE_FACTS_MAX: usize = 50;
 
 /// `category` every decomposed fact is stored under.
 pub const FACT_CATEGORY: &str = "fact";
+/// Category a scenario — knowledge organised around one entity or topic,
+/// synthesised from several facts — is stored under (#208).
+pub const SCENARIO_CATEGORY: &str = "scenario";
+/// Category a persona statement — something durably true about the user — is
+/// stored under (#208).
+pub const PERSONA_CATEGORY: &str = "persona";
+
+/// A step of the refinement ladder.
+///
+/// `CaptureToFact` is listed because the *backlog* for it is worth reporting
+/// alongside the others, not because this module promotes it —
+/// `remind_me_decompose` does, and `promote` refuses the rung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rung {
+    CaptureToFact,
+    FactToScenario,
+    ScenarioToPersona,
+}
+
+impl Rung {
+    /// Stable string form, used as the stored `rung` value. Written by hand
+    /// rather than derived from `Debug` so a rename of the variant cannot
+    /// silently orphan every row already stored under the old spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CaptureToFact => "capture_to_fact",
+            Self::FactToScenario => "fact_to_scenario",
+            Self::ScenarioToPersona => "scenario_to_persona",
+        }
+    }
+}
+
+/// Something ready to move up a rung.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionCandidate {
+    pub rung: Rung,
+    /// The memories a promotion would be built from.
+    pub source_ids: Vec<String>,
+    pub snippet: String,
+    /// Why this is a candidate, in words — a listing that only returns ids
+    /// makes the caller guess what it is looking at.
+    pub reason: String,
+    /// The entity or topic the group formed around, where one applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grouped_by: Option<String>,
+}
+
+/// Accept a distillation of some sources into the rung above them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteInput {
+    pub rung: Rung,
+    pub source_ids: Vec<String>,
+    /// The distilled text.
+    pub content: String,
+}
+
+/// What a promotion produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionResult {
+    pub promoted_id: String,
+    pub rung: Rung,
+    pub category: String,
+    pub source_ids: Vec<String>,
+}
+
+/// What a memory came from, and what was built on it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Provenance {
+    pub memory_id: String,
+    /// The rung below: memories this was promoted from.
+    pub sources: Vec<String>,
+    /// The rung above: memories promoted from this.
+    pub derived: Vec<String>,
+}
+
+/// One durable statement about the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaStatement {
+    pub id: String,
+    pub content: String,
+    pub vitality: f64,
+    pub created_at: String,
+    /// How many of its sources still stand. Zero means withheld — see
+    /// [`crate::promotion::persona`].
+    pub surviving_sources: usize,
+}
 /// `source` every decomposed fact is stored under.
 pub const DECOMPOSITION_SOURCE: &str = "decomposition";
 

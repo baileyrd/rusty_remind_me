@@ -107,7 +107,24 @@ fn objects(conn: &Connection, kind: &str) -> BTreeMap<String, String> {
 /// to load, so it keeps its own plain table instead. `vec_chunks` (the rowid
 /// map back to `memory_rowid`/`chunk_ix`) *is* part of the generated schema
 /// and stays untouched; only the table holding the actual bytes is new.
-const OWN_ADDITIONS: &[&str] = &["vec_embeddings"];
+///
+/// `import_archives` / `import_archive_spans` / `idx_archive_spans_import`:
+/// raw-transcript retention (#212). The obvious home for the archive path was
+/// a column on `chat_imports`, which is exactly what this list exists to
+/// prevent — `schema_tables.sql` is generated verbatim, so the column would
+/// have been reverted by the next `regenerate_schema.py` run. Target-only
+/// tables created by `archive::ensure_schema` instead, on the
+/// `vec_embeddings` pattern.
+/// `promotions` / `idx_promotions_source`: the refinement ladder's provenance
+/// (#208), linking a promoted artifact to the memories it was distilled from.
+const OWN_ADDITIONS: &[&str] = &[
+    "vec_embeddings",
+    "import_archives",
+    "import_archive_spans",
+    "idx_archive_spans_import",
+    "promotions",
+    "idx_promotions_source",
+];
 
 /// Compare live objects of `kind` against the shipped schema, reporting only
 /// what differs. A whole-map `assert_eq!` dumps twenty tables of DDL and buries
