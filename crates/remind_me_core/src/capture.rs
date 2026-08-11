@@ -76,12 +76,13 @@ fn insert_half(
     let base_weight = get_type_prior(category) * get_source_prior(CAPTURE_SOURCE);
     let vitality = calculate_vitality(base_weight, 0, decay_rate, now_iso, now);
 
+    let (node_id, client) = crate::sync::memory_provenance();
     conn.execute(
         "INSERT INTO memories (
             id, content, category, tags, source, metadata, capture_id,
             created_at, updated_at, decay_rate, vitality, base_weight,
-            access_count, accessed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            access_count, accessed_at, node_id, client
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
         params![
             id,
             content,
@@ -96,6 +97,8 @@ fn insert_half(
             vitality,
             base_weight,
             now_iso,
+            node_id,
+            client,
         ],
     )?;
     Ok(())
@@ -294,13 +297,15 @@ pub fn decompose(conn: &Connection, input: &DecomposeInput) -> Result<Option<Dec
         let decay_rate = get_decay_rate(memory_type);
         let base_weight = get_type_prior(memory_type);
 
+        let (node_id, client) = crate::sync::memory_provenance();
         conn.execute(
             "INSERT INTO memories (
                 id, content, category, tags, source, metadata,
                 capture_id, source_capture_id, created_at, updated_at,
                 memory_type, decay_rate, vitality, base_weight, status,
-                accessed_at, access_count, subject, predicate, object
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?, ?, ?)",
+                accessed_at, access_count, subject, predicate, object,
+                node_id, client
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?, ?, ?, ?, ?)",
             params![
                 fact_id,
                 fact.content,
@@ -319,6 +324,8 @@ pub fn decompose(conn: &Connection, input: &DecomposeInput) -> Result<Option<Dec
                 fact.subject,
                 fact.predicate,
                 fact.object,
+                node_id,
+                client,
             ],
         )?;
 

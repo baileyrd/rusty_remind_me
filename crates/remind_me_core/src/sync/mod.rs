@@ -84,8 +84,64 @@ pub fn configured_node_id() -> String {
     std::env::var(NODE_ID_ENV).unwrap_or_default()
 }
 
+/// Identity reported by the MCP client in its `initialize` handshake.
+///
+/// Process-global because the identity is a property of the connection, not
+/// of any one call, and threading it from the JSON-RPC layer down through
+/// every write path would touch far more code than it informs. The same shape
+/// the `REMIND_ME_*` config it overrides already has.
+static HANDSHAKE_CLIENT: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Record the client identity from an MCP `initialize`.
+///
+/// Called by the server on handshake. `None` clears it, which is what a fresh
+/// process — or a test — wants.
+pub fn set_handshake_client(identity: Option<String>) {
+    if let Ok(mut slot) = HANDSHAKE_CLIENT.write() {
+        *slot = identity.filter(|s| !s.trim().is_empty());
+    }
+}
+
+/// The client identity currently in force.
+pub fn handshake_client() -> Option<String> {
+    HANDSHAKE_CLIENT.read().ok().and_then(|s| s.clone())
+}
+
+/// Who is writing, for the `client` column.
+///
+/// Precedence: the MCP handshake identity, then [`CLIENT_ENV`], then
+/// `"unknown"`.
+///
+/// The handshake wins because it is *observed* rather than *configured* — it
+/// says which agent actually made this call, where the environment variable
+/// says only what whoever launched the process typed. On a host running one
+/// server for several clients the env value is the same for all of them, so
+/// preferring it would record the least informative of the two. An operator
+/// who deliberately sets `REMIND_ME_CLIENT` still gets it for every non-MCP
+/// path — the CLI, the dashboard, the importer — none of which handshake.
 pub fn configured_client() -> String {
+    if let Some(identity) = handshake_client() {
+        return identity;
+    }
     std::env::var(CLIENT_ENV).unwrap_or_else(|_| DEFAULT_CLIENT.to_string())
+}
+
+/// The `(node_id, client)` pair every newly created memory is stamped with.
+///
+/// One function rather than two calls at each site, because the bug this
+/// exists to close was **omission**, not a wrong value: `add_memory` set both
+/// columns and the five other paths that insert into `memories` directly
+/// (`capture`, its decompose half, `promotion`, `skeleton`, `normalize`) set
+/// neither. `client` fell back to the schema default `'unknown'` and `node_id`
+/// to `NULL`.
+///
+/// That is worse than not having the columns. A reader of `client` could not
+/// tell "unknown because nobody configured one" from "unknown because this
+/// write path forgot", and `node_id` rides the outbox payload
+/// (`schema_triggers.sql`), so per-node attribution on the hub silently saw
+/// only manually-added memories.
+pub fn memory_provenance() -> (String, String) {
+    (configured_node_id(), configured_client())
 }
 
 fn configured_hub_url() -> String {
