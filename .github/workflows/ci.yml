@@ -155,6 +155,69 @@ jobs:
 
       - name: cargo clippy --features stack-dumps
         run: cargo clippy -p remind_me_core --features stack-dumps --all-targets --locked -- -D warnings
+
+  # Every step above enables exactly one optional feature at a time, so a
+  # regression that only shows up when several are compiled *together* has
+  # nothing here to catch it (#279). That gap matters most for `ocr`,
+  # `rerank`, and `local-embed`: per their comments in
+  # `crates/remind_me_core/Cargo.toml`, they deliberately share one `rten`/
+  # `tokenizers` runtime instead of each pulling in its own, specifically so a
+  # "full install" does not carry a second neural-network runtime. Nothing
+  # before this job has ever compiled that combination, so a `rten` upgrade
+  # that changes global state it keeps (its thread pool, say) could break the
+  # combination invisibly -- every feature passes alone, but two
+  # `rten::Model` loads sharing that state at once could race or panic.
+  #
+  # A separate job rather than more `check` steps, on purpose: `check`
+  # already runs right up against the runner's disk building `local-embed`
+  # last (see that step's comment), and this feature set links `rten` and
+  # `tokenizers` into even more test binaries than `local-embed` does alone.
+  # A fresh runner gives it a full disk instead of `check`'s leftovers.
+  #
+  # `ann`/`pdf` ride along too: the issue's "realistic full install" is what a
+  # user who wants everything actually enables, and `pdf`/`ocr`/`audio` are
+  # three parallel branches of the same `import_content` dispatch, so `pdf`
+  # compiling alongside `ocr` here is worth the (cheap, pure-Rust) inclusion.
+  # `audio` and `cloud-backup` are left out: neither shares any runtime with
+  # `ocr`/`rerank`/`local-embed`, so they add compile time without covering
+  # any new cross-feature interaction. `stack-dumps` is left out too -- it is
+  # the one feature here with a *system*-library dependency
+  # (`libunwind-dev`/`liblzma-dev`), off by default for exactly that reason
+  # (see its own step and `docs/adr/0014`), and no combination above installs
+  # or needs those packages, so this job does not either.
+  #
+  # This runs the actual test suite, not just clippy, unlike the `ocr`/
+  # `local-embed` steps above: the whole point is to exercise
+  # `ocr`/`rerank`/`local-embed` initializing and using `rten` in the same
+  # process, which a compile-only check can never do.
+  combined-features:
+    name: build / test / clippy (combined features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-combined-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-combined-
+
+      - name: cargo build --features ann,ocr,rerank,local-embed,pdf
+        run: cargo build -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --locked
+
+      - name: cargo test --features ann,ocr,rerank,local-embed,pdf
+        run: cargo test -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --locked
+
+      - name: cargo clippy --features ann,ocr,rerank,local-embed,pdf
+        run: cargo clippy -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets --locked -- -D warnings
+
   # A separate job, not more steps on `check`, because it needs a Postgres
   # service container and the rest of the workspace does not. Keeping it apart
   # means the main gate is not held up by a database that takes seconds to
