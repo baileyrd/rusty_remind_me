@@ -188,11 +188,67 @@ pub fn upload_backup(path: &std::path::Path) -> UploadOutcome {
     }
 }
 
+/// Everything `put_object` needs to know in order to talk to S3, built
+/// without touching the network.
+///
+/// Kept separate from the actual upload so the bucket/key it was given, and
+/// the endpoint/region it read from the environment, can be asserted on
+/// directly — no client, no runtime, no live S3-compatible server required.
+#[cfg(feature = "cloud-backup")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PutObjectPlan {
+    bucket: String,
+    key: String,
+    /// `None` means "let the SDK's own credential-chain region resolution
+    /// decide", not "use some hardcoded default".
+    region: Option<String>,
+    /// `None` means AWS's own S3 endpoints. `Some` is what points this at
+    /// Backblaze, MinIO, or any other S3-compatible provider.
+    endpoint: Option<String>,
+    /// True exactly when `endpoint` is set: a non-AWS endpoint generally
+    /// does not support virtual-hosted–style addressing
+    /// (`bucket.host/key`), so a custom endpoint always implies path-style
+    /// (`host/bucket/key`).
+    force_path_style: bool,
+}
+
+/// Build the request plan from inputs and the (non-secret) environment —
+/// the pure part of `put_object`, with no network or SDK client involved.
+#[cfg(feature = "cloud-backup")]
+fn plan_put_object(bucket: &str, key: &str) -> PutObjectPlan {
+    let region = env(REGION_ENV);
+    let endpoint = env(ENDPOINT_ENV);
+    PutObjectPlan {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        region: if region.is_empty() {
+            None
+        } else {
+            Some(region)
+        },
+        force_path_style: !endpoint.is_empty(),
+        endpoint: if endpoint.is_empty() {
+            None
+        } else {
+            Some(endpoint)
+        },
+    }
+}
+
+/// Render an SDK error as the string that ends up in `UploadOutcome::Failed`.
+/// A named function rather than an inline closure so it can be exercised
+/// directly against an `SdkError` built without any network call.
+#[cfg(feature = "cloud-backup")]
+fn describe_upload_error<E: std::fmt::Display>(e: E) -> String {
+    format!("upload failed: {}", e)
+}
+
 #[cfg(feature = "cloud-backup")]
 fn put_object(bucket: &str, key: &str, path: &std::path::Path) -> Result<(), String> {
     use aws_sdk_s3::primitives::ByteStream;
 
     let body = std::fs::read(path).map_err(|e| format!("could not read backup: {}", e))?;
+    let plan = plan_put_object(bucket, key);
 
     // Its own runtime rather than assuming the caller has one: `create_backup`
     // is synchronous, and a backup must not depend on where it was called
@@ -208,8 +264,7 @@ fn put_object(bucket: &str, key: &str, path: &std::path::Path) -> Result<(), Str
         // default change cannot silently alter how uploads are signed or
         // retried.
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-        let region = env(REGION_ENV);
-        if !region.is_empty() {
+        if let Some(region) = plan.region.clone() {
             loader = loader.region(aws_sdk_s3::config::Region::new(region));
         }
         let shared = loader.load().await;
@@ -217,19 +272,132 @@ fn put_object(bucket: &str, key: &str, path: &std::path::Path) -> Result<(), Str
         let mut builder = aws_sdk_s3::config::Builder::from(&shared);
         // A custom endpoint is what makes this work against Backblaze, MinIO
         // and the rest rather than AWS alone.
-        let endpoint = env(ENDPOINT_ENV);
-        if !endpoint.is_empty() {
-            builder = builder.endpoint_url(endpoint).force_path_style(true);
+        if let Some(endpoint) = plan.endpoint.clone() {
+            builder = builder
+                .endpoint_url(endpoint)
+                .force_path_style(plan.force_path_style);
         }
 
         aws_sdk_s3::Client::from_conf(builder.build())
             .put_object()
-            .bucket(bucket)
-            .key(key)
+            .bucket(plan.bucket.clone())
+            .key(plan.key.clone())
             .body(ByteStream::from(body))
             .send()
             .await
             .map(|_| ())
-            .map_err(|e| format!("upload failed: {}", e))
+            .map_err(describe_upload_error)
     })
+}
+
+#[cfg(all(test, feature = "cloud-backup"))]
+mod put_object_tests {
+    use super::*;
+
+    // `plan_put_object` reads process-wide environment variables, so tests
+    // that set them run one at a time — the same convention
+    // `tests/cloud_backup_test.rs` uses for the plaintext-gate tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear() {
+        std::env::remove_var(ENDPOINT_ENV);
+        std::env::remove_var(REGION_ENV);
+    }
+
+    #[test]
+    fn bucket_and_key_are_carried_through_verbatim() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+
+        let plan = plan_put_object("my-bucket", "host/backups/2026-08-11.db");
+
+        assert_eq!(plan.bucket, "my-bucket");
+        assert_eq!(plan.key, "host/backups/2026-08-11.db");
+        clear();
+    }
+
+    #[test]
+    fn no_endpoint_or_region_means_the_sdk_decides() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+
+        let plan = plan_put_object("bucket", "key");
+
+        // `None`, not an empty string standing in for "unset" -- callers
+        // must not accidentally hand the SDK a blank region or endpoint.
+        assert_eq!(plan.region, None);
+        assert_eq!(plan.endpoint, None);
+        assert!(
+            !plan.force_path_style,
+            "AWS's own endpoints use virtual-hosted-style addressing"
+        );
+        clear();
+    }
+
+    #[test]
+    fn a_custom_endpoint_forces_path_style_addressing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        std::env::set_var(ENDPOINT_ENV, "https://s3.us-west-002.backblazeb2.com");
+
+        let plan = plan_put_object("bucket", "key");
+
+        assert_eq!(
+            plan.endpoint.as_deref(),
+            Some("https://s3.us-west-002.backblazeb2.com")
+        );
+        // Backblaze, MinIO and the rest generally cannot resolve
+        // `bucket.host/key`; without this override, every non-AWS upload
+        // would fail on the addressing style alone.
+        assert!(
+            plan.force_path_style,
+            "a custom endpoint must force path-style addressing"
+        );
+        clear();
+    }
+
+    #[test]
+    fn a_configured_region_is_passed_through() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        std::env::set_var(REGION_ENV, "us-west-002");
+
+        let plan = plan_put_object("bucket", "key");
+
+        assert_eq!(plan.region.as_deref(), Some("us-west-002"));
+        clear();
+    }
+
+    #[test]
+    fn a_blank_endpoint_or_region_is_treated_as_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        std::env::set_var(ENDPOINT_ENV, "   ");
+        std::env::set_var(REGION_ENV, "   ");
+
+        let plan = plan_put_object("bucket", "key");
+
+        assert_eq!(plan.endpoint, None);
+        assert_eq!(plan.region, None);
+        assert!(!plan.force_path_style);
+        clear();
+    }
+
+    #[test]
+    fn the_sdk_error_message_is_preserved_verbatim() {
+        // `SdkError` is constructible directly without a client, a request,
+        // or a live service for the variants that never carry a raw HTTP
+        // response -- `construction_failure` is one, and it is exactly the
+        // shape a bad endpoint URL or bad config would produce. This is as
+        // close to the network-calling branch as the mapping can be
+        // exercised without one.
+        type PutObjectError = aws_sdk_s3::operation::put_object::PutObjectError;
+        let err: aws_sdk_s3::error::SdkError<PutObjectError> =
+            aws_sdk_s3::error::SdkError::construction_failure("bad endpoint url");
+
+        assert_eq!(
+            describe_upload_error(err),
+            "upload failed: failed to construct request"
+        );
+    }
 }
