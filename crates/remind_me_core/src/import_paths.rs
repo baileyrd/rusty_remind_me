@@ -18,9 +18,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// Colon-separated roots an import may read from.
+/// Roots an import may read from, in the platform's own `PATH`-list syntax
+/// (`:`-separated on Unix, `;`-separated on Windows — see
+/// [`split_path_list`]).
 pub const IMPORT_ROOTS_ENV: &str = "REMIND_ME_IMPORT_ROOTS";
-/// Colon-separated roots an export may write to.
+/// Roots an export may write to, in the same platform-native syntax as
+/// [`IMPORT_ROOTS_ENV`].
 pub const EXPORT_ROOTS_ENV: &str = "REMIND_ME_EXPORT_ROOTS";
 
 /// Extensions the importer accepts.
@@ -53,13 +56,30 @@ pub fn home_dir_var() -> Result<String, std::env::VarError> {
         .ok_or(std::env::VarError::NotPresent)
 }
 
+/// Splits a path list the way the platform's own `PATH` is split: `:` on
+/// Unix, `;` on Windows.
+///
+/// A literal `raw.split(':')` — this crate's own convention until this
+/// function existed — breaks on Windows, where a colon is not a separator
+/// but part of every absolute path's drive letter (`C:\Users\...`).
+/// `REMIND_ME_CODE_ROOTS=C:\Users\me\code` would split into `["C",
+/// "\Users\me\code"]`, neither of which is the configured root, so nothing
+/// ever resolved as contained in it. `std::env::split_paths` is the standard
+/// library's own answer to exactly this problem.
+pub fn split_path_list(raw: &str) -> Vec<String> {
+    std::env::split_paths(raw)
+        .filter_map(|p| {
+            let s = p.to_string_lossy().trim().to_string();
+            (!s.is_empty()).then_some(s)
+        })
+        .collect()
+}
+
 fn roots_from(env: &str) -> Vec<PathBuf> {
     match std::env::var(env) {
-        Ok(raw) if !raw.trim().is_empty() => raw
-            .split(':')
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(|r| resolve_lexically(&PathBuf::from(expand_home(r))))
+        Ok(raw) if !raw.trim().is_empty() => split_path_list(&raw)
+            .into_iter()
+            .map(|r| resolve_lexically(&PathBuf::from(expand_home(&r))))
             .collect(),
         // Default to the home directory, matching the reference. Resolved
         // the same way `resolve_lexically` resolves candidate paths -- on

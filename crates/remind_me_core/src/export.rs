@@ -28,7 +28,9 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, Result};
 use std::path::{Path, PathBuf};
 
-/// Environment variable listing colon-separated roots an export may write to.
+/// Environment variable listing the roots an export may write to, in the
+/// platform's own `PATH`-list syntax (see
+/// [`crate::import_paths::split_path_list`]).
 pub const EXPORT_ROOTS_ENV: &str = "REMIND_ME_EXPORT_ROOTS";
 
 /// Roots an export destination must be contained in.
@@ -36,11 +38,9 @@ pub const EXPORT_ROOTS_ENV: &str = "REMIND_ME_EXPORT_ROOTS";
 /// Defaults to the user's home directory, matching the reference.
 pub fn export_roots() -> Vec<PathBuf> {
     match std::env::var(EXPORT_ROOTS_ENV) {
-        Ok(raw) if !raw.trim().is_empty() => raw
-            .split(':')
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(|r| crate::import_paths::resolve_lexically(&PathBuf::from(expand_home(r))))
+        Ok(raw) if !raw.trim().is_empty() => crate::import_paths::split_path_list(&raw)
+            .into_iter()
+            .map(|r| crate::import_paths::resolve_lexically(&PathBuf::from(expand_home(&r))))
             .collect(),
         // See `import_paths::roots_from`'s matching comment: the root must
         // be resolved the same way a candidate path is, or `\\?\`-prefixed
