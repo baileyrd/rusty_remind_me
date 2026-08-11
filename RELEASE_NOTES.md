@@ -2,6 +2,36 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — remind_me_core now has local test coverage for metrics/import_paths/api_keys (#284)
+
+### Fixed
+- **`metrics.rs`, `import_paths.rs`, and `api_keys.rs` in `remind_me_core` were
+  only exercised by tests living in the sibling `remind_me_api` crate**, so
+  `cargo test -p remind_me_core` gave zero signal on any of them — label
+  escaping, float formatting, and `metrics_enabled()`'s env parsing;
+  `is_contained`/`resolve_lexically`/`validate_import_file`'s
+  security-critical containment checks; and `create_key`/`revoke_key`/
+  `verify`'s storage and duplicate-name/corrupt-store handling. Added
+  `crates/remind_me_core/tests/metrics_test.rs`,
+  `crates/remind_me_core/tests/api_keys_test.rs`, an extended
+  `crates/remind_me_core/tests/import_paths_test.rs` (previously only
+  `split_path_list` coverage from #298), and an inline `#[cfg(test)]` module
+  in `src/metrics.rs` for the two private helpers (`escape_label_value`,
+  `sample`) an external integration test cannot reach. The `remind_me_api`
+  tests that already covered this logic over HTTP are unchanged. Also
+  includes a new symlink-escape regression test for `validate_import_file`
+  (a symlink inside an import root pointing outside it must not grant
+  access) that the existing test suite did not previously exercise anywhere.
+
+### Provenance
+
+Filed as #284; fixed by adding `remind_me_core`-local tests duplicating the
+behavioral coverage `remind_me_api`'s `metrics_test.rs`,
+`import_export_test.rs`, and `api_keys_test.rs` already established.
+Verified: `cargo test -p remind_me_core` (full suite green, 184
+lib-unit-test + new integration tests all passing), `cargo clippy -p
+remind_me_core --all-targets` (clean), `cargo fmt --all --check` (clean).
+
 ## 2026-08-12 — MCP surface consistency: `id`/`memory_id` alias, shared limit constants, backlog counts, error-prefix nit (#283)
 
 ### Fixed
