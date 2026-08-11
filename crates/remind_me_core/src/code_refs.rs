@@ -219,10 +219,15 @@ pub struct StaleCandidate {
 /// Re-check every anchored path and report memories where at least one no
 /// longer matches.
 ///
-/// Read-only — see the module doc. `limit` bounds *candidates returned*, not
-/// paths checked, matching [`crate::promotion::promotion_candidates`]'s
-/// shape: a caller working through a long list still sees an accurate first
-/// page rather than a page truncated mid-scan.
+/// Read-only — see the module doc. `limit` is clamped to `1..=100`, matching
+/// [`crate::promotion::promotion_candidates`]'s convention, but unlike that
+/// function the bound is applied only in Rust, after staleness is
+/// determined — never as a SQL `LIMIT`. The query's `WHERE` clause is a
+/// broad pre-filter ("has code_refs at all"); whether a row is actually
+/// stale is only known once its anchors are `stat`-ed below. A SQL `LIMIT`
+/// would cut the row set before that, and could silently drop a real stale
+/// candidate sitting past the first N rows in default order — the opposite
+/// of the "accurate first page" this function promises.
 ///
 /// # Two checks this reads through that write-time anchoring already applies
 ///
@@ -248,6 +253,7 @@ pub struct StaleCandidate {
 ///   rather than asked for, so there is no per-call intent to opt back in
 ///   against.
 pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<Vec<StaleCandidate>> {
+    let limit = limit.clamp(1, 100);
     let mut stmt = conn.prepare(
         "SELECT id, content, metadata
            FROM memories
