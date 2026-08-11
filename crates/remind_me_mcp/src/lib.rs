@@ -1180,12 +1180,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default, as the reference) returns the structured report; markdown renders it for reading." },
-                                        "response_format": {
-                                            "type": "string",
-                                            "enum": ["json", "markdown"],
-                                            "default": "json"
-                                        }
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "json", "description": "json (default, as the reference) returns the structured report; markdown renders it for reading." }
                                     }
                                 }
                             },
@@ -3366,6 +3361,18 @@ mod tests {
             tool["inputSchema"]["properties"]["response_format"]["default"], "json",
             "the reference defaults this tool to JSON, unlike most others"
         );
+        // The schema literal used to define `response_format` twice inside
+        // the same object -- legal Rust (duplicate keys in a `json!` macro
+        // just overwrite each other), but the second copy carried no
+        // `description` and a reversed `enum` order. Asserting both here
+        // pins the single surviving definition and would catch either kind
+        // of regression: a dropped description, or the pre-fix duplicate
+        // silently winning again.
+        assert_eq!(
+            tool["inputSchema"]["properties"]["response_format"]["enum"],
+            json!(["markdown", "json"])
+        );
+        assert!(tool["inputSchema"]["properties"]["response_format"]["description"].is_string());
 
         call(&server, "remind_me_add", json!({ "content": "a memory" }));
         let report = call(&server, "remind_me_vitality_report", json!({}));
