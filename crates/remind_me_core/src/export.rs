@@ -138,13 +138,10 @@ pub fn validate_export_path(raw: &str) -> std::result::Result<PathBuf, ExportPat
     let expanded = PathBuf::from(expand_home(raw.trim()));
     // The destination itself will not exist yet, so resolve the deepest
     // existing ancestor and rebuild — `canonicalize` on a missing file fails.
-    let resolved = resolve_lexically(&expanded);
+    let resolved = crate::import_paths::resolve_lexically(&expanded);
 
     let roots = export_roots();
-    if !roots
-        .iter()
-        .any(|root| resolved == *root || resolved.starts_with(root))
-    {
+    if !crate::import_paths::is_contained(&resolved, &roots) {
         return Err(ExportPathError::OutsideRoots(resolved));
     }
     if resolved.is_dir() {
@@ -155,48 +152,6 @@ pub fn validate_export_path(raw: &str) -> std::result::Result<PathBuf, ExportPat
         Some(parent) => Err(ExportPathError::NoParentDirectory(parent.to_path_buf())),
         None => Err(ExportPathError::NoParentDirectory(resolved)),
     }
-}
-
-/// Normalise a path without requiring it to exist.
-///
-/// Resolves the longest existing prefix through the filesystem — so symlinks
-/// are followed — then appends the rest with `.` and `..` folded away.
-fn resolve_lexically(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
-    };
-
-    let mut out = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    // Follow symlinks on whatever part of it already exists.
-    let mut existing = out.clone();
-    let mut tail = Vec::new();
-    while !existing.exists() {
-        match existing.file_name() {
-            Some(name) => {
-                tail.push(name.to_os_string());
-                if !existing.pop() {
-                    break;
-                }
-            }
-            None => break,
-        }
-    }
-    let mut resolved = existing.canonicalize().unwrap_or(existing);
-    for name in tail.into_iter().rev() {
-        resolved.push(name);
-    }
-    resolved
 }
 
 /// Strip Windows' `\\?\` verbatim-path prefix for display/reporting
