@@ -52,6 +52,16 @@ pub struct MemoryRecord {
     pub object: Option<String>,
     pub superseded_by: Option<String>,
     pub deleted_at: Option<String>,
+    /// Whether the source memory is marked sensitive. Was missing from every
+    /// column list in this crate — the hub's schema, wire columns, and this
+    /// struct — so it was silently dropped on every push and every pull
+    /// defaulted a synced memory to non-sensitive regardless of the source.
+    /// Defaults to not-sensitive when absent, matching the sender's own
+    /// backward-compatibility default for an older peer.
+    pub sensitive: bool,
+    /// A scheduled reminder time, if the memory carries one. Missing for the
+    /// same reason `sensitive` was.
+    pub remind_at: Option<String>,
 }
 
 /// An entity record. `aliases` is always a list of non-empty strings.
@@ -146,6 +156,20 @@ fn as_i64(rec: &Value, key: &str, default: i64) -> i64 {
     match rec.get(key) {
         Some(Value::Number(n)) => n.as_i64().unwrap_or(default),
         Some(Value::String(s)) => s.parse().unwrap_or(default),
+        _ => default,
+    }
+}
+
+/// Accept SQLite's integer booleans as well as real JSON booleans, mirroring
+/// `crate::sync::record::de_sqlite_bool` in the core crate — a payload built
+/// by that crate's own triggers carries `0`/`1`, one built by hand carries
+/// `true`/`false`, and an absent or malformed value reads as `false` rather
+/// than failing the whole record: `sensitive` is a property worth defaulting
+/// safely, not one worth losing an otherwise-valid memory over.
+fn as_bool(rec: &Value, key: &str, default: bool) -> bool {
+    match rec.get(key) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_i64().unwrap_or(0) != 0,
         _ => default,
     }
 }
@@ -245,6 +269,8 @@ fn parse_memory(rec: &Value) -> Result<MemoryRecord, RecordError> {
         object: as_opt_str(rec, "object"),
         superseded_by: as_opt_str(rec, "superseded_by"),
         deleted_at,
+        sensitive: as_bool(rec, "sensitive", false),
+        remind_at: as_opt_str(rec, "remind_at"),
     })
 }
 

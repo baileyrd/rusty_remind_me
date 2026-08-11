@@ -367,7 +367,8 @@ fn handle_push(conn: &Connection, body: &[u8]) -> (u16, Value) {
 const SYNC_RECORD_COLUMNS: &str =
     "id, content, category, tags, source, metadata, created_at, updated_at, \
      capture_id, node_id, client, accessed_at, access_count, decay_rate, vitality, base_weight, \
-     status, memory_type, source_capture_id, subject, predicate, object, superseded_by";
+     status, memory_type, source_capture_id, subject, predicate, object, superseded_by, \
+     deleted_at, sensitive, remind_at";
 
 fn parse_sync_record_row(row: &rusqlite::Row) -> rusqlite::Result<Value> {
     let tags_json: String = row.get("tags")?;
@@ -396,6 +397,16 @@ fn parse_sync_record_row(row: &rusqlite::Row) -> rusqlite::Result<Value> {
         "predicate": row.get::<_, Option<String>>("predicate")?,
         "object": row.get::<_, Option<String>>("object")?,
         "superseded_by": row.get::<_, Option<String>>("superseded_by")?,
+        // Three columns this function never read (#265). `deleted_at` is the
+        // most serious of the three found while fixing `sensitive`/
+        // `remind_at`: without it, a tombstone never propagates over direct
+        // peer sync at all, so a memory deleted on one node and pulled by a
+        // peer stays live there forever. `sync/record.rs`'s `SyncRecord`
+        // already expects all three on the wire; this function just never
+        // supplied them.
+        "deleted_at": row.get::<_, Option<String>>("deleted_at")?,
+        "sensitive": row.get::<_, bool>("sensitive")?,
+        "remind_at": row.get::<_, Option<String>>("remind_at")?,
     }))
 }
 

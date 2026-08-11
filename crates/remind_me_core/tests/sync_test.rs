@@ -16,7 +16,7 @@ use remind_me_core::sync::{
     HUB_URL_ENV, NODE_ID_ENV, SYNC_SECRET_ENV,
 };
 use remind_me_core::{Database, MemoryAddInput};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::json;
 use std::net::TcpListener;
 use std::sync::Mutex;
@@ -648,6 +648,107 @@ fn pull_remote_applies_the_hubs_changes_and_persists_the_cursor() {
     // A second pull with nothing new does not re-apply anything.
     let second = pull_remote(&local_conn, &hub.url, SECRET, "local-node", "hub").unwrap();
     assert_eq!(second.applied, 0);
+}
+
+#[test]
+fn a_sensitive_memory_stays_sensitive_when_pulled_directly_from_a_peer() {
+    // #265: `sync/server.rs`'s `SYNC_RECORD_COLUMNS`/`parse_sync_record_row`
+    // -- the peer server's own pull-serving code, exercised here over a real
+    // socket via `MockNode` -- omitted `sensitive` (and `deleted_at` and
+    // `remind_at`) entirely. A memory marked sensitive on the peer arrived
+    // on the puller as not-sensitive, unconditionally.
+    let hub = MockNode::start("hub-node", SECRET);
+    {
+        let hub_conn = hub.db.conn();
+        let id = queries::add_memory(
+            &hub_conn,
+            MemoryAddInput {
+                sensitive: true,
+                content: "sensitive, pulled directly from a peer".to_string(),
+                category: "general".into(),
+                tags: vec![],
+                source: "manual".into(),
+                metadata: serde_json::json!({}),
+                subject: None,
+                predicate: None,
+                object: None,
+                entities: vec![],
+            },
+        )
+        .unwrap()
+        .id;
+        hub_conn
+            .execute(
+                "UPDATE memories SET node_id = 'hub-node' WHERE id = ?",
+                [&id],
+            )
+            .unwrap();
+    }
+    let local_db = Database::open_in_memory().unwrap();
+    let local_conn = local_db.conn();
+
+    let report = pull_remote(&local_conn, &hub.url, SECRET, "local-node", "hub").unwrap();
+    assert_eq!(report.applied, 1);
+
+    let sensitive: bool = local_conn
+        .query_row(
+            "SELECT sensitive FROM memories WHERE content = 'sensitive, pulled directly from a peer'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        sensitive,
+        "a memory marked sensitive on the peer must still be sensitive after a direct pull"
+    );
+}
+
+#[test]
+fn a_tombstone_propagates_when_pulled_directly_from_a_peer() {
+    // Same bug as the sensitive test above, different column: `deleted_at`
+    // was also absent from `SYNC_RECORD_COLUMNS`/`parse_sync_record_row`.
+    // Without it, a memory deleted on the peer (with sync configured, so it
+    // tombstones rather than hard-deleting -- see
+    // `delete_tombstones_instead_of_hard_deleting_when_sync_is_configured`
+    // above) would pull down as an ordinary live row: the tombstone itself
+    // never reached the puller, so the deletion never propagated at all.
+    let hub = MockNode::start("hub-node", SECRET);
+    let id;
+    {
+        let hub_conn = hub.db.conn();
+        id = add(&hub_conn, "deleted on the peer, must tombstone on pull");
+        hub_conn
+            .execute(
+                "UPDATE memories SET node_id = 'hub-node' WHERE id = ?",
+                [&id],
+            )
+            .unwrap();
+        hub_conn
+            .execute(
+                "UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?",
+                params!["2026-08-11T00:00:00+00:00", "2026-08-11T00:00:00+00:00", id],
+            )
+            .unwrap();
+    }
+    let local_db = Database::open_in_memory().unwrap();
+    let local_conn = local_db.conn();
+
+    let report = pull_remote(&local_conn, &hub.url, SECRET, "local-node", "hub").unwrap();
+    assert_eq!(report.applied, 1);
+
+    let deleted_at: Option<String> = local_conn
+        .query_row(
+            "SELECT deleted_at FROM memories \
+             WHERE content = 'deleted on the peer, must tombstone on pull'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        deleted_at.is_some(),
+        "a tombstone on the peer must arrive as a tombstone after a direct pull, \
+         not as an ordinary live row"
+    );
 }
 
 #[test]
