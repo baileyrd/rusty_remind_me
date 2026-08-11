@@ -2,6 +2,16 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — Chat imports, directory imports, and webhook pushes now stamp node_id/client (#266)
+
+### Fixed
+- **`import_content` — the shared writer behind `import_chat`, `import_directory`, and webhook `/ingest` push — never stamped `node_id`/`client`.** #258 fixed this for six write paths (`add_memory`, `auto_capture`, `decompose`, `promote`, `write_skeleton`, `apply_normalizations`) but missed a seventh. Every memory created by importing a file, a directory, or a webhook push got `node_id = NULL` and `client = 'unknown'` regardless of what was configured — reopening exactly the bug #258 was filed to close, in a path #258's own test suite never exercised.
+- Since `node_id` rides the sync outbox payload, the same downstream consequence #258 fixed elsewhere applies here too: every imported memory synced to a hub with a NULL origin, breaking per-node attribution there.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (test coverage / doc-invariant-drift sweep) — the audit specifically went looking for more instances of the pattern #258 had already found once (a doc comment claiming an invariant broader than what the code actually established), and found this one.
+
 ## 2026-08-11 — Fixed a data race between two `query_expansion` unit tests (#292)
 
 ### Fixed

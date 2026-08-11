@@ -7,6 +7,7 @@
 //! assertion for nothing. Two tests do go over TCP, to cover the parts a fake
 //! stream cannot: that a port is really bound, and that stopping really joins.
 
+use remind_me_core::sync::{CLIENT_ENV, NODE_ID_ENV};
 use remind_me_core::webhook::{
     self, constant_time_eq, validate_payload, Webhook, WebhookConfig, WebhookCounters,
     MAX_BODY_BYTES, MAX_HEAD_BYTES,
@@ -14,7 +15,7 @@ use remind_me_core::webhook::{
 use remind_me_core::Database;
 use rusqlite::Connection;
 use std::io::{Cursor, Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const SECRET: &str = "s3cret-token";
 
@@ -476,6 +477,40 @@ fn a_valid_push_becomes_memories() {
         content.contains("marsupial"),
         "the assistant message landed, got {content}"
     );
+}
+
+/// `REMIND_ME_NODE_ID`/`REMIND_ME_CLIENT` are process-global; no other test
+/// in this file touches them, so this is the only one that needs the guard.
+static PROVENANCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn a_pushed_memory_is_stamped_with_the_configured_node_and_client() {
+    // #266: `import_content` -- the shared writer behind `import_chat`,
+    // `import_directory`, and this webhook push -- never stamped `node_id`/
+    // `client` at all, reopening the bug #258 fixed for six other write
+    // paths. This is the webhook-push fixture #266 itself asked for.
+    let _guard = PROVENANCE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(NODE_ID_ENV, "webhook-test-node");
+    std::env::set_var(CLIENT_ENV, "webhook-test-client");
+
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let (status, body) = serve(&conn, &authed(&push_body("chat.json", CHAT)));
+    assert_eq!(status, 200, "{body}");
+
+    let (node_id, client): (Option<String>, String) = conn
+        .query_row("SELECT node_id, client FROM memories LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+
+    std::env::remove_var(NODE_ID_ENV);
+    std::env::remove_var(CLIENT_ENV);
+
+    assert_eq!(node_id.as_deref(), Some("webhook-test-node"));
+    assert_eq!(client, "webhook-test-client");
 }
 
 #[test]
