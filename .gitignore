@@ -12,3 +12,7 @@
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local-only debug scratch (not part of this repo's project)
+/.profile-check.ps1
+/rc/flatbuffers/
