@@ -16,3 +16,6 @@ Thumbs.db
 # Local-only debug scratch (not part of this repo's project)
 /.profile-check.ps1
 /rc/flatbuffers/
+
+# Claude Code agent worktree bookkeeping (not part of this repo's project)
+/.claude/worktrees/
