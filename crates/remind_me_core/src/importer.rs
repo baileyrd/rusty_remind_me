@@ -1030,6 +1030,14 @@ pub fn import_content(
     // string that no longer indexes the file.
     let spans_addressable = archived && raw.as_bytes() == raw_bytes;
 
+    // #266: every other write path that creates a `memories` row stamps
+    // these (#258); this one didn't, so a chat import, directory import, or
+    // webhook push always left `node_id` NULL and `client` at the schema
+    // default 'unknown' regardless of what was actually configured. Hoisted
+    // above the loop rather than called per chunk -- the identity cannot
+    // change mid-import.
+    let (node_id, client) = crate::sync::memory_provenance();
+
     let mut created = 0;
     for (chunk_index, (content, section)) in chunks.iter().enumerate() {
         let mut metadata = serde_json::json!({
@@ -1072,8 +1080,8 @@ pub fn import_content(
         conn.execute(
             "INSERT OR IGNORE INTO memories
                 (id, content, category, tags, source, metadata, created_at, updated_at,
-                 doc_id, chunk_index)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 doc_id, chunk_index, node_id, client)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 memory_id,
                 content,
@@ -1085,6 +1093,8 @@ pub fn import_content(
                 now,
                 import_id,
                 chunk_index as i64,
+                node_id,
+                client,
             ],
         )?;
         created += 1;

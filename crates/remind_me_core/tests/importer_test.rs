@@ -5,10 +5,12 @@ use remind_me_core::importer::{
     chunk_text, import_chat, import_directory, looks_like_chat_markdown, parse_document,
     split_markdown_sections, CHAT_SOURCE, DOCUMENT_CATEGORY, DOCUMENT_SOURCE,
 };
+use remind_me_core::sync::{CLIENT_ENV, NODE_ID_ENV};
 use remind_me_core::{
     BulkImportDirInput, ChatImportInput, Database, ImportKind, ImportOutcome, NormalizeBatchInput,
 };
 use rusqlite::Connection;
+use std::sync::Mutex;
 
 /// A scratch directory inside the default import root (the home directory).
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -124,6 +126,44 @@ fn a_json_chat_export_imports_assistant_turns_by_default() {
     assert_eq!(column(&conn, "source"), CHAT_SOURCE);
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `REMIND_ME_NODE_ID`/`REMIND_ME_CLIENT` are process-global; no other test
+/// in this file touches them, so this is the only one that needs the guard.
+static PROVENANCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn a_chat_import_is_stamped_with_the_configured_node_and_client() {
+    // #266: `import_content` -- the shared writer behind `import_chat`,
+    // `import_directory`, and a webhook push -- never stamped `node_id`/
+    // `client` at all, reopening the bug #258 fixed for six other write
+    // paths. This is the chat-import fixture #266 itself asked for.
+    let _guard = PROVENANCE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(NODE_ID_ENV, "import-test-node");
+    std::env::set_var(CLIENT_ENV, "import-test-client");
+
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let dir = scratch("provenance");
+    let path = write(&dir, "chat.json", CHAT_JSON);
+
+    let outcome = import(&conn, &path, |_| {});
+    assert!(matches!(outcome, ImportOutcome::Imported { .. }));
+
+    let (node_id, client): (Option<String>, String) = conn
+        .query_row("SELECT node_id, client FROM memories LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+
+    std::env::remove_var(NODE_ID_ENV);
+    std::env::remove_var(CLIENT_ENV);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert_eq!(node_id.as_deref(), Some("import-test-node"));
+    assert_eq!(client, "import-test-client");
 }
 
 #[test]
