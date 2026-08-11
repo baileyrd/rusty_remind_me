@@ -219,3 +219,43 @@ jobs:
       # reference leaking outside the feature gate would only show up here.
       - name: cargo test -p remind_me_hub --no-default-features
         run: cargo test -p remind_me_hub --no-default-features --locked
+
+  # `remind_me_core` has real Win32 FFI (`sidecars.rs`'s job-object teardown,
+  # `export.rs`'s `\\?\`-prefix stripping — see `Cargo.toml`'s
+  # `[target.'cfg(windows)'.dependencies]`), which every job above compiles
+  # exactly zero lines of: `cfg(windows)` is false on every `ubuntu-latest`
+  # runner in this file. A mistake in that code — even one as basic as a
+  # syntax error — could sit unnoticed indefinitely.
+  #
+  # Scoped to the default build rather than mirroring `check`'s whole feature
+  # matrix: the platform-specific risk lives in the unconditional `windows-sys`
+  # dependency, not in any of the optional features, and several of those
+  # (`stack-dumps`'s `rstack-self` ptrace backend, the `libunwind`/`liblzma`
+  # apt packages) are Linux-only by design and would not even build here.
+  windows:
+    name: build / test / clippy (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
