@@ -223,12 +223,37 @@ pub struct StaleCandidate {
 /// paths checked, matching [`crate::promotion::promotion_candidates`]'s
 /// shape: a caller working through a long list still sees an accurate first
 /// page rather than a page truncated mid-scan.
+///
+/// # Two checks this reads through that write-time anchoring already applies
+///
+/// `metadata` is free-form JSON, settable directly by any caller of
+/// `remind_me_add`/`remind_me_update` (or carried in unfiltered over sync
+/// from a peer), which bypasses [`detect_code_refs`]'s write-time checks
+/// entirely. Writing `metadata: {"code_refs": [{"path": "/etc/shadow", ...}]}`
+/// by hand and then calling this would otherwise `stat` whatever path was
+/// asked for — an unauthenticated existence/mtime oracle over the whole
+/// filesystem, exactly what [`crate::import_paths`]'s module doc warns a
+/// containment check exists to prevent. So this re-applies both things
+/// [`detect_code_refs`] already enforces at write time, rather than trusting
+/// that every row reached this table by going through it:
+///
+/// - **Containment.** A recorded path outside [`configured_code_roots`] is
+///   skipped before ever calling `std::fs::metadata` on it — not reported as
+///   stale, not reported as current, simply not trusted. Checked before any
+///   filesystem access, matching `import_paths`'s own "containment before
+///   existence" ordering.
+/// - **Sensitivity.** `sensitive = 0` in the query, matching every other
+///   ambient read surface ([`crate::digest`], the persona bootstrap) — no
+///   `include_sensitive` override, because this is assembled to be read
+///   rather than asked for, so there is no per-call intent to opt back in
+///   against.
 pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<Vec<StaleCandidate>> {
     let mut stmt = conn.prepare(
         "SELECT id, content, metadata
            FROM memories
           WHERE deleted_at IS NULL
             AND superseded_by IS NULL
+            AND sensitive = 0
             AND json_extract(metadata, '$.code_refs') IS NOT NULL",
     )?;
 
@@ -236,6 +261,7 @@ pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<Vec<StaleC
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<SqlResult<_>>()?;
 
+    let roots = configured_code_roots();
     let mut out = Vec::new();
     for (id, content, metadata_json) in rows {
         if out.len() >= limit {
@@ -254,6 +280,9 @@ pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<Vec<StaleC
         let mut stale_refs = Vec::new();
         for code_ref in recorded {
             let path = PathBuf::from(&code_ref.path);
+            if !is_contained(&path, &roots) {
+                continue;
+            }
             let reason = match std::fs::metadata(&path) {
                 Ok(meta) if meta.is_file() => match signature_of(&meta) {
                     Some((mtime, size)) if mtime == code_ref.mtime && size == code_ref.size => None,

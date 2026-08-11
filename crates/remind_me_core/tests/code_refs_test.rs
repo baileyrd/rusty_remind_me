@@ -362,3 +362,79 @@ fn limit_bounds_candidates_not_paths_checked() {
     let capped = stale_candidates(&conn, 2).unwrap();
     assert_eq!(capped.len(), 2);
 }
+
+#[test]
+fn a_hand_written_code_ref_outside_the_roots_is_never_stat_against() {
+    // #267: `metadata` is free-form JSON, settable directly through
+    // remind_me_update (or carried in unfiltered over sync from a peer),
+    // bypassing detect_code_refs's write-time containment check entirely.
+    // Before this fix, stale_candidates trusted whatever path was recorded
+    // there and stat'd it -- an unauthenticated existence/mtime oracle over
+    // the whole filesystem. This memory never went through detect_code_refs
+    // at all: its code_refs entry is injected by hand, pointing well outside
+    // the configured root, at a real file the fixture never wrote.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("oracle_root");
+    let outside = Fixture::new("oracle_outside");
+    fixture.set_env();
+    let _env = EnvGuard;
+
+    let db = db("oracle");
+    let conn = db.conn();
+    let memory_id = add(&conn, "not anchored through detect_code_refs at all");
+    let injected = serde_json::json!({
+        "code_refs": [{
+            "path": outside.file.display().to_string(),
+            // Deliberately wrong, so this would read as "modified" if it
+            // were ever stat'd -- the assertion below is that it never is.
+            "mtime": 0,
+            "size": 0,
+        }]
+    });
+    conn.execute(
+        "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+        rusqlite::params![injected.to_string(), memory_id],
+    )
+    .unwrap();
+
+    let candidates = stale_candidates(&conn, 20).unwrap();
+    assert!(
+        candidates.is_empty(),
+        "a path outside the configured roots must never be stat'd, \
+         reported stale, or reported current -- just skipped: {candidates:?}"
+    );
+}
+
+#[test]
+fn a_sensitive_memory_never_appears_in_stale_candidates() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("sensitive");
+    fixture.set_env();
+    let _env = EnvGuard;
+
+    let db = db("sensitive");
+    let conn = db.conn();
+    queries::add_memory(
+        &conn,
+        MemoryAddInput {
+            content: format!("sensitive: see {}", fixture.file.display()),
+            category: "fact".to_string(),
+            tags: Vec::new(),
+            source: "manual".to_string(),
+            metadata: serde_json::json!({}),
+            subject: None,
+            predicate: None,
+            object: None,
+            entities: Vec::new(),
+            sensitive: true,
+        },
+    )
+    .unwrap();
+    std::fs::remove_file(&fixture.file).unwrap();
+
+    let candidates = stale_candidates(&conn, 20).unwrap();
+    assert!(
+        candidates.is_empty(),
+        "a sensitive memory's stale anchor must not surface through this ambient read: {candidates:?}"
+    );
+}

@@ -2,6 +2,20 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — `remind_me_stale_candidates` re-applies write-time containment and sensitivity on read (#267)
+
+### Fixed
+- **A hand-written `code_refs` entry could turn `remind_me_stale_candidates` into a filesystem existence/mtime oracle.** `metadata` is free-form JSON, settable directly through `remind_me_add`/`remind_me_update` (or carried in unfiltered over sync from a peer), which bypasses `detect_code_refs`'s write-time containment check entirely. Before this fix, `stale_candidates` trusted whatever path was recorded in `metadata.code_refs` and `stat`'d it directly — a caller could write `metadata: {"code_refs": [{"path": "/etc/shadow", ...}]}` by hand and learn whether that path exists and when it last changed. `stale_candidates` now re-applies `import_paths::is_contained` before ever touching the filesystem, matching the "containment before existence" ordering `import_paths.rs`'s own module doc requires.
+- **`stale_candidates` never excluded sensitive memories.** Every other ambient read surface (the digest, the persona bootstrap) excludes `sensitive = 1` with no override; this one didn't, so a sensitive memory's content snippet could surface through the tool regardless of the flag.
+
+### Behaviour
+- A recorded path outside the configured roots is silently skipped — not reported stale, not reported current, simply untrusted.
+- No `include_sensitive` override, matching `digest.rs`'s reasoning: this is an ambient surface assembled to be read, not asked for, so there is no per-call intent to opt back in against.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (security sweep), verified by direct source inspection. Both gaps were in the module #260 shipped this session.
+
 ## 2026-08-11 — Sync no longer drops `sensitive`, `remind_at`, or (on the direct peer path) `deleted_at` (#265)
 
 ### Fixed
