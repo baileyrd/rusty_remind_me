@@ -150,6 +150,41 @@ fn a_pushed_memory_comes_back_from_pull() {
 }
 
 #[test]
+fn a_pushed_memorys_sensitive_flag_comes_back_from_pull() {
+    // #265: the hub's schema, wire columns and internal record type all
+    // omitted `sensitive` entirely, so it was silently dropped on push and
+    // every pulled memory defaulted to not-sensitive regardless of what was
+    // pushed. This is the store-level round trip, closest to the bug itself
+    // -- a_sensitive_memory_stays_sensitive_after_a_real_hub_round_trip in
+    // remind_me_core covers the same fix one layer up, over a real socket.
+    let store = store();
+    let mut record = memory("m1", "2026-08-05T10:00:00Z");
+    record["sensitive"] = json!(true);
+    let result = push(&store, "node-a", vec![record]);
+    assert_eq!(result["accepted"], 1);
+
+    let (status, body) = get(&store, "/sync/pull", "");
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["records"][0]["sensitive"], true,
+        "pulled record: {body}"
+    );
+}
+
+#[test]
+fn a_pushed_memory_with_no_sensitive_field_pulls_back_as_not_sensitive() {
+    // The absent-key case, not just the true case -- an older client that
+    // never sends `sensitive` at all must not be treated as an error, and
+    // must not silently become `true` either.
+    let store = store();
+    let result = push(&store, "node-a", vec![memory("m1", "2026-08-05T10:00:00Z")]);
+    assert_eq!(result["accepted"], 1);
+
+    let (_, body) = get(&store, "/sync/pull", "");
+    assert_eq!(body["records"][0]["sensitive"], false, "{body}");
+}
+
+#[test]
 fn an_older_record_loses_last_write_wins_without_being_a_failure() {
     // The three-way distinction that makes the push response meaningful: an
     // LWW loss is settled business, so it is neither accepted nor failed, and

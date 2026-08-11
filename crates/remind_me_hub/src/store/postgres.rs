@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS memories (
     superseded_by     TEXT,
     deleted_at        TEXT COLLATE "C",
     origin_node       TEXT,
-    hub_seq           BIGINT
+    hub_seq           BIGINT,
+    sensitive         BOOLEAN NOT NULL DEFAULT false,
+    remind_at         TEXT COLLATE "C"
 );
 
 CREATE SEQUENCE IF NOT EXISTS memories_hub_seq;
@@ -133,7 +135,7 @@ const TS_CONVERT: &str = "regexp_replace(to_char({col} AT TIME ZONE 'UTC', \
      'YYYY-MM-DD\"T\"HH24:MI:SS.US'), '\\.000000$', '') || '+00:00'";
 
 /// Columns added since the legacy hub schema, with client-matching defaults.
-const NEW_MEMORY_COLUMNS: [(&str, &str); 15] = [
+const NEW_MEMORY_COLUMNS: [(&str, &str); 17] = [
     ("accessed_at", "TEXT COLLATE \"C\""),
     ("access_count", "INTEGER NOT NULL DEFAULT 0"),
     ("decay_rate", "DOUBLE PRECISION NOT NULL DEFAULT 0.1"),
@@ -149,13 +151,15 @@ const NEW_MEMORY_COLUMNS: [(&str, &str); 15] = [
     ("deleted_at", "TEXT COLLATE \"C\""),
     ("origin_node", "TEXT"),
     ("hub_seq", "BIGINT"),
+    ("sensitive", "BOOLEAN NOT NULL DEFAULT false"),
+    ("remind_at", "TEXT COLLATE \"C\""),
 ];
 
 const MEMORY_WIRE_COLUMNS: &str = r#"id, content, category, tags, source, metadata,
     created_at, updated_at, capture_id, node_id, client, accessed_at,
     access_count, decay_rate, vitality, base_weight, status, memory_type,
     source_capture_id, subject, predicate, "object", superseded_by, deleted_at,
-    hub_seq"#;
+    hub_seq, sensitive, remind_at"#;
 
 pub struct PostgresStore {
     url: String,
@@ -224,6 +228,8 @@ fn memory_row_to_json(row: &postgres::Row) -> Value {
         "superseded_by": opt_string(row, 22),
         "deleted_at": opt_string(row, 23),
         "hub_seq": row.get::<_, Option<i64>>(24),
+        "sensitive": row.get::<_, bool>(25),
+        "remind_at": opt_string(row, 26),
     })
 }
 
@@ -345,6 +351,8 @@ impl HubStore for PostgresStore {
                             &m.superseded_by,
                             &m.deleted_at,
                             &origin,
+                            &m.sensitive,
+                            &m.remind_at,
                         ],
                     )
                     .map_err(err)?;
@@ -743,9 +751,9 @@ INSERT INTO memories
      capture_id, node_id, client, accessed_at, access_count, decay_rate,
      vitality, base_weight, status, memory_type, source_capture_id,
      subject, predicate, "object", superseded_by, deleted_at, origin_node,
-     hub_seq)
+     hub_seq, sensitive, remind_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-        $20,$21,$22,$23,$24,$25, nextval('memories_hub_seq'))
+        $20,$21,$22,$23,$24,$25, nextval('memories_hub_seq'), $26, $27)
 ON CONFLICT (id) DO UPDATE SET
     content           = EXCLUDED.content,
     category          = EXCLUDED.category,
@@ -770,7 +778,9 @@ ON CONFLICT (id) DO UPDATE SET
     superseded_by     = EXCLUDED.superseded_by,
     deleted_at        = EXCLUDED.deleted_at,
     origin_node       = EXCLUDED.origin_node,
-    hub_seq           = nextval('memories_hub_seq')
+    hub_seq           = nextval('memories_hub_seq'),
+    sensitive         = EXCLUDED.sensitive,
+    remind_at         = EXCLUDED.remind_at
 WHERE EXCLUDED.updated_at > memories.updated_at
 "#;
 

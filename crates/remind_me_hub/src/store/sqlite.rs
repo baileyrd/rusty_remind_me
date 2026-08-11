@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS memories (
     superseded_by     TEXT,
     deleted_at        TEXT,
     origin_node       TEXT,
-    hub_seq           INTEGER
+    hub_seq           INTEGER,
+    sensitive         INTEGER NOT NULL DEFAULT 0,
+    remind_at         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -109,7 +111,7 @@ const MEMORY_WIRE_COLUMNS: &str = r#"id, content, category, tags, source, metada
     created_at, updated_at, capture_id, node_id, client, accessed_at,
     access_count, decay_rate, vitality, base_weight, status, memory_type,
     source_capture_id, subject, predicate, "object", superseded_by, deleted_at,
-    hub_seq"#;
+    hub_seq, sensitive, remind_at"#;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -208,6 +210,8 @@ fn memory_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
         "superseded_by": row.get::<_, Option<String>>(22)?,
         "deleted_at": row.get::<_, Option<String>>(23)?,
         "hub_seq": row.get::<_, Option<i64>>(24)?,
+        "sensitive": row.get::<_, bool>(25)?,
+        "remind_at": row.get::<_, Option<String>>(26)?,
     }))
 }
 
@@ -232,6 +236,33 @@ impl HubStore for SqliteStore {
     fn migrate(&self) -> StoreResult<()> {
         self.with_conn(|conn| {
             conn.execute_batch(SCHEMA).map_err(err)?;
+            // `CREATE TABLE IF NOT EXISTS` is a no-op on a database that
+            // already has a `memories` table, so a column added to `SCHEMA`
+            // after a hub has been deployed needs its own retrofit -- this is
+            // that retrofit for `sensitive`/`remind_at` (#265), matching how
+            // `origin_node` needed the same treatment historically.
+            //
+            // Unlike Postgres, SQLite's `ALTER TABLE ADD COLUMN` has no
+            // `IF NOT EXISTS` clause -- confirmed the hard way, this used to
+            // read `ADD COLUMN IF NOT EXISTS` and failed with a syntax error
+            // on every existing database. `PRAGMA table_info` is the
+            // idempotent check instead.
+            let existing_columns: std::collections::HashSet<String> = conn
+                .prepare("SELECT name FROM pragma_table_info('memories')")
+                .map_err(err)?
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(err)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(err)?;
+            for (name, decl) in [
+                ("sensitive", "INTEGER NOT NULL DEFAULT 0"),
+                ("remind_at", "TEXT"),
+            ] {
+                if !existing_columns.contains(name) {
+                    conn.execute_batch(&format!("ALTER TABLE memories ADD COLUMN {name} {decl}"))
+                        .map_err(err)?;
+                }
+            }
             // Backfill hub_seq for rows that predate it, in (updated_at, id)
             // order so a first migration does not itself reorder history.
             let missing: i64 = scalar_count(
@@ -298,9 +329,10 @@ impl HubStore for SqliteStore {
                                  accessed_at, access_count, decay_rate, vitality,
                                  base_weight, status, memory_type, source_capture_id,
                                  subject, predicate, "object", superseded_by,
-                                 deleted_at, origin_node, hub_seq)
+                                 deleted_at, origin_node, hub_seq, sensitive, remind_at)
                                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,
-                                       ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
+                                       ?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,
+                                       ?27,?28)
                                ON CONFLICT(id) DO UPDATE SET
                                  content=excluded.content,
                                  category=excluded.category,
@@ -325,7 +357,9 @@ impl HubStore for SqliteStore {
                                  superseded_by=excluded.superseded_by,
                                  deleted_at=excluded.deleted_at,
                                  origin_node=excluded.origin_node,
-                                 hub_seq=excluded.hub_seq
+                                 hub_seq=excluded.hub_seq,
+                                 sensitive=excluded.sensitive,
+                                 remind_at=excluded.remind_at
                                WHERE excluded.updated_at > memories.updated_at"#,
                             params![
                                 m.id,
@@ -354,6 +388,8 @@ impl HubStore for SqliteStore {
                                 m.deleted_at,
                                 origin,
                                 seq,
+                                m.sensitive,
+                                m.remind_at,
                             ],
                         )
                         .map_err(err)?;

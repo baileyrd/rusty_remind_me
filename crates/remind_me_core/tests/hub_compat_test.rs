@@ -95,6 +95,58 @@ fn a_memory_pushed_to_a_real_hub_is_pulled_back_by_a_second_node() {
 }
 
 #[test]
+fn a_sensitive_memory_stays_sensitive_after_a_real_hub_round_trip() {
+    // #265: the hub's schema, wire columns and MemoryRecord all omitted
+    // `sensitive` entirely, so this round trip silently unhid a memory the
+    // author had marked sensitive -- exactly the failure `sensitive`'s own
+    // doc comment (models.rs) exists to prevent. Push/pull only, matching
+    // this file's own rule: never reach into `MockHub::store` directly.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    enable_sync("node-a");
+    let hub = MockHub::start(SECRET);
+
+    let node_a = Database::open_in_memory().unwrap();
+    let node_a_conn = node_a.conn();
+    queries::add_memory(
+        &node_a_conn,
+        MemoryAddInput {
+            sensitive: true,
+            content: "sensitive across a real hub".to_string(),
+            category: "general".into(),
+            tags: vec![],
+            source: "manual".into(),
+            metadata: serde_json::json!({}),
+            subject: None,
+            predicate: None,
+            object: None,
+            entities: vec![],
+        },
+    )
+    .unwrap();
+
+    push_outbox(&node_a_conn, &hub.url, SECRET, "node-a", "hub").unwrap();
+
+    let node_b = Database::open_in_memory().unwrap();
+    let node_b_conn = node_b.conn();
+    let pulled = pull_remote(&node_b_conn, &hub.url, SECRET, "node-b", "hub").unwrap();
+    assert_eq!(pulled.applied, 1);
+
+    let sensitive: bool = node_b_conn
+        .query_row(
+            "SELECT sensitive FROM memories WHERE content = 'sensitive across a real hub'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        sensitive,
+        "a memory marked sensitive on node A must still be sensitive on node B \
+         after a real push/pull round trip through the hub"
+    );
+    disable_sync();
+}
+
+#[test]
 fn a_second_push_to_a_real_hub_sends_nothing_already_acknowledged() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     enable_sync("node-a");

@@ -2,6 +2,21 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — Sync no longer drops `sensitive`, `remind_at`, or (on the direct peer path) `deleted_at` (#265)
+
+### Fixed
+- **The hub silently stripped `sensitive` from every memory it stored or served.** Neither SQLite nor Postgres backend had a `sensitive` column, and the hub's internal `MemoryRecord` had no field for it. A memory marked sensitive, pushed to a hub and pulled by a second node, arrived on that node as **not** sensitive — permanently, since nothing on the receiving node ever knew otherwise. Both backends now carry `sensitive` and `remind_at` end to end: schema, wire columns, row parsing, and the push upsert. Existing hub deployments are retrofitted via a `PRAGMA table_info` check (SQLite has no `ADD COLUMN IF NOT EXISTS`) and the existing `NEW_MEMORY_COLUMNS` mechanism (Postgres does).
+- **Direct node-to-node sync (no hub) had the identical bug, independently** — `sync/server.rs`'s own `SYNC_RECORD_COLUMNS`/`parse_sync_record_row` also omitted `sensitive` and `remind_at`. Fixed the same way.
+- **Also found while fixing the above: direct peer sync never propagated tombstones at all.** `deleted_at` was missing from the same column list, so a memory deleted on one node (with sync configured, so it tombstones rather than hard-deleting) pulled down on a peer as an ordinary live row — the deletion never propagated over a direct pull. Hub-mediated sync was unaffected; this was specific to the direct peer-server path.
+
+### Behaviour
+- `sensitive` accepts a JSON boolean or a SQLite-style `0`/`1`, matching how the sending side already serializes it; an absent or malformed value reads as `false` rather than failing the record.
+- Nothing is backfilled. A memory already synced with the wrong `sensitive` value before this fix stays as it landed; the fix only changes what happens on the next sync.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (security/containment sweep), verified by direct source inspection before fixing. The `deleted_at` gap was found while implementing the fix for the audit's reported findings, not in the audit itself.
+
 ## 2026-08-11 — Flag memories whose referenced code has changed (#260)
 
 ### Corrected
