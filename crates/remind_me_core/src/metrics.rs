@@ -71,7 +71,7 @@ pub fn record_tool_call(tool: &str, duration_seconds: f64) {
     if !metrics_enabled() {
         return;
     }
-    let mut counters = counters().lock().unwrap();
+    let mut counters = counters().lock().unwrap_or_else(|e| e.into_inner());
     *counters.tool_calls.entry(tool.to_string()).or_insert(0) += 1;
     *counters.tool_seconds.entry(tool.to_string()).or_insert(0.0) += duration_seconds;
 }
@@ -81,7 +81,7 @@ pub fn record_search_tier(tier: &str, results: u64) {
     if !metrics_enabled() {
         return;
     }
-    let mut counters = counters().lock().unwrap();
+    let mut counters = counters().lock().unwrap_or_else(|e| e.into_inner());
     *counters.search_tiers.entry(tier.to_string()).or_insert(0) += results;
 }
 
@@ -90,13 +90,16 @@ pub fn record_rate_limit_rejection() {
     if !metrics_enabled() {
         return;
     }
-    counters().lock().unwrap().rate_limit_rejections += 1;
+    counters()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .rate_limit_rejections += 1;
 }
 
 /// Drop all counter state. For tests — a process-wide counter otherwise
 /// carries one test's calls into the next one's assertions.
 pub fn reset() {
-    *counters().lock().unwrap() = Counters::default();
+    *counters().lock().unwrap_or_else(|e| e.into_inner()) = Counters::default();
 }
 
 /// A value computed fresh for one scrape rather than tracked as a counter.
@@ -162,7 +165,7 @@ fn label(key: &str, value: &str) -> Vec<(String, String)> {
 ///
 /// Sorted within each family, so the output is diff-friendly and testable.
 pub fn render_prometheus_text(gauges: &[GaugeSpec]) -> String {
-    let counters = counters().lock().unwrap();
+    let counters = counters().lock().unwrap_or_else(|e| e.into_inner());
     // Build info first. The Prometheus idiom for metadata is a constant-1
     // gauge carrying it in labels rather than a metric per fact: a panel then
     // joins on it, which is what makes "latency changed" and "we upgraded"

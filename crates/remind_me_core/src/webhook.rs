@@ -205,15 +205,15 @@ pub struct WebhookCounters(Mutex<Counters>);
 
 impl WebhookCounters {
     fn record_ingested(&self) {
-        self.0.lock().unwrap().ingested += 1;
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).ingested += 1;
     }
 
     fn record_skipped(&self) {
-        self.0.lock().unwrap().skipped += 1;
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).skipped += 1;
     }
 
     fn record_error(&self, reason: &str) {
-        let mut counters = self.0.lock().unwrap();
+        let mut counters = self.0.lock().unwrap_or_else(|e| e.into_inner());
         counters.errored += 1;
         if counters.errors.len() == ERROR_HISTORY {
             counters.errors.pop_front();
@@ -223,7 +223,7 @@ impl WebhookCounters {
 
     /// `(ingested, skipped, errored, recent errors)`.
     pub fn snapshot(&self) -> (usize, usize, usize, Vec<String>) {
-        let counters = self.0.lock().unwrap();
+        let counters = self.0.lock().unwrap_or_else(|e| e.into_inner());
         (
             counters.ingested,
             counters.skipped,
