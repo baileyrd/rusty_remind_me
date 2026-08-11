@@ -6,6 +6,7 @@ pub mod audio_import;
 pub mod backup;
 pub mod capture;
 pub mod cloud_backup;
+pub mod code_refs;
 pub mod consolidation;
 pub mod contradictions;
 pub mod db;

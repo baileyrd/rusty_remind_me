@@ -95,10 +95,14 @@ pub fn parse_memory_row(row: &Row) -> Result<Memory> {
     })
 }
 
-pub fn add_memory(conn: &Connection, input: MemoryAddInput) -> Result<Memory> {
+pub fn add_memory(conn: &Connection, mut input: MemoryAddInput) -> Result<Memory> {
     let now = Utc::now();
     let now_iso = now.to_rfc3339();
     let id = format!("mem_{}", uuid::Uuid::new_v4().simple());
+
+    // #260: a no-op unless REMIND_ME_CODE_ROOTS is configured.
+    let code_refs = crate::code_refs::detect_code_refs(&input.content);
+    crate::code_refs::merge_code_refs(&mut input.metadata, &code_refs);
 
     let tags_json = serde_json::to_string(&input.tags).unwrap_or_else(|_| "[]".to_string());
     let metadata_json = serde_json::to_string(&input.metadata).unwrap_or_else(|_| "{}".to_string());

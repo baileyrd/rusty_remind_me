@@ -2,6 +2,62 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — Flag memories whose referenced code has changed (#260)
+
+### Corrected
+- #260 proposed detecting staleness by reusing `watcher.rs`'s scan: anchor a
+  memory to a path inside a watched directory, and let the watcher's existing
+  per-file check notice a change. That cannot work for the issue's own
+  example. `watcher::collect` only enumerates files whose extension is in
+  `import_paths::SUPPORTED_SUFFIXES` — documents and media, never `.rs` or any
+  other source file. A memory anchored to a watch directory would simply
+  never be rescanned.
+
+### Added
+- **`code_refs` module.** Detecting staleness needs no directory enumeration
+  at all — only a `stat` on an already-known path. `remind_me_stale_candidates`
+  checks each anchored path on demand, when asked, rather than through a
+  second background loop next to the watcher's.
+- **`REMIND_ME_CODE_ROOTS`** gates the whole feature and names the boundary
+  anchoring is allowed inside — deliberately its own variable rather than
+  reusing `REMIND_ME_IMPORT_ROOTS` or `REMIND_ME_WATCH_DIRS`, both of which
+  name *document* boundaries. Unset or empty means off: no filesystem access
+  happens at all, not merely no results.
+- `remind_me_add` and `remind_me_decompose` now anchor a memory to any
+  path-shaped token in its content that resolves to a real file inside a
+  configured root, recording `(mtime, size)` in `metadata.code_refs`.
+- **`remind_me_stale_candidates`** lists memories where an anchored path has
+  since changed or disappeared, distinguishing the two.
+
+### Behaviour
+- **Flags, never supersedes.** A changed file does not prove a memory's claim
+  false — the statement may still hold after a refactor. `stale_candidates` is
+  read-only: the memory it reports on is not superseded, not decayed, and
+  stays exactly as findable as before.
+- **Containment before existence**, matching `import_paths`'s own reasoning:
+  a real file outside the configured roots is rejected before its existence
+  is even checked.
+- **A cheap filter, not a parser.** Only whitespace-delimited tokens
+  containing `.` or `/` are ever resolved or stat'd, so ordinary prose costs
+  nothing beyond a string scan. A small set of wrapping punctuation
+  (`` ` ``, quotes, parens, angle brackets) is stripped from token ends; a
+  trailing `.` or `,` is deliberately left alone; the existence check is the
+  real filter and a token that fails to resolve is dropped rather than
+  guessed at.
+
+### Not included
+- **The watcher is untouched and unrelated.** This does not run on a schedule,
+  does not integrate with `Watcher::scan_once`, and does not affect import
+  behaviour in any way.
+- **Only two of the write paths anchor** — `add_memory` and `decompose`,
+  matching the issue's own examples ("a decision recorded via
+  `remind_me_add`", "a fact from `remind_me_decompose`"). Captures, promoted
+  statements, skeletons and normalizations are not anchored; extending
+  coverage is a separate, smaller change once this shape is proven.
+- **Symbol-level anchoring** (a function name rather than a file) is the
+  expensive tier the issue itself flagged as a follow-up, not part of this
+  cut.
+
 ## 2026-08-10 — Record who wrote each memory, on every write path (#258)
 
 ### Fixed
