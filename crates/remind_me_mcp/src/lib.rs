@@ -3049,7 +3049,7 @@ impl McpServer {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Some(resp) = self.handle_request(&line) {
+            if let Some(resp) = dispatch_line_catching_panics(&line, |l| self.handle_request(l)) {
                 let resp_str = serde_json::to_string(&resp)?;
                 writeln!(stdout, "{}", resp_str)?;
                 stdout.flush()?;
@@ -3057,6 +3057,52 @@ impl McpServer {
         }
         Ok(())
     }
+}
+
+/// Runs `handler` against one line of input, converting a panic inside it
+/// into the same shape of JSON-RPC error every other failure path in
+/// `handle_request` returns, instead of letting it unwind out of the stdio
+/// loop and take every other in-flight and future request down with it. A
+/// panic inside a single tool call (an unwrap on unexpected input, an
+/// out-of-bounds index) used to do exactly that, since `handle_request` ran
+/// on the loop's own unguarded call stack. `db.conn()`'s lock is a
+/// `parking_lot::Mutex`, which does not poison on an unwind through a held
+/// guard, so a caught panic mid-call leaves the database perfectly usable
+/// for the next request.
+///
+/// Factored out from [`McpServer::run_stdio_loop`] so a test can supply a
+/// deliberately-panicking `handler` and observe the wrapping behavior
+/// directly, without needing a real bug in `handle_request` to trigger one.
+fn dispatch_line_catching_panics(
+    line: &str,
+    handler: impl FnOnce(&str) -> Option<Value>,
+) -> Option<Value> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(line))) {
+        Ok(resp) => resp,
+        Err(_) => Some(panicked_response(line)),
+    }
+}
+
+/// The JSON-RPC error reply for a request whose handler panicked.
+///
+/// Echoes back whatever `id` the request carried (re-parsed independently
+/// of `handle_request`, since that call is the one that just panicked and
+/// its own parse of `id` never returned) so the client can still match this
+/// error to the call it made, the same as every other error reply in
+/// `handle_request` does.
+fn panicked_response(request_json: &str) -> Value {
+    let req_id = serde_json::from_str::<Value>(request_json)
+        .ok()
+        .and_then(|v| v.get("id").cloned())
+        .unwrap_or(json!(1));
+    json!({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {
+            "code": -32603,
+            "message": "internal error: request handler panicked"
+        }
+    })
 }
 
 #[cfg(test)]
@@ -3070,6 +3116,72 @@ mod tests {
     /// default must not race one that configures a backend. Same convention
     /// as `remind_me_core`'s own `sync_test.rs`/`status_test.rs` `ENV_LOCK`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_panicking_handler_produces_an_internal_error_response_instead_of_unwinding() {
+        let resp = dispatch_line_catching_panics(
+            r#"{"jsonrpc":"2.0","id":42,"method":"whatever"}"#,
+            |_line| panic!("simulated handler panic"),
+        )
+        .unwrap();
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 42);
+        assert_eq!(resp["error"]["code"], -32603);
+    }
+
+    #[test]
+    fn a_panicking_handler_on_unparseable_input_gets_the_fallback_id() {
+        let resp =
+            dispatch_line_catching_panics("not even json", |_line| panic!("simulated panic"))
+                .unwrap();
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["error"]["code"], -32603);
+    }
+
+    #[test]
+    fn a_non_panicking_handler_passes_its_response_through_unchanged() {
+        let resp = dispatch_line_catching_panics(r#"{"id":7}"#, |_line| {
+            Some(json!({ "jsonrpc": "2.0", "id": 7, "result": {} }))
+        });
+        assert_eq!(
+            resp,
+            Some(json!({ "jsonrpc": "2.0", "id": 7, "result": {} }))
+        );
+    }
+
+    #[test]
+    fn a_non_panicking_handler_that_returns_none_passes_none_through() {
+        // Matches notifications, which `handle_request` also answers with
+        // `None` -- the stdio loop must not synthesize a response for them.
+        let resp =
+            dispatch_line_catching_panics(r#"{"method":"notifications/initialized"}"#, |_line| {
+                None
+            });
+        assert_eq!(resp, None);
+    }
+
+    #[test]
+    fn a_caught_panic_while_holding_the_db_lock_still_leaves_it_usable() {
+        // What makes catching the panic here safe rather than merely quiet:
+        // unwinding through a held `db.conn()` guard runs its destructor the
+        // same as any other scope exit, and `parking_lot::Mutex` (unlike
+        // `std::sync::Mutex`) never poisons on that unwind -- so the lock is
+        // free again by the time `catch_unwind` returns. A synthetic panic
+        // stands in for whatever future bug in `handle_request` would
+        // trigger this for real, since no request panics through real
+        // dispatch today.
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let resp = dispatch_line_catching_panics(r#"{"id":1}"#, |_line| {
+            let _guard = server.db.conn();
+            panic!("simulated panic while a connection guard is live")
+        });
+        assert_eq!(resp.unwrap()["error"]["code"], -32603);
+
+        let ping = json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" });
+        let resp = server.handle_request(&ping.to_string()).unwrap();
+        assert_eq!(resp["result"], json!({}));
+    }
 
     #[test]
     fn test_mcp_initialize_dynamic_version() {

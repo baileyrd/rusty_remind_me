@@ -2,6 +2,16 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — A panic in one MCP tool call no longer takes down the whole stdio loop (#269)
+
+### Fixed
+- **`run_stdio_loop` ran `handle_request` on its own unguarded call stack**, so a panic inside a single tool call (an unwrap on unexpected input, an out-of-bounds index) unwound straight out of the loop and ended the whole server process — every other in-flight and future request on that connection along with it. The loop now runs each line's dispatch through `catch_unwind`, converting a panic into an ordinary JSON-RPC `-32603` internal-error response (echoing the request's `id` when parseable) instead of exiting.
+- `db.conn()`'s lock is a `parking_lot::Mutex`, which — unlike `std::sync::Mutex` — does not poison when unwound through a held guard, so a caught panic mid-call leaves the database fully usable for the very next request with no extra handling needed.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (panic/crash-isolation sweep), verified by direct source inspection.
+
 ## 2026-08-11 — `stale_candidates`'s `limit` is now clamped, and its doc comment stopped overclaiming (#273)
 
 ### Fixed
