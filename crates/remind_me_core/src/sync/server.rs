@@ -748,15 +748,27 @@ impl PeerServer {
         let handle = std::thread::Builder::new()
             .name("sync-peer-server".to_string())
             .spawn(move || {
+                // A connection of its own, not `db.conn()`'s shared `Mutex`:
+                // `serve_once` can block for up to `IO_TIMEOUT` reading a
+                // slow or hostile peer's request, and holding the
+                // process-wide mutex for that span used to block every other
+                // MCP tool call -- reads and writes alike -- until that peer
+                // either finished or timed out. Mirrors `SyncWorker`'s own
+                // fix for the identical shape of bug on the outbound side:
+                // opened once and reused across accepted connections,
+                // reopened on the next accept if the attempt itself failed.
+                let mut conn = db.open_secondary().ok();
                 while !thread_shutdown.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _peer)) => {
                             let _ = stream.set_nonblocking(false);
                             let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
                             let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-                            {
-                                let conn = db.conn();
-                                let _ = serve_once(&mut stream, &config, &conn);
+                            if conn.is_none() {
+                                conn = db.open_secondary().ok();
+                            }
+                            if let Some(c) = conn.as_ref() {
+                                let _ = serve_once(&mut stream, &config, c);
                             }
                             let _ = stream.shutdown(std::net::Shutdown::Both);
                         }
