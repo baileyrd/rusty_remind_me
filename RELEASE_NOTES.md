@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — The peer server no longer blocks every other database call while serving a slow peer (#268)
+
+### Fixed
+- **`PeerServer`'s accept loop held `Database::conn()`'s process-wide mutex for the whole of `serve_once`**, including reading the incoming request off the socket. A slow, wedged, or hostile peer connection — up to the full 10-second `IO_TIMEOUT` — blocked every other MCP tool call on this node for that entire span, since `conn()`'s mutex guards all local reads and writes, not just sync traffic. The peer server now works its own `Database::open_secondary()` connection instead, matching how `SyncWorker` already avoids the same trap on the outbound side (a hub that never answers no longer blocks a local read there either): opened once and reused across accepted connections, reopened on the next accept if the attempt itself failed.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (concurrency sweep) — `SyncWorker` had already been fixed for the identical shape of bug on its outbound side; the peer server's own accept loop, serving inbound connections, still held the shared mutex the same way.
+
 ## 2026-08-11 — `remind_me_stale_candidates` re-applies write-time containment and sensitivity on read (#267)
 
 ### Fixed
