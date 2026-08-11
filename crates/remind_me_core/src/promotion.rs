@@ -762,6 +762,28 @@ pub fn nudge_once(conn: &Connection) -> SqlResult<(Backlog, bool)> {
     Ok((backlog, true))
 }
 
+/// The nudge loop this process is running, if any.
+///
+/// Mirrors [`crate::watcher`]'s own `LIVE`: a `Mutex<Option<..>>`, not a
+/// `OnceLock`, so a stopped loop can clear itself rather than leave a
+/// `Liveness` behind that would misreport a restarted loop's identity.
+static LIVE: std::sync::Mutex<Option<crate::scheduler::Liveness>> = std::sync::Mutex::new(None);
+
+/// Whether the backlog-nudge loop's thread is actually running right now.
+///
+/// Distinct from [`nudge_interval`] alone: that only says an interval is
+/// *configured*, which [`start_nudge_for`] already requires before it ever
+/// registers a loop here, so a crashed thread and an unconfigured one were
+/// previously indistinguishable — both left a caller believing backlog
+/// growth would eventually be announced when nothing was actually watching
+/// for it (#270).
+pub fn nudge_running() -> bool {
+    LIVE.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(crate::scheduler::Liveness::is_alive)
+}
+
 /// A running nudge loop. Dropping it does **not** stop the loop — call
 /// [`NudgeHandle::stop`], which joins, so an in-flight pass cannot still be
 /// reading while the caller tears the database down underneath it.
@@ -776,6 +798,10 @@ impl NudgeHandle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // Cleared after the join, matching `WatcherHandle::stop`'s own
+        // reasoning: until the thread has actually finished, it is still
+        // running and `nudge_running` should say so.
+        *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -800,10 +826,13 @@ pub fn start_nudge_for(conn: &Connection) -> Option<NudgeHandle> {
 pub fn start_nudge(db_path: std::path::PathBuf, interval: std::time::Duration) -> NudgeHandle {
     let stop = std::sync::Arc::new(crate::scheduler::Stop::new());
     let loop_stop = std::sync::Arc::clone(&stop);
+    let (liveness, liveness_guard) = crate::scheduler::Liveness::new();
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = Some(liveness);
 
     let thread = std::thread::Builder::new()
         .name("promotion-nudge".to_string())
         .spawn(move || {
+            let _liveness_guard = liveness_guard;
             let conn = match Connection::open(&db_path) {
                 Ok(conn) => conn,
                 Err(e) => {

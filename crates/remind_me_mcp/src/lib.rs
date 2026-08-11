@@ -1997,7 +1997,14 @@ impl McpServer {
                                             "candidates": found,
                                             "backlog": backlog,
                                             "backlog_summary": backlog.summary(),
-                                            "nudge_enabled": remind_me_core::promotion::nudge_interval().is_some(),
+                                            // Not `nudge_interval().is_some()`: that only
+                                            // proves an interval is *configured*, which
+                                            // `start_nudge_for` already requires before it
+                                            // registers a loop, so a crashed nudge thread and
+                                            // an unconfigured one used to read identically
+                                            // here -- both `true`, only one of them lying
+                                            // (#270).
+                                            "nudge_enabled": remind_me_core::promotion::nudge_running(),
                                         })).unwrap() }] })
                                     }
                                     Err(e) => {

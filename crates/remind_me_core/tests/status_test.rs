@@ -57,6 +57,20 @@ fn a_fresh_store_reports_a_current_schema() {
     assert_eq!(report.memory_count, 0);
 }
 
+/// #270: `scheduler.running` must say `false` when no loop has been started
+/// for this process, not merely omit the field or default to `true`.
+/// `background_loop_liveness_test.rs` covers the loop actually running;
+/// this is the shape `server_status` reports it in.
+#[test]
+fn a_fresh_process_reports_the_scheduler_as_not_running() {
+    let db = Database::open_in_memory().unwrap();
+
+    let report = server_status(&db.conn()).unwrap();
+
+    assert!(!report.scheduler.running);
+    assert!(report.scheduler.poll_interval_seconds > 0);
+}
+
 #[test]
 fn a_stale_schema_version_is_reported_as_not_current() {
     let db = Database::open_in_memory().unwrap();

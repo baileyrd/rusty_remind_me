@@ -513,8 +513,18 @@ fn now_seconds() -> u64 {
 /// `Mutex<Option<..>>` rather than `OnceLock`, because a stopped watcher must
 /// be able to clear itself: a `running: true` that outlived its thread would
 /// be exactly the misreport this whole change exists to remove.
-static LIVE: std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<Watcher>>>> =
-    std::sync::Mutex::new(None);
+///
+/// The paired [`crate::scheduler::Liveness`] answers a narrower question than
+/// this registration existing at all does (#270): the entry can still be
+/// here — `scans`, `last_scan_at` and the other counters below are worth
+/// reporting even after the thread is gone — while `Liveness::is_alive`
+/// alone says whether that thread panicked out from under it.
+static LIVE: std::sync::Mutex<
+    Option<(
+        std::sync::Arc<std::sync::Mutex<Watcher>>,
+        crate::scheduler::Liveness,
+    )>,
+> = std::sync::Mutex::new(None);
 
 /// Handle to a running scan loop. Dropping it does **not** stop the thread;
 /// call [`WatcherHandle::stop`], which joins, so an in-flight scan cannot
@@ -572,7 +582,9 @@ pub fn start_watcher_for(conn: &Connection) -> Option<WatcherHandle> {
 fn start_watcher(watcher: Watcher, db_path: PathBuf) -> WatcherHandle {
     let interval = std::time::Duration::from_secs(watcher.interval().max(1));
     let shared = std::sync::Arc::new(std::sync::Mutex::new(watcher));
-    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::clone(&shared));
+    let (liveness, liveness_guard) = crate::scheduler::Liveness::new();
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::sync::Arc::clone(&shared), liveness));
 
     let stop = std::sync::Arc::new(crate::scheduler::Stop::new());
     let loop_stop = std::sync::Arc::clone(&stop);
@@ -581,6 +593,7 @@ fn start_watcher(watcher: Watcher, db_path: PathBuf) -> WatcherHandle {
     let thread = std::thread::Builder::new()
         .name("folder-watcher".to_string())
         .spawn(move || {
+            let _liveness_guard = liveness_guard;
             // Its own connection, by path: `rusqlite::Connection` is not
             // `Sync`, so sharing the caller's would trade a compile error for
             // a runtime serialisation problem.
@@ -618,17 +631,25 @@ fn start_watcher(watcher: Watcher, db_path: PathBuf) -> WatcherHandle {
     }
 }
 
-/// The running watcher's status, or `None` when no loop is running.
+/// The running watcher's status, or `None` when no loop has ever been
+/// registered in this process.
 ///
 /// This is what makes `running` mean something. Before it, the status surface
 /// built a *fresh* `Watcher::from_env()` and reported on an object that had
 /// never scanned anything, so `scans` and the file counters were structurally
 /// zero while `enabled: true` read like a working feature.
+///
+/// `running` itself reflects the paired [`crate::scheduler::Liveness`]
+/// (#270), not the mere presence of this registration: a scan loop that
+/// panicked mid-run still has a live entry here — its counters are worth
+/// reporting — but its thread is gone, and `running` now says so instead of
+/// unconditionally claiming the loop is still going.
 pub fn live_status() -> Option<WatchStatus> {
     let live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let shared = live.as_ref()?;
+    let (shared, liveness) = live.as_ref()?;
+    let alive = liveness.is_alive();
     let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
     let mut status = guard.status();
-    status.running = true;
+    status.running = alive;
     Some(status)
 }

@@ -91,6 +91,12 @@ pub struct ServerStatus {
     /// Reported by the watcher itself now that one exists, rather than as an
     /// absent subsystem.
     pub watcher: crate::watcher::WatchStatus,
+    /// Whether the reminder-delivery loop's thread is actually running, and
+    /// at what interval. Unlike `watcher`, always answered directly rather
+    /// than falling back to a config-only guess: the scheduler has no
+    /// "configured or not" state to fall back through, only "running" or not
+    /// (#270).
+    pub scheduler: crate::scheduler::SchedulerStatus,
     /// Whether a stuck tool call would announce itself, and how many calls are
     /// in flight right now. Process-wide state, not database state — the
     /// reference reports it from the same tool for the same reason.
@@ -168,6 +174,7 @@ pub fn server_status(conn: &Connection) -> Result<ServerStatus> {
         watcher: crate::watcher::live_status()
             .or_else(|| crate::watcher::Watcher::from_env().map(|w| w.status()))
             .unwrap_or_else(crate::watcher::disabled_status),
+        scheduler: crate::scheduler::live_status(),
         watchdog: crate::watchdog::status(),
     })
 }
