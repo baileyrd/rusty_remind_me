@@ -364,6 +364,44 @@ fn limit_bounds_candidates_not_paths_checked() {
 }
 
 #[test]
+fn a_zero_limit_is_clamped_to_a_floor_of_one() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("clamp_floor");
+    fixture.set_env();
+    let _env = EnvGuard;
+
+    let db = db("clamp_floor");
+    let conn = db.conn();
+    add(&conn, &format!("see {}", fixture.file.display()));
+    std::fs::remove_file(&fixture.file).unwrap();
+
+    // A caller-supplied 0 must not be taken literally -- an unclamped 0
+    // would silently return no candidates even though a stale one exists,
+    // which reads exactly like "nothing is stale" to anyone who doesn't
+    // already know the limit was zero.
+    let candidates = stale_candidates(&conn, 0).unwrap();
+    assert_eq!(candidates.len(), 1);
+}
+
+#[test]
+fn an_oversized_limit_is_clamped_to_a_ceiling_of_one_hundred() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("clamp_ceiling");
+    fixture.set_env();
+    let _env = EnvGuard;
+
+    let db = db("clamp_ceiling");
+    let conn = db.conn();
+    for i in 0..105 {
+        add(&conn, &format!("memo {i}: see {}", fixture.file.display()));
+    }
+    std::fs::remove_file(&fixture.file).unwrap();
+
+    let candidates = stale_candidates(&conn, 10_000).unwrap();
+    assert_eq!(candidates.len(), 100);
+}
+
+#[test]
 fn a_hand_written_code_ref_outside_the_roots_is_never_stat_against() {
     // #267: `metadata` is free-form JSON, settable directly through
     // remind_me_update (or carried in unfiltered over sync from a peer),

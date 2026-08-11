@@ -2,6 +2,16 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — `stale_candidates`'s `limit` is now clamped, and its doc comment stopped overclaiming (#273)
+
+### Fixed
+- **`stale_candidates(conn, limit)` applied no floor or ceiling to `limit`.** A caller passing `0` got zero candidates back with no indication a stale one existed; a caller passing an unbounded value had no ceiling at all. `limit` is now clamped to `1..=100`, matching `promotion::promotion_candidates`'s existing convention.
+- **The doc comment claimed shape-parity with `promotion_candidates`'s SQL-level `LIMIT` that did not actually hold.** It described `stale_candidates` as bounding "candidates returned, not paths checked... matching `promotion_candidates`'s shape" — but `promotion_candidates` achieves that via a real SQL `LIMIT ?` in each of its sub-queries, while `stale_candidates` has never applied any SQL-level bound; it only stops once enough *stale* rows are found, in Rust, after each anchor is `stat`-ed. The doc now says this directly, and explains why a SQL `LIMIT` would be unsafe here: this query's `WHERE` clause is a broad pre-filter ("has code_refs at all"), not a staleness filter, so truncating it at the SQL layer could hide a real stale candidate sitting past the first N rows in default order.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit — a doc comment described a correctness guarantee (SQL-shape parity with `promotion_candidates`) that the implementation did not provide.
+
 ## 2026-08-11 — Removed a duplicate `response_format` key from `remind_me_vitality_report`'s schema (#272)
 
 ### Fixed
