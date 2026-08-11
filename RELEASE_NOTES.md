@@ -2,6 +2,16 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — `watcher.rs`'s `imports` map now evicts entries absent for N scans (#286)
+
+### Fixed
+- **`Watcher::imports` grew without bound for the life of a long-running process.** `attempted`/`pending` are pruned every scan to only paths currently seen, but `imports` — the map from watched path to its most recent import id, which lets a changed file supersede its previous import's memories — was deliberately never pruned that way, since a file that comes back changed still has to supersede its old import. That left it bounded only by *distinct file paths ever seen*, not by scan count or elapsed time: a watch directory with high churn over months or years would add one `(PathBuf, String)` entry per new filename, forever.
+- Added a bound: each `imports` entry now tracks how many consecutive scans its path has been missing from the current scan's `seen` set (`Watcher::imports_absent`), and the entry is evicted once that streak reaches `DEFAULT_IMPORTS_STALE_SCANS` (1,440 — a day's worth of scans at the default one-minute interval). A path seen again has its streak cleared, so a file that keeps getting watched, however long the process has run, never ages out. A file that returns *after* eviction still ingests — it just does so as a fresh import with nothing to supersede, the same as a path never seen before, rather than growing the map forever to avoid that edge case. The threshold is overridable via `Watcher::with_imports_stale_after_scans` for tests.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (background-loop memory-growth sweep, tracked as #286). Verified with new watcher tests: a file absent past the threshold is evicted and a later change no longer supersedes; a file absent for fewer scans than the threshold still supersedes on return; a file watched continuously across many scans never ages out.
+
 ## 2026-08-11 — Hub's busy_timeout raised to 30000ms, matching core (#281)
 
 ### Fixed
