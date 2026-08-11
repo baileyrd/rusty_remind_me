@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — CI now builds and tests on Windows (#271)
+
+### Fixed
+- **`remind_me_core`'s Win32 FFI (`sidecars.rs`'s job-object sidecar teardown, `export.rs`'s `\\?\`-prefix stripping) never compiled in CI at all.** Every CI job runs on `ubuntu-latest`, so every `#[cfg(windows)]` block — including the workspace's only unconditional FFI dependency (`Cargo.toml`'s `[target.'cfg(windows)'.dependencies]` on `windows-sys`) — compiled exactly zero lines, ever. A syntax error in that code could have shipped unnoticed indefinitely. Added a `windows` job running on `windows-latest`: default-feature build, test, and clippy, scoped to the default build rather than mirroring `check`'s full optional-feature matrix, since the platform-specific risk lives in the unconditional dependency and several of those features (`stack-dumps`'s Linux-only `ptrace` backend, in particular) would not even build on Windows.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (build/CI hygiene sweep), verified by direct source inspection. Not verified against a real Windows CI run in this session — no such runner was available to test against locally, so whether the workspace actually passes on Windows once this job runs for real is unconfirmed as of this fix.
+
 ## 2026-08-11 — Path-list env vars no longer break on Windows drive letters (#298)
 
 ### Fixed
