@@ -35,6 +35,18 @@ jobs:
       - name: Compare SCHEMA_VERSION against the reference
         run: scripts/check_schema_drift.sh
 
+      # A passing check above only means the version *number* hasn't fallen
+      # behind -- it says nothing about whether schema_tables.sql,
+      # schema_indexes.sql and schema_triggers.sql (generated verbatim by
+      # regenerate_schema.py; their headers say "do not hand-edit") actually
+      # match what the generator produces. A hand-edit to one of those files
+      # that didn't match the generator's output passed CI silently as long
+      # as SCHEMA_VERSION itself was untouched (#277). This regenerates them
+      # into a scratch dir and diffs against what's committed, same
+      # clone-inside-the-script convention as the step above.
+      - name: Regenerate schema_*.sql and diff against committed files
+        run: scripts/check_schema_regen_drift.sh
+
   check:
     name: build / test / clippy / fmt
     runs-on: ubuntu-latest
