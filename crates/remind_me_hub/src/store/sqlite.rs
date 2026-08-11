@@ -126,7 +126,7 @@ impl SqliteStore {
         // namely a second *process* pointed at the same file.
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(err)?;
-        conn.pragma_update(None, "busy_timeout", 5000)
+        conn.pragma_update(None, "busy_timeout", 30000)
             .map_err(err)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(err)?;
