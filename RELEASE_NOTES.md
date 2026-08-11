@@ -2,6 +2,24 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — Hub's busy_timeout raised to 30000ms, matching core (#281)
+
+### Fixed
+- **`remind_me_hub`'s `SqliteStore::open` set `PRAGMA busy_timeout=5000`**, the
+  same value `remind_me_core/src/db/schema.rs` carried before #252 raised it
+  to 30000ms because 5s wasn't enough headroom for two processes cold-opening
+  the same database around the same time. The hub is the component actually
+  designed to be hit concurrently by multiple independent client processes —
+  every syncing node pushes and pulls against it — yet it never got the
+  equivalent fix, leaving it more exposed to `SqliteFailure(DatabaseBusy)`
+  under contention than the single-process core ever was. `busy_timeout` is
+  now 30000ms in `crates/remind_me_hub/src/store/sqlite.rs`, matching core.
+
+### Provenance
+
+Filed as #281; fixed by cross-referencing the #252 fix already documented
+below, verified by direct source inspection of both files' current values.
+
 ## 2026-08-11 — CI now builds and tests on Windows (#271)
 
 ### Fixed
