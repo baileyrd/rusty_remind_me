@@ -37,6 +37,7 @@ use crate::models::Memory;
 use crate::notifications;
 use crate::reminders;
 use rusqlite::{params, Connection, Result};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -178,6 +179,92 @@ impl Stop {
     }
 }
 
+/// Cheap, shared proof that a background loop's thread has not exited — by
+/// returning normally or by panicking — since it started.
+///
+/// A `std::thread::JoinHandle` answers the same question via
+/// [`std::thread::JoinHandle::is_finished`], but can only be owned once; a
+/// status surface and whichever handle a caller stops the loop with are two
+/// separate readers that each need their own way to ask. Cloning a
+/// `Liveness` gives every reader that without needing to share the
+/// `JoinHandle` itself.
+///
+/// Shared with [`crate::watcher`] and [`crate::promotion`]'s nudge loop —
+/// three background loops, the same "is anyone actually watching" question.
+/// Kept here with [`Stop`], for the same reason that primitive is: written
+/// first here, reused rather than duplicated or relocated for three users.
+#[derive(Clone)]
+pub(crate) struct Liveness(Arc<AtomicBool>);
+
+impl Liveness {
+    /// A fresh `Liveness`, `true` until its paired [`LivenessGuard`] drops.
+    pub(crate) fn new() -> (Self, LivenessGuard) {
+        let flag = Arc::new(AtomicBool::new(true));
+        (Self(Arc::clone(&flag)), LivenessGuard(flag))
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Marks its [`Liveness`] false when dropped — including while unwinding
+/// from a panic, which is exactly the case a liveness signal exists to
+/// catch: a background loop dying without ever calling its own `stop()`
+/// must still be observable as not-running, not silently misreported as
+/// healthy forever because nothing else changed the flag.
+///
+/// A loop's thread holds this for its entire run — bound near the top of
+/// the spawned closure, before its own `while` loop — so the flag only
+/// flips once that stack frame is actually gone, panic or ordinary return
+/// alike.
+pub(crate) struct LivenessGuard(Arc<AtomicBool>);
+
+impl Drop for LivenessGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The reminder scheduler's state, for `remind_me_server_status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerStatus {
+    /// Whether the poll loop's thread is actually running right now.
+    ///
+    /// `false` with the rest of the process otherwise healthy means the
+    /// thread panicked, or a scheduler was never started for this database
+    /// (an in-memory one, or a process that never called
+    /// [`start_scheduler_for`]) — distinct failure modes a bare "is the
+    /// scheduler configured" check cannot tell apart, since the scheduler
+    /// has no configuration to be missing in the first place (#270).
+    pub running: bool,
+    pub poll_interval_seconds: u64,
+}
+
+/// The scheduler this process is running, if any.
+///
+/// Mirrors [`crate::watcher`]'s own `LIVE`, including why `Mutex<Option<..>>`
+/// and not `OnceLock`: a stopped scheduler must be able to clear itself.
+static LIVE: Mutex<Option<Liveness>> = Mutex::new(None);
+
+/// The scheduler's current status: whether its thread is actually running,
+/// and at what interval it polls.
+///
+/// Always answers, unlike [`crate::watcher::live_status`] — the scheduler
+/// has no "configured or not" distinction to fall back through, only
+/// "running" or not.
+pub fn live_status() -> SchedulerStatus {
+    let running = LIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(Liveness::is_alive);
+    SchedulerStatus {
+        running,
+        poll_interval_seconds: configured_poll_interval().as_secs(),
+    }
+}
+
 /// A running scheduler. Dropping it does **not** stop the loop — call
 /// [`SchedulerHandle::stop`], which joins, so an in-flight pass cannot still
 /// be writing while the caller tears the database down underneath it.
@@ -192,6 +279,10 @@ impl SchedulerHandle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // Cleared after the join, not before: until the thread has actually
+        // finished, it is still running and the status surface should say
+        // so. Matches `WatcherHandle::stop`'s own reasoning.
+        *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -232,10 +323,13 @@ pub fn start_scheduler(db_path: std::path::PathBuf) -> SchedulerHandle {
     let stop = Arc::new(Stop::new());
     let loop_stop = Arc::clone(&stop);
     let interval = configured_poll_interval();
+    let (liveness, liveness_guard) = Liveness::new();
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = Some(liveness);
 
     let thread = std::thread::Builder::new()
         .name("reminder-scheduler".to_string())
         .spawn(move || {
+            let _liveness_guard = liveness_guard;
             let conn = match Connection::open(&db_path) {
                 Ok(conn) => conn,
                 Err(e) => {
@@ -260,5 +354,60 @@ pub fn start_scheduler(db_path: std::path::PathBuf) -> SchedulerHandle {
     SchedulerHandle {
         stop,
         thread: Some(thread),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_liveness_is_alive() {
+        let (liveness, _guard) = Liveness::new();
+        assert!(liveness.is_alive());
+    }
+
+    #[test]
+    fn dropping_the_guard_marks_it_not_alive() {
+        let (liveness, guard) = Liveness::new();
+        drop(guard);
+        assert!(!liveness.is_alive());
+    }
+
+    /// The whole reason this type exists rather than a plain `bool` a loop
+    /// sets on its way out: a thread that panics never reaches its own
+    /// "I'm done" line, so anything relying on one would stay `true`
+    /// forever. `LivenessGuard`'s `Drop` runs during an unwind exactly the
+    /// same as it does on an ordinary return -- proven here by forcing the
+    /// unwind through `catch_unwind` rather than assuming it.
+    #[test]
+    fn dropping_the_guard_during_a_panic_still_marks_it_not_alive() {
+        let (liveness, guard) = Liveness::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = guard;
+            panic!("simulated loop-thread panic");
+        }));
+        assert!(result.is_err(), "the test's own panic should propagate");
+        assert!(
+            !liveness.is_alive(),
+            "unwinding past the guard must still mark it not alive"
+        );
+    }
+
+    #[test]
+    fn cloned_liveness_handles_see_the_same_state() {
+        let (liveness, guard) = Liveness::new();
+        let clone = liveness.clone();
+        assert!(clone.is_alive());
+        drop(guard);
+        assert!(!clone.is_alive(), "a clone must observe the same drop");
+    }
+
+    #[test]
+    fn live_status_reports_not_running_with_no_scheduler_started() {
+        // Nothing in this crate's `src/` calls `start_scheduler` except the
+        // function itself, so `LIVE` is never populated by any other unit
+        // test sharing this test binary's process.
+        assert!(!live_status().running);
     }
 }

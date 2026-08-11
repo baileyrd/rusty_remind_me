@@ -21,6 +21,16 @@ Caught by a real Windows CI run (`windows-latest`, added in #271/#296): `code_re
 
 Found during a 2026-08-11 codebase-wide audit (panic/crash-isolation sweep), verified by direct source inspection.
 
+## 2026-08-11 — The scheduler, watcher, and promotion nudge now report whether their thread is actually alive (#270)
+
+### Fixed
+- **A crashed background loop kept reporting itself healthy.** `watcher::live_status()` unconditionally set `running: true` whenever a loop was registered, whether or not its thread had actually panicked out from under that registration. The reminder scheduler had no liveness surface in `remind_me_server_status` at all, and the promotion backlog's `nudge_enabled` field was computed from `nudge_interval().is_some()` alone — configuration, not whether the loop was actually running. All three could silently stop working (a panic, a bug, anything that ends the thread without going through its own `stop()`) while every status surface kept saying otherwise.
+- Added `scheduler::Liveness`/`LivenessGuard`, a small primitive shared by all three background loops: a thread holds a `LivenessGuard` for its whole run, and its `Drop` marks the loop dead — during an ordinary return or, just as importantly, while unwinding from a panic, since `Drop` runs either way. `watcher::live_status()` now reports real thread health instead of a hardcoded `true`; `ServerStatus` gained a `scheduler: SchedulerStatus` field driven by the same mechanism; `nudge_enabled` now reads `promotion::nudge_running()`, which folds "configured" and "actually running" into one honest answer.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (liveness / crash-isolation sweep), verified by direct source inspection.
+
 ## 2026-08-11 — `stale_candidates`'s `limit` is now clamped, and its doc comment stopped overclaiming (#273)
 
 ### Fixed
