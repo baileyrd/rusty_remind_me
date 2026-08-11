@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — Removed a duplicate `response_format` key from `remind_me_vitality_report`'s schema (#272)
+
+### Fixed
+- **`remind_me_vitality_report`'s `inputSchema` defined `response_format` twice inside the same JSON object literal.** Legal but meaningless Rust — a `json!` macro with a duplicate key just overwrites the first entry with the second when building the resulting map — so the second, undescribed copy (with its `enum` order reversed and no `description`) silently won, discarding the first copy's caller-facing description text. Deleted the duplicate, keeping the described version.
+
+### Provenance
+
+Found during a 2026-08-11 codebase-wide audit (MCP surface consistency sweep), verified by direct source inspection. `test_vitality_report_tool` gained assertions on the surviving `enum` order and the presence of `description`, so either kind of regression — a dropped description, or the duplicate silently reappearing — would be caught.
+
 ## 2026-08-11 — Chat imports, directory imports, and webhook pushes now stamp node_id/client (#266)
 
 ### Fixed
