@@ -39,13 +39,14 @@
 //! [`crate::promotion::promotion_candidates`]: a list for a caller to judge,
 //! not an automatic demotion.
 
-use crate::import_paths::{expand_home, is_contained, resolve_lexically};
+use crate::import_paths::{expand_home, is_contained, resolve_lexically, split_path_list};
 use rusqlite::{Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-/// Colon-separated directories a memory's content may be anchored into.
+/// Directories a memory's content may be anchored into, in the platform's
+/// own `PATH`-list syntax (see [`crate::import_paths::split_path_list`]).
 ///
 /// Unset or empty means **off**: [`detect_code_refs`] returns immediately,
 /// before touching the filesystem, matching the `#55`/`#56` convention.
@@ -74,10 +75,9 @@ pub fn configured_code_roots() -> Vec<PathBuf> {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(|raw| {
-            raw.split(':')
-                .map(str::trim)
-                .filter(|r| !r.is_empty())
-                .map(|r| resolve_lexically(&PathBuf::from(expand_home(r))))
+            split_path_list(&raw)
+                .into_iter()
+                .map(|r| resolve_lexically(&PathBuf::from(expand_home(&r))))
                 .collect()
         })
         .unwrap_or_default()

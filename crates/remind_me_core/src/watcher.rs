@@ -30,7 +30,9 @@
 //! explicitly deleted is left alone — a re-import must not resurrect or
 //! silently alter something someone chose to remove.
 
-use crate::import_paths::{import_roots, is_contained, resolve_lexically, SUPPORTED_SUFFIXES};
+use crate::import_paths::{
+    import_roots, is_contained, resolve_lexically, split_path_list, SUPPORTED_SUFFIXES,
+};
 use crate::importer::import_file;
 use crate::models::{ImportKind, ImportOutcome};
 use chrono::Utc;
@@ -39,7 +41,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Colon-separated directories to watch.
+/// Directories to watch, in the platform's own `PATH`-list syntax (see
+/// [`crate::import_paths::split_path_list`]).
 pub const WATCH_DIRS_ENV: &str = "REMIND_ME_WATCH_DIRS";
 /// Seconds between scans.
 pub const WATCH_INTERVAL_ENV: &str = "REMIND_ME_WATCH_INTERVAL";
@@ -151,9 +154,8 @@ pub fn configured_watch_dirs() -> Vec<PathBuf> {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(|raw| {
-            raw.split(':')
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
+            split_path_list(&raw)
+                .into_iter()
                 .map(PathBuf::from)
                 .collect()
         })

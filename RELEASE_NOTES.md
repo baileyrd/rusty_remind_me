@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — Path-list env vars no longer break on Windows drive letters (#298)
+
+### Fixed
+- **`REMIND_ME_CODE_ROOTS`, `REMIND_ME_IMPORT_ROOTS`, `REMIND_ME_EXPORT_ROOTS`, and `REMIND_ME_WATCH_DIRS` all split their value on a literal `':'`** — a Unix `PATH`-style convention that silently breaks on Windows, where a colon is not a separator but part of every absolute path's drive letter. `REMIND_ME_CODE_ROOTS=C:\Users\me\code` split into `["C", "\Users\me\code"]`, neither of which is the real root, so nothing ever resolved as contained in it. Added `import_paths::split_path_list`, backed by `std::env::split_paths` — the standard library's own platform-aware answer to exactly this problem (`:` on Unix, `;` on Windows) — and switched all four env vars to it.
+
+### Provenance
+
+Caught by a real Windows CI run (`windows-latest`, added in #271/#296): `code_refs_test.rs` failed 8 of 15 tests there, all with the same shape — a real file inside a correctly-configured root reported as not anchored. Not an audit-time finding; the earlier source-inspection audit had no way to catch a bug that only manifests against an actual Windows filesystem/environment.
+
 ## 2026-08-11 — A panic in one MCP tool call no longer takes down the whole stdio loop (#269)
 
 ### Fixed
