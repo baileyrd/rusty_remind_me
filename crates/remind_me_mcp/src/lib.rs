@@ -791,6 +791,16 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_stale_candidates",
+                                "description": "List memories whose content names a file (inside REMIND_ME_CODE_ROOTS) that has since changed or been deleted. Read-only and never touches the memory it reports: a changed file does not prove the memory wrong, it only means the claim is worth re-checking. Off entirely -- always an empty list -- unless REMIND_ME_CODE_ROOTS is configured.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+                                    }
+                                }
+                            },
+                            {
                                 "name": "remind_me_persona",
                                 "description": "The current persona: durable statements about the user whose grounds still hold. A statement whose sources have all been superseded or deleted is withheld automatically, so a contradicted fact demotes what was built on it. Set include_demoted to also see what is currently withheld and why.",
                                 "inputSchema": {
@@ -2019,6 +2029,21 @@ impl McpServer {
                             },
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid promotion input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_stale_candidates" => {
+                        let limit =
+                            args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                        match remind_me_core::code_refs::stale_candidates(&conn, limit) {
+                            Ok(found) => {
+                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
+                                    "count": found.len(),
+                                    "candidates": found,
+                                })).unwrap() }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Stale-candidates error: {}", e) }] })
                             }
                         }
                     }
@@ -4390,6 +4415,66 @@ mod tests {
             prompt_resp["result"]["prompts"][0]["name"],
             "recall_context"
         );
+    }
+
+    /// `REMIND_ME_CODE_ROOTS` is process-global; distinct from `ENV_LOCK`
+    /// above, which serializes a different variable
+    /// (`REMIND_ME_EMBEDDING_BACKEND`) and would just add unrelated
+    /// contention if reused here.
+    static CODE_ROOTS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn stale_candidates_returns_an_empty_list_when_unconfigured() {
+        let _lock = CODE_ROOTS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(remind_me_core::code_refs::CODE_ROOTS_ENV);
+
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        call(
+            &server,
+            "remind_me_add",
+            json!({ "content": "see /tmp/whatever.rs" }),
+        );
+
+        let res = call(&server, "remind_me_stale_candidates", json!({}));
+        assert!(res.get("isError").is_none());
+        assert!(text_of(&res).contains("\"count\": 0"));
+    }
+
+    #[test]
+    fn stale_candidates_reports_a_deleted_anchor_end_to_end() {
+        let _lock = CODE_ROOTS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("rrm_mcp_coderefs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("auth.rs");
+        std::fs::write(&file, "fn login() {}\n").unwrap();
+        std::env::set_var(
+            remind_me_core::code_refs::CODE_ROOTS_ENV,
+            root.display().to_string(),
+        );
+
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        call(
+            &server,
+            "remind_me_add",
+            json!({ "content": format!("don't touch {}", file.display()) }),
+        );
+        std::fs::remove_file(&file).unwrap();
+
+        let res = call(&server, "remind_me_stale_candidates", json!({}));
+        std::env::remove_var(remind_me_core::code_refs::CODE_ROOTS_ENV);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(res.get("isError").is_none());
+        let text = text_of(&res);
+        assert!(text.contains("\"count\": 1"), "{text}");
+        assert!(text.contains("\"deleted\""), "{text}");
     }
 }
 

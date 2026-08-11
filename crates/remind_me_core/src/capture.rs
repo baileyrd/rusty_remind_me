@@ -298,6 +298,14 @@ pub fn decompose(conn: &Connection, input: &DecomposeInput) -> Result<Option<Dec
         let base_weight = get_type_prior(memory_type);
 
         let (node_id, client) = crate::sync::memory_provenance();
+
+        // #260: a no-op unless REMIND_ME_CODE_ROOTS is configured. Merged
+        // into the metadata object already built for `source_capture_id`
+        // rather than a separate write, so one INSERT still carries both.
+        let mut metadata = serde_json::json!({ "source_capture_id": input.capture_id });
+        let code_refs = crate::code_refs::detect_code_refs(&fact.content);
+        crate::code_refs::merge_code_refs(&mut metadata, &code_refs);
+
         conn.execute(
             "INSERT INTO memories (
                 id, content, category, tags, source, metadata,
@@ -312,7 +320,7 @@ pub fn decompose(conn: &Connection, input: &DecomposeInput) -> Result<Option<Dec
                 FACT_CATEGORY,
                 serde_json::to_string(&merged_tags).unwrap_or_else(|_| "[]".to_string()),
                 DECOMPOSITION_SOURCE,
-                serde_json::json!({ "source_capture_id": input.capture_id }).to_string(),
+                metadata.to_string(),
                 input.capture_id,
                 now_iso,
                 now_iso,
