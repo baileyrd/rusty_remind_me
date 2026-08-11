@@ -122,7 +122,7 @@ impl RateLimiter {
     /// deterministically instead of sleeping — the same clock-injection
     /// convention this crate already uses for vitality.
     pub fn hit_at(&self, key: &str, now: Instant) -> RateLimitResult {
-        let mut buckets = self.buckets.lock().unwrap();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         self.maybe_prune(&mut buckets, now);
 
         let (window_start, count) = buckets.map.get(key).copied().unwrap_or((now, 0));
@@ -179,13 +179,17 @@ impl RateLimiter {
     }
 
     pub fn reset(&self) {
-        let mut buckets = self.buckets.lock().unwrap();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         buckets.map.clear();
         buckets.since_prune = 0;
     }
 
     pub fn tracked_keys(&self) -> usize {
-        self.buckets.lock().unwrap().map.len()
+        self.buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map
+            .len()
     }
 }
 
