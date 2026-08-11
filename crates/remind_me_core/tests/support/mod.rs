@@ -1,7 +1,18 @@
-// Compiled fresh into every `tests/*.rs` binary that does `mod support;`;
-// no single one uses both `MockNode` and `MockHub`, or every field of
-// either -- that "unused" is a property of which test file this is, not a
-// real dead-code bug in the module.
+// Deliberate module-level allow, not an oversight: this file is compiled
+// fresh into every `tests/*.rs` binary that does `mod support;` (Rust warns
+// per-binary), and no single one uses both `MockNode` and `MockHub`, or
+// every field of either -- that "unused" is a property of which test file
+// this is, not a real dead-code bug in the module. Per-item allows were
+// considered and rejected: everything here is either used by every binary
+// (`MockNode`) or genuinely only by one (`MockHub`, used solely by
+// `hub_compat_test.rs`), so a blanket allow costs nothing today, and
+// narrowing it item-by-item would only add churn every time a helper's
+// consumer set shifts. Audited 2026-08-11 (issue #287): every item below is
+// used by at least one binary in this crate's `tests/` directory --
+// `MockNode` by `sync_test.rs`, `graph_sync_test.rs`, and
+// `hub_compat_test.rs`; `MockHub` by `hub_compat_test.rs` alone. If a future
+// audit finds an item unreferenced by every test binary, that's the real
+// bug this allow can hide -- remove the item rather than assume it's fine.
 #![allow(dead_code)]
 
 //! Shared test doubles for sync integration tests, both real HTTP over a

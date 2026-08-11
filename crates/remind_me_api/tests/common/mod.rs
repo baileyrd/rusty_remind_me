@@ -8,6 +8,19 @@
 //! binary (integration tests each get their own crate), so any one binary
 //! only calls a subset of what is offered here — the rest is not dead code,
 //! it is used by a sibling binary compiled from the same source.
+//!
+//! The `#![allow(dead_code)]` below is a deliberate module-level tradeoff,
+//! not an oversight, and per-item allows were considered and rejected: with
+//! thirteen test binaries in this crate drawing overlapping subsets of these
+//! helpers, tagging each one with which binaries use it would drift out of
+//! date every time a test file changed and become noise rather than
+//! signal. Audited 2026-08-11 (issue #287) by grepping every helper name
+//! across `crates/remind_me_api/tests/*.rs`: each item here is used by at
+//! least one test binary today (e.g. `seeded_wiki_server` and `.header()`
+//! only by `wiki_test.rs`; `raw_request` and `call_with_origin` only by
+//! `dashboard_test.rs`; the rest by several). If a future audit finds a
+//! helper unreferenced by every test binary, that is the real dead-code bug
+//! this allow can hide -- remove the helper rather than assume it's fine.
 
 #![allow(dead_code)]
 
