@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — Fixed a data race between two `query_expansion` unit tests (#292)
+
+### Fixed
+- **`query_expansion::tests::disabled_by_default` and `mode_is_case_insensitive` raced on the unguarded process-global `REMIND_ME_QUERY_EXPANSION` env var.** `cargo test` runs `--lib` unit tests in parallel threads by default, so one test's `set_var`/`remove_var` could land between another's `set_var` and its `assert!`, producing an intermittent, unreproducible-on-demand test failure. Both tests now hold a `Mutex`-backed `ENV_LOCK` for their duration, matching the established convention already used for the same class of process-global env var elsewhere in this crate (`retrieval.rs`, `sync_test.rs`, `peer_server_test.rs`, `webhook_test.rs`, `importer_test.rs`).
+
+### Provenance
+
+Surfaced once during unrelated verification of #268's PR (a `cargo test --workspace` run failed exactly one test, `query_expansion::tests::mode_is_case_insensitive`, with no source changes touching that file). Reproduced the failure's root cause by inspection; did not reproduce the failure itself in several follow-up runs, consistent with a genuine low-frequency data race rather than a deterministic bug.
+
 ## 2026-08-11 — The peer server no longer blocks every other database call while serving a slow peer (#268)
 
 ### Fixed

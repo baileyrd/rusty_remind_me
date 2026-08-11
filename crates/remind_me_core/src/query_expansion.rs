@@ -219,14 +219,22 @@ pub fn expand_query(query: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    // EXPANSION_MODE_ENV is process-global; serialize this module's
+    // env-touching tests so they don't race each other the way `cargo test`
+    // otherwise would (see retrieval.rs's own ENV_LOCK for the established
+    // convention).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn disabled_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var(EXPANSION_MODE_ENV);
         assert!(!enabled());
     }
 
     #[test]
     fn mode_is_case_insensitive() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(EXPANSION_MODE_ENV, "HyDE");
         assert!(enabled());
         std::env::set_var(EXPANSION_MODE_ENV, "off");
