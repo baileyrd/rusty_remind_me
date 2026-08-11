@@ -267,6 +267,52 @@ fn an_empty_query_still_reports_its_timing() {
 }
 
 #[test]
+fn a_category_containing_a_single_quote_is_matched_via_bound_parameter() {
+    // Regression test for #276: the category filter used to be interpolated
+    // into the SQL string with manual `'`-doubling instead of a `?`
+    // placeholder. That happened to be safe, but a category value containing
+    // a quote is exactly the input that would have broken it -- so it is the
+    // input this test exercises, on the code path (`search_memories_budgeted`
+    // / `search_memories_deadlined`) that had the bug.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(SEARCH_DEADLINE_ENV);
+
+    let db = db("quote_category");
+    let conn = db.conn();
+    queries::add_memory(
+        &conn,
+        MemoryAddInput {
+            content: "quokka sightings on the island".to_string(),
+            category: "foo's bar".to_string(),
+            tags: Vec::new(),
+            source: "manual".to_string(),
+            metadata: serde_json::json!({}),
+            subject: None,
+            predicate: None,
+            object: None,
+            entities: Vec::new(),
+            sensitive: false,
+        },
+    )
+    .unwrap();
+    // A memory in a different category must not leak through the filter.
+    add(&conn, "quokka but in the wrong category");
+
+    let mut input = query("quokka");
+    input.category = Some("foo's bar".to_string());
+
+    let outcome = queries::search_memories_budgeted(&conn, &input, None).unwrap();
+
+    assert_eq!(
+        outcome.results.len(),
+        1,
+        "the category filter should match exactly the memory whose category \
+         contains a single quote, not be broken by it"
+    );
+    assert_eq!(outcome.results[0].memory.category, "foo's bar");
+}
+
+#[test]
 fn the_configured_deadline_reaches_the_search_response() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _env = EnvGuard::set("2500");

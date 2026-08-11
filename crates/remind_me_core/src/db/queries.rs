@@ -830,6 +830,8 @@ pub fn search_memories_deadlined(
         prefixed_memory_columns("m")
     );
 
+    let mut bindings: Vec<Value> = vec![Value::Text(match_expr.clone())];
+
     let effective = effective_vitality_sql();
     if !input.include_dormant {
         sql.push_str(&format!(" AND {} >= {}", effective, VITALITY_FLOOR));
@@ -838,16 +840,18 @@ pub fn search_memories_deadlined(
         sql.push_str(&format!(" AND {} >= {}", effective, input.min_vitality));
     }
     if let Some(ref cat) = input.category {
-        sql.push_str(&format!(" AND m.category = '{}'", cat.replace('\'', "''")));
+        sql.push_str(" AND m.category = ?");
+        bindings.push(Value::Text(cat.clone()));
     }
     if !input.include_sensitive {
         sql.push_str(" AND m.sensitive = 0");
     }
 
     sql.push_str(" ORDER BY bm25(memories_fts) LIMIT ?");
+    bindings.push(Value::Integer((input.limit * 2) as i64));
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![match_expr, (input.limit * 2) as i64], |row| {
+    let rows = stmt.query_map(params_from_iter(bindings.iter()), |row| {
         let memory = parse_memory_row(row)?;
         let bm25_score: f64 = row.get("bm25_score")?;
         Ok((memory, bm25_score))
