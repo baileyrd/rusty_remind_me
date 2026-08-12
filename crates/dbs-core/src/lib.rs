@@ -9,6 +9,7 @@ pub mod capabilities;
 pub mod connector;
 pub mod errors;
 pub mod models;
+pub mod secrets;
 
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
@@ -18,3 +19,4 @@ pub use models::{
     MediaRef, ProgressEvent, ProgressPhase, ReconcileMarker, RestoreReport, RunResult, RunStatus,
     SourceStatus, VerifyIssue, VerifyReport,
 };
+pub use secrets::Secrets;

@@ -8,6 +8,16 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Least-privilege secrets accessor (closes #6)
+**2026-08-12**
+
+- **Added:** `dbs-core::secrets::Secrets` — a read-only, allow-listed view
+  over a secret store, mirroring `src/dbs/core/secrets.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`): `get`/`get_optional`
+  reject an undeclared key with `ConnectorError::Contract`, a declared but
+  missing/empty key with `ConnectorError::Auth`; `require_all` pre-flights
+  every declared key at once. 8 new unit tests, 29/29 total passing.
+
 ## ADR-0001: dynamic plugin registry via subprocess + JSON IPC (closes #5)
 **2026-08-12**
 
