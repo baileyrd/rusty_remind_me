@@ -18,6 +18,7 @@ pub mod hashing;
 pub mod http;
 pub mod models;
 pub mod netns;
+pub mod notes_export;
 pub mod registry;
 pub mod restore;
 pub mod secrets;
@@ -54,6 +55,7 @@ pub use models::{
     SourceStatus, VerifyIssue, VerifyReport,
 };
 pub use netns::{in_named_netns, named_netns_exists};
+pub use notes_export::{export_notes, export_wiki_dir, STATE_FILENAME};
 pub use registry::{
     ConnectorCandidate, ConnectorRegistry, Handshake, LoadFailure, LoadReport, RegisteredConnector,
     DEFAULT_HANDSHAKE_TIMEOUT,

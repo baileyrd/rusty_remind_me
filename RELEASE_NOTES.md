@@ -8,6 +8,47 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## notes_export: incremental per-item Markdown export (closes #61)
+**2026-08-12**
+
+- **Added:** `BackupService::export`, porting the reference's
+  `BackupService.export` — runs an `ExportQuery` through any landed
+  `Exporter` and atomically writes the result to a path (write to a
+  sibling `.tmp` file, then rename, so a crash mid-export never leaves
+  a half-written file). **Pulled forward from #70** (the CLI-facing
+  `dbs export*` wiring): `export_notes`/`export_wiki_dir` cannot exist
+  without *some* way to turn a query into a written file, and every
+  exporter issue already lands `Exporter`/`ExportQuery` — this is the
+  missing link between them and `Storage`, not CLI argument parsing
+  (still #70's own scope). Backed by a new in-memory `ExportSource`
+  adapter that eagerly collects `Storage::iter_items`/`iter_revisions`/
+  `iter_media_blobs` (so a storage error surfaces before a single byte
+  is written, since the `Exporter` trait's `items()` etc. are
+  infallible) and a manifest/per-source-`ExportProfile` builder
+  mirroring the reference's `_manifest`/`_export_profiles` (minus
+  `tool_version`/`git_sha` — no build-metadata/VCS-introspection
+  equivalent wired up yet).
+- **Added:** `dbs-core::notes_export`, porting `src/dbs/notes_export.py`
+  — `export_notes` (one Markdown file per live item, unzipped, into a
+  directory; incremental via a `.dbs_export_state.json` state file
+  recording the previous run's *start* time as the next cutoff, applied
+  as created-*or*-updated since `ExportQuery` only ANDs filters
+  together; a persistent `(source, external_id) -> filename` map so
+  the same item always lands in the same file across runs, surviving
+  title edits and disambiguating a genuine new collision the same way
+  the obsidian exporter itself would) and `export_wiki_dir` (the
+  `wiki` export's pages loose into a directory, deliberately **not**
+  incremental — a hub page is an aggregate of everything a source has,
+  not "what's new since the cutoff").
+- 8 new tests: identity parsing (including backslash/quote
+  unescaping) and filename resolution as isolated unit tests, plus
+  `SqliteStorage`-backed integration tests (a real in-memory database,
+  not a hand-rolled fake) for a first full-write run, an incremental
+  re-run that only writes items created after the prior cutoff, a
+  same-titled item colliding across two separate runs and getting
+  disambiguated by `external_id`, and `export_wiki_dir` extracting
+  pages and the index but leaving `manifest.json` behind.
+
 ## Verify (closes #60)
 **2026-08-12**
 
