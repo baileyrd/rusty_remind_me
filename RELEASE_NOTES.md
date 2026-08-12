@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Service — crash-recovery reap-once guarantee (closes #21)
+**2026-08-12**
+
+- **Added:** `dbs-core::service::reap_once` — calls
+  `storage.reap_interrupted_runs()` at most once per shared flag, so
+  repeated calls across a batch collapse to a single reap.
+- **Scope correction (third one found this session, recorded plainly):**
+  crash-recovery reaping turned out to be `BackupService`-level
+  orchestration (`core/service.py`), not `Engine`-level — the reference's
+  `Engine.run_source` has no reap call anywhere; `reap_interrupted_runs()`
+  is called from `BackupService.backup_source`/`backup_all`. Worse:
+  `core/service.py` (`BackupService`) was never given its own
+  `gap-analysis.md` row at all, same failure class as `export_profile.py`.
+  Added it now, sized L, split into "this issue's narrow reap-once slice"
+  plus a much larger follow-up (connector instantiation via the registry,
+  VPN guard checks, `backup_source`/`backup_all` batching, status/history
+  rendering) not yet filed.
+- The actual invariant: reap must run *exactly once* per top-level call —
+  once before a standalone `backup_source`, once before an entire
+  `backup_all` batch, never once per source touched within that batch. A
+  mid-batch reap under `--parallel N` could flip a sibling's genuinely-
+  still-running row.
+- 3 new unit tests (first call reaps, repeated calls sharing one flag
+  reap only once, independent flags each reap once — simulating two
+  unrelated standalone `backup_source` calls), 111/111 total passing
+  across the workspace.
+
 ## Engine — prepare + content-hash computation (closes #17)
 **2026-08-12**
 

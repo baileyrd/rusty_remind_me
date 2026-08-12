@@ -50,6 +50,7 @@ not left as one oversized issue.
 | `CORE_API_VERSION` gating | fn | spec | both | `src/dbs/core/versioning.py` | — | no | S | |
 | Cooperative cancellation (Ctrl+C → finish in-flight, no new starts) | fn | spec | both | `src/dbs/core/cancel.py` | — | no | S | |
 | `netns` helper | fn | spec | linux | `src/dbs/core/netns.py` | — | no | S | Confirm Linux-only scope when picked up — name suggests network-namespace, may not need a Windows counterpart |
+| `BackupService` (UI-agnostic façade: `backup_source`/`backup_all`, connector instantiation via the registry, VPN guard checks, status/history rendering, once-per-call crash-recovery reap threading) | type+fn | spec | both | `src/dbs/core/service.py` | — | no | L | **Missed entirely in the original pass**, same failure as `export_profile.py` — the CLI/web-tier rows all implicitly assume this exists but it never got its own row. Found while implementing #21 (crash-recovery reaper), which turned out to be `BackupService`-level orchestration, not `Engine`-level. Split into multiple issues at filing time given its size — the reap-once guarantee is #21's real (narrow) scope; the rest (connector instantiation, VPN guard, `backup_all` batching) needs its own issue(s). |
 
 ## Storage
 
