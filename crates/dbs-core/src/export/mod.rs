@@ -24,6 +24,7 @@
 
 mod csv;
 mod json;
+mod markdown;
 mod ndjson;
 
 use std::collections::HashMap;
@@ -36,6 +37,7 @@ use crate::storage::{ExportQuery, ItemRow};
 
 pub use csv::CsvExporter;
 pub use json::JsonExporter;
+pub use markdown::MarkdownExporter;
 pub use ndjson::NdjsonExporter;
 
 /// Summary of a completed export.
@@ -90,6 +92,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
         "json" => Ok(Box::new(JsonExporter)),
         "ndjson" => Ok(Box::new(NdjsonExporter)),
         "csv" => Ok(Box::new(CsvExporter)),
+        "markdown" => Ok(Box::new(MarkdownExporter)),
         other => Err(DbsError::Config(format!(
             "unknown export format {other:?}. Available: {:?}",
             available_formats()
@@ -100,7 +103,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
 /// Every currently-registered format key, sorted — grows as each
 /// exporter issue above lands.
 pub fn available_formats() -> Vec<&'static str> {
-    vec!["json", "ndjson", "csv"]
+    vec!["json", "ndjson", "csv", "markdown"]
 }
 
 #[cfg(test)]
@@ -134,7 +137,16 @@ mod tests {
     }
 
     #[test]
+    fn get_exporter_finds_markdown() {
+        let exporter = get_exporter("markdown").unwrap();
+        assert_eq!(exporter.format(), "markdown");
+    }
+
+    #[test]
     fn available_formats_lists_every_registered_format() {
-        assert_eq!(available_formats(), vec!["json", "ndjson", "csv"]);
+        assert_eq!(
+            available_formats(),
+            vec!["json", "ndjson", "csv", "markdown"]
+        );
     }
 }
