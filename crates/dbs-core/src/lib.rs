@@ -12,6 +12,7 @@ pub mod connector;
 pub mod engine;
 pub mod errors;
 pub mod hashing;
+pub mod http;
 pub mod models;
 pub mod netns;
 pub mod secrets;
@@ -29,6 +30,7 @@ pub use connector::{Connector, RunContext, CORE_API_VERSION};
 pub use engine::commit_checkpoint;
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use hashing::{canonical_json, content_hash};
+pub use http::{HttpError, ManagedHttpClient};
 pub use models::{
     BackupItem, Checkpoint, ConnectorInfo, Cursor, DoctorCheck, FetchEvent, MaintenanceReport,
     MediaRef, ProgressEvent, ProgressPhase, ReconcileMarker, RestoreReport, RunResult, RunStatus,

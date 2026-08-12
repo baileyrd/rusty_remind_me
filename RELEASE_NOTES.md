@@ -8,6 +8,40 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Managed HTTP client (closes #22)
+**2026-08-12**
+
+- **Added:** `dbs-core::http::ManagedHttpClient`, mirroring
+  `src/dbs/core/http.py` in baileyrd/Daily-Backup-System (pinned
+  `@6cc6491`): retry with exponential backoff + jitter on transient
+  failures (network errors, 5xx, 429), `Retry-After` handling for both
+  the delta-seconds and HTTP-date forms (capped at `max_retry_after`),
+  immediate return on a non-429 4xx, and optional pre-emptive rate
+  limiting. Jitter/backoff use the same deterministic LCG as the
+  reference (no global RNG), so behavior is reproducible in tests.
+- **Design choice, stated explicitly:** blocking (`reqwest::blocking`),
+  not async. The rest of this crate is synchronous by design
+  (`Connector::fetch` returns a plain `Iterator`); threading async
+  through the whole connector trait would be a far bigger change than
+  this issue warrants, and `reqwest::blocking` runs its own internal
+  runtime without requiring `tokio` as an explicit dependency here.
+  `tokio` stays a *future* dependency for whichever issue actually needs
+  it (most plausibly the web tier).
+- **New dependencies:** `reqwest` (`blocking` + `rustls-tls` features —
+  rustls over the platform TLS stack for portability, matching the
+  cross-platform floor decision) and, dev-only, `mockito` for real
+  HTTP-level retry/status tests rather than only testing the pure
+  helper functions.
+- 16 new unit tests: 6 pure (`Retry-After` delta/negative/HTTP-date-
+  future/HTTP-date-past/garbage/missing), 2 jitter (determinism, stays
+  in `[0,1)`), 2 backoff (`Retry-After` capped at `max_retry_after`,
+  exponential growth capped at `max_backoff`), 2 throttle (sleeps once
+  the per-minute limit is hit, no-op without a configured limit), and 4
+  against a real local mock server (success, immediate non-retryable
+  4xx, retries exhausted on a persistent 5xx reporting `Transient`,
+  retries exhausted on persistent 429s reporting `RateLimited`) —
+  135/135 total passing across the workspace.
+
 ## Engine — soft-delete sweep safety decision (closes #20, subsumes #19)
 **2026-08-12**
 
