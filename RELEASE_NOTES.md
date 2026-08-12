@@ -8,6 +8,32 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Obsidian vault exporter (closes #56)
+**2026-08-12**
+
+- **Added:** `ObsidianExporter`, porting `src/dbs/export/obsidian.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — a zipped Obsidian
+  vault: one `.md` note per item under `notes/` with url2obs-compatible
+  YAML frontmatter (`category`/`author`/`title`/`description`/`source`/
+  `clipped`/`published`/`tags`, plus `dbs_`-namespaced provenance
+  fields), archived media blobs under `media/<source>/<external_id>/`
+  (embedded via `![[...]]` when the mime type looks image-like, linked
+  otherwise), and a `manifest.json` combining `ExportSource::manifest()`
+  with the query and per-source/media counts. Note-name collisions are
+  disambiguated by `external_id`, then by source, matching the
+  reference. Registered as `"obsidian"` in `get_exporter`/
+  `available_formats`.
+- **Added dependency:** `zip = "2"` (`dbs-core`, `deflate` feature only)
+  — the first exporter needing an actual zip archive; the (still
+  upcoming) archive exporter (#58) will share it. Pulled forward from
+  #58's gap-analysis note since Obsidian's `media_type` is already
+  `application/zip` in the reference.
+- 7 new tests: empty result set (manifest-only), a fully-populated item
+  (frontmatter, clipped-date truncation, tags), a deleted-item flag,
+  note-name collision disambiguation, a media blob written and linked
+  from its note, a media blob with no bytes skipped, and a metadata
+  sanity check.
+
 ## Markdown exporter (closes #55)
 **2026-08-12**
 
