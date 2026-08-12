@@ -121,6 +121,11 @@ pub enum DbsError {
     Load(ConnectorLoadError),
     Connector(ConnectorError),
     Run(BackupRunError),
+    /// A storage-backend operation failed (schema, I/O, constraint
+    /// violation, ...). Added for issue #11's `Storage` trait — the
+    /// reference doesn't need this variant since Python's storage layer
+    /// just lets backend exceptions propagate unchecked.
+    Storage(String),
 }
 
 impl fmt::Display for DbsError {
@@ -130,6 +135,7 @@ impl fmt::Display for DbsError {
             Self::Load(e) => write!(f, "{e}"),
             Self::Connector(e) => write!(f, "{e}"),
             Self::Run(e) => write!(f, "{e}"),
+            Self::Storage(msg) => write!(f, "storage error: {msg}"),
         }
     }
 }
@@ -141,6 +147,7 @@ impl std::error::Error for DbsError {
             Self::Load(e) => Some(e),
             Self::Connector(e) => Some(e),
             Self::Run(e) => Some(e),
+            Self::Storage(_) => None,
         }
     }
 }
