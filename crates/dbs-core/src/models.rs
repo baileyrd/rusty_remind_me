@@ -212,11 +212,16 @@ pub enum FetchEvent {
 // Engine/service result models (plain, render-free)                     //
 // --------------------------------------------------------------------- //
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     Success,
     Partial,
+    /// Default: a [`ConnectorRunOutcome`](crate::service::ConnectorRunOutcome)
+    /// that hasn't been filled in yet (e.g. the `unwrap_or_else` fallback
+    /// in `BackupService::backup_source` when a `ConnectorRunner` errors)
+    /// should read as failed, not silently succeeded.
+    #[default]
     Failed,
     Skipped,
     Interrupted,
@@ -270,6 +275,45 @@ impl RunResult {
         (self.finished_at - self.started_at)
             .num_milliseconds()
             .max(0)
+    }
+
+    /// A zero-activity `Skipped` result at a single instant — used for
+    /// the early-exit paths in `service::BackupService::backup_source`
+    /// (disabled source, VPN guard, dry-run).
+    pub fn skipped(
+        source: impl Into<String>,
+        at: DateTime<Utc>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            status: RunStatus::Skipped,
+            started_at: at,
+            finished_at: at,
+            mode: Self::default_mode(),
+            run_id: None,
+            fetched: 0,
+            created: 0,
+            updated: 0,
+            unchanged: 0,
+            deleted: 0,
+            undeleted: 0,
+            revisions: 0,
+            items_failed: 0,
+            error: Some(reason.into()),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A zero-activity `Failed` result at a single instant — used when a
+    /// source-level error (not a connector-fetch error) aborts a run
+    /// before it can begin, e.g. in `BackupService::backup_all`'s
+    /// `continue_on_error` path.
+    pub fn failed(source: impl Into<String>, at: DateTime<Utc>, reason: impl Into<String>) -> Self {
+        Self {
+            status: RunStatus::Failed,
+            ..Self::skipped(source, at, reason)
+        }
     }
 }
 
