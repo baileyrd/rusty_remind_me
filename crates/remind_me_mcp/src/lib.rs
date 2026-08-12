@@ -135,8 +135,10 @@ use remind_me_core::{
     EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
     IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
     NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
-    RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN,
-    REMINDER_LIMIT_MAX, REMINDER_LIMIT_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
+    PROMOTION_LIMIT_DEFAULT, PROMOTION_LIMIT_MAX, PROMOTION_LIMIT_MIN, RECALIBRATE_LIMIT_MAX,
+    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, REMINDER_LIMIT_MAX,
+    REMINDER_LIMIT_MIN, STALE_CANDIDATES_LIMIT_DEFAULT, STALE_CANDIDATES_LIMIT_MAX,
+    STALE_CANDIDATES_LIMIT_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -483,9 +485,10 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "id": { "type": "string" }
+                                        "memory_id": { "type": "string" },
+                                        "id": { "type": "string", "description": "Deprecated alias for memory_id. Prefer memory_id; kept for backward compatibility." }
                                     },
-                                    "required": ["id"]
+                                    "required": ["memory_id"]
                                 }
                             },
                             {
@@ -772,7 +775,7 @@ impl McpServer {
                                     "type": "object",
                                     "properties": {
                                         "rung": { "type": "string", "enum": ["capture_to_fact", "fact_to_scenario", "scenario_to_persona"], "description": "capture_to_fact is reported here but promoted with remind_me_decompose." },
-                                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+                                        "limit": { "type": "integer", "default": PROMOTION_LIMIT_DEFAULT, "minimum": PROMOTION_LIMIT_MIN, "maximum": PROMOTION_LIMIT_MAX }
                                     },
                                     "required": ["rung"]
                                 }
@@ -796,7 +799,7 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+                                        "limit": { "type": "integer", "default": STALE_CANDIDATES_LIMIT_DEFAULT, "minimum": STALE_CANDIDATES_LIMIT_MIN, "maximum": STALE_CANDIDATES_LIMIT_MAX }
                                     }
                                 }
                             },
@@ -1425,7 +1428,15 @@ impl McpServer {
                         }
                     }
                     "remind_me_get" => {
-                        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        // "memory_id" is the canonical parameter, matching every
+                        // other single-memory tool. "id" is a deprecated alias
+                        // kept so existing callers don't break; it's only
+                        // consulted when "memory_id" is absent.
+                        let id = args
+                            .get("memory_id")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| args.get("id").and_then(|v| v.as_str()))
+                            .unwrap_or("");
                         match queries::get_memory_by_id(&conn, id) {
                             Ok(Some(mem)) => {
                                 json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] })
@@ -1977,8 +1988,11 @@ impl McpServer {
                             serde_json::from_value(
                                 args.get("rung").cloned().unwrap_or(serde_json::Value::Null),
                             );
-                        let limit =
-                            args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(PROMOTION_LIMIT_DEFAULT as u64)
+                            as usize;
                         match rung {
                             Ok(rung) => {
                                 match remind_me_core::promotion::promotion_candidates(
@@ -1991,10 +2005,21 @@ impl McpServer {
                                         // the one below it filling up.
                                         let backlog = remind_me_core::promotion::backlog(&conn)
                                             .unwrap_or_default();
+                                        // Uncapped, unlike `backlog` above (which probes
+                                        // only up to BACKLOG_PROBE per rung so it stays
+                                        // cheap): this is the real count behind *this*
+                                        // rung's page, so it keeps moving past the probe
+                                        // ceiling instead of reading as stuck (#283).
+                                        let total_candidates =
+                                            remind_me_core::promotion::count_candidates(
+                                                &conn, rung,
+                                            )
+                                            .unwrap_or_default();
                                         json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
                                             "rung": rung,
                                             "count": found.len(),
                                             "candidates": found,
+                                            "total_candidates": total_candidates,
                                             "backlog": backlog,
                                             "backlog_summary": backlog.summary(),
                                             // Not `nudge_interval().is_some()`: that only
@@ -2035,17 +2060,21 @@ impl McpServer {
                         }
                     }
                     "remind_me_stale_candidates" => {
-                        let limit =
-                            args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(STALE_CANDIDATES_LIMIT_DEFAULT as u64)
+                            as usize;
                         match remind_me_core::code_refs::stale_candidates(&conn, limit) {
                             Ok(found) => {
                                 json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&json!({
-                                    "count": found.len(),
-                                    "candidates": found,
+                                    "count": found.candidates.len(),
+                                    "candidates": found.candidates,
+                                    "total_candidates": found.total_candidates,
                                 })).unwrap() }] })
                             }
                             Err(e) => {
-                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Stale-candidates error: {}", e) }] })
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Stale candidates error: {}", e) }] })
                             }
                         }
                     }
@@ -3412,6 +3441,83 @@ mod tests {
     }
 
     #[test]
+    fn test_remind_me_get_schema_advertises_memory_id_as_required() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let listed = server
+            .handle_request(
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+            )
+            .unwrap();
+        let tools = listed["result"]["tools"].as_array().unwrap().clone();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "remind_me_get")
+            .expect("remind_me_get must still be declared");
+
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("memory_id"),
+            "memory_id must be advertised, matching every other single-memory tool"
+        );
+        assert!(
+            props.contains_key("id"),
+            "id stays advertised as a deprecated alias so existing schema-reading clients still see it"
+        );
+        let required: Vec<&str> = tool["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            required,
+            vec!["memory_id"],
+            "memory_id is the canonical required param, not id"
+        );
+    }
+
+    #[test]
+    fn test_remind_me_get_accepts_both_memory_id_and_the_deprecated_id_alias() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let added = call(&server, "remind_me_add", json!({ "content": "a fact" }));
+        let id = serde_json::from_str::<Value>(&text_of(&added)).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Canonical: memory_id.
+        let via_memory_id = call(&server, "remind_me_get", json!({ "memory_id": id }));
+        assert!(via_memory_id.get("isError").is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&text_of(&via_memory_id)).unwrap()["id"],
+            id
+        );
+
+        // Deprecated alias: id, for backward compatibility (#283).
+        let via_id = call(&server, "remind_me_get", json!({ "id": id }));
+        assert!(via_id.get("isError").is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&text_of(&via_id)).unwrap()["id"],
+            id
+        );
+
+        // memory_id wins when both are somehow present.
+        let both = call(
+            &server,
+            "remind_me_get",
+            json!({ "memory_id": id, "id": "mem_nope" }),
+        );
+        assert!(both.get("isError").is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(&text_of(&both)).unwrap()["id"],
+            id
+        );
+    }
+
+    #[test]
     fn test_annotate_tool_round_trip_and_partial_failure() {
         let db = Database::open_in_memory().unwrap();
         let server = McpServer::new(db);
@@ -4601,6 +4707,126 @@ mod tests {
         let text = text_of(&res);
         assert!(text.contains("\"count\": 1"), "{text}");
         assert!(text.contains("\"deleted\""), "{text}");
+    }
+
+    #[test]
+    fn stale_candidates_response_reports_the_uncapped_total() {
+        let _lock = CODE_ROOTS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root =
+            std::env::temp_dir().join(format!("rrm_mcp_coderefs_total_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("auth.rs");
+        std::fs::write(&file, "fn login() {}\n").unwrap();
+        std::env::set_var(
+            remind_me_core::code_refs::CODE_ROOTS_ENV,
+            root.display().to_string(),
+        );
+
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        for i in 0..5 {
+            call(
+                &server,
+                "remind_me_add",
+                json!({ "content": format!("memo {i}: don't touch {}", file.display()) }),
+            );
+        }
+        std::fs::remove_file(&file).unwrap();
+
+        let res = call(&server, "remind_me_stale_candidates", json!({ "limit": 2 }));
+        std::env::remove_var(remind_me_core::code_refs::CODE_ROOTS_ENV);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(res.get("isError").is_none());
+        let body: Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert_eq!(body["count"], 2, "the page stays capped at limit");
+        assert_eq!(
+            body["total_candidates"], 5,
+            "total_candidates must be the real backlog, not just the page"
+        );
+    }
+
+    #[test]
+    fn stale_candidates_schema_bounds_match_the_rust_side_clamp_constants() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let listed = server
+            .handle_request(
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+            )
+            .unwrap();
+        let tools = listed["result"]["tools"].as_array().unwrap().clone();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "remind_me_stale_candidates")
+            .expect("remind_me_stale_candidates must still be declared");
+
+        let limit_schema = &tool["inputSchema"]["properties"]["limit"];
+        assert_eq!(
+            limit_schema["minimum"].as_u64().unwrap() as usize,
+            remind_me_core::STALE_CANDIDATES_LIMIT_MIN
+        );
+        assert_eq!(
+            limit_schema["maximum"].as_u64().unwrap() as usize,
+            remind_me_core::STALE_CANDIDATES_LIMIT_MAX
+        );
+    }
+
+    #[test]
+    fn promotion_candidates_schema_bounds_match_the_rust_side_clamp_constants() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let listed = server
+            .handle_request(
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+            )
+            .unwrap();
+        let tools = listed["result"]["tools"].as_array().unwrap().clone();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "remind_me_promotion_candidates")
+            .expect("remind_me_promotion_candidates must still be declared");
+
+        let limit_schema = &tool["inputSchema"]["properties"]["limit"];
+        assert_eq!(
+            limit_schema["minimum"].as_u64().unwrap() as usize,
+            remind_me_core::PROMOTION_LIMIT_MIN
+        );
+        assert_eq!(
+            limit_schema["maximum"].as_u64().unwrap() as usize,
+            remind_me_core::PROMOTION_LIMIT_MAX
+        );
+    }
+
+    #[test]
+    fn promotion_candidates_response_reports_an_uncapped_total_candidates_field() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        // A capture that has never been decomposed is a capture_to_fact
+        // candidate (see promotion::capture_candidates); one is enough to
+        // prove the field is present and a real count, without needing to
+        // exercise the fact_to_scenario/scenario_to_persona thresholds too.
+        call(
+            &server,
+            "remind_me_auto_capture",
+            json!({ "conversation": "raw transcript", "summary": "a summary" }),
+        );
+
+        let res = call(
+            &server,
+            "remind_me_promotion_candidates",
+            json!({ "rung": "capture_to_fact" }),
+        );
+        assert!(res.get("isError").is_none());
+        let body: Value = serde_json::from_str(&text_of(&res)).unwrap();
+        assert!(
+            body.get("total_candidates").is_some(),
+            "total_candidates must be present in the response: {body}"
+        );
     }
 }
 

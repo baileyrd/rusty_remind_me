@@ -2,6 +2,18 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-12 — MCP surface consistency: `id`/`memory_id` alias, shared limit constants, backlog counts, error-prefix nit (#283)
+
+### Fixed
+- **`remind_me_get` used `"id"` where ~15 other single-memory tools use `"memory_id"`.** Its schema now advertises `memory_id` as the canonical, required parameter, matching `remind_me_delete`/`remind_me_update`/`remind_me_history`/etc. `id` is still accepted in the dispatch handler as a deprecated alias (checked only when `memory_id` is absent), so existing callers passing `id` keep working.
+- **`promotion_candidates`/`stale_candidates`'s limit bounds were unlinked JSON/Rust literals.** Both hardcoded `1`/`20`/`100` directly in their MCP schemas, independently re-hardcoded as `.clamp(1, 100)` in `promotion.rs`/`code_refs.rs` — two copies that could silently drift. Added `PROMOTION_LIMIT_MIN/MAX/DEFAULT` and `STALE_CANDIDATES_LIMIT_MIN/MAX/DEFAULT` to `remind_me_core::models`, referenced from both the schema JSON and the Rust-side clamps, matching the existing `CONTRADICTION_LIMIT_*`/`RECALIBRATE_LIMIT_*` pattern.
+- **`promotion_candidates`'s `backlog` figure was capped at `BACKLOG_PROBE`**, so once the true backlog exceeded that cap the reported number never changed again; **`stale_candidates` had no count-behind-limit field at all.** Both now return an uncapped `total_candidates` field, matching `recalibrate_candidates`'s shape. `promotion::count_candidates(conn, rung)` runs the same predicate as `promotion_candidates` without a `LIMIT`; `code_refs::stale_candidates` now `stat`-checks every anchored row regardless of `limit` (no early break) and only truncates the returned page, returning a `StaleCandidatesResult { candidates, total_candidates }`. Full cursor pagination for these two tools is out of scope here — just the count.
+- **`"Stale-candidates error: {}"` was hyphenated where every other dispatch arm uses a space** (`"Promotion error"`, `"Contradiction candidates error"`, etc.). Fixed to `"Stale candidates error: {}"`.
+
+### Provenance
+
+Filed as #283, a bundle of four small MCP-surface inconsistencies found in one audit sweep. Fixed by direct source inspection of `crates/remind_me_mcp/src/lib.rs`, `crates/remind_me_core/src/models.rs`, `crates/remind_me_core/src/promotion.rs`, and `crates/remind_me_core/src/code_refs.rs`. Verified with `cargo test -p remind_me_mcp -p remind_me_core`, `cargo clippy -p remind_me_mcp -p remind_me_core --all-targets`, and `cargo fmt --all --check`, all clean.
+
 ## 2026-08-11 — `promote()` now rejects duplicate calls with identical sources (#274)
 
 ### Fixed

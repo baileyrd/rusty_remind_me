@@ -49,7 +49,7 @@
 
 use crate::models::{
     Memory, PersonaStatement, PromoteInput, PromotionCandidate, PromotionResult, Provenance, Rung,
-    FACT_CATEGORY, PERSONA_CATEGORY, SCENARIO_CATEGORY,
+    FACT_CATEGORY, PERSONA_CATEGORY, PROMOTION_LIMIT_MAX, PROMOTION_LIMIT_MIN, SCENARIO_CATEGORY,
 };
 use crate::vitality::{calculate_vitality, get_decay_rate, get_source_prior, get_type_prior};
 use chrono::Utc;
@@ -306,12 +306,79 @@ pub fn promotion_candidates(
     rung: Rung,
     limit: usize,
 ) -> SqlResult<Vec<PromotionCandidate>> {
-    let limit = limit.clamp(1, 100);
+    let limit = limit.clamp(PROMOTION_LIMIT_MIN, PROMOTION_LIMIT_MAX);
     match rung {
         Rung::CaptureToFact => capture_candidates(conn, limit),
         Rung::FactToScenario => scenario_candidates(conn, limit),
         Rung::ScenarioToPersona => persona_candidates(conn, limit),
     }
+}
+
+/// The true, uncapped count of what is ready at one rung.
+///
+/// Unlike [`backlog`], which probes every rung up to [`BACKLOG_PROBE`] so it
+/// stays cheap when read alongside a candidate listing, this counts exactly —
+/// no `LIMIT`, no probe ceiling — the same predicate [`promotion_candidates`]
+/// filters by. It exists so a caller reading one rung's candidate page can
+/// tell whether the page is the whole backlog or just the front of it (#283),
+/// the way `recalibrate::candidate_count` already does for recalibration.
+pub fn count_candidates(conn: &Connection, rung: Rung) -> SqlResult<usize> {
+    let count: i64 = match rung {
+        Rung::CaptureToFact => conn.query_row(
+            "SELECT COUNT(*)
+               FROM memories m
+              WHERE m.capture_id IS NOT NULL
+                AND m.source_capture_id IS NULL
+                AND m.deleted_at IS NULL
+                AND m.category = 'dialog'
+                AND NOT EXISTS (
+                    SELECT 1 FROM memories c WHERE c.source_capture_id = m.capture_id
+                )",
+            [],
+            |r| r.get(0),
+        )?,
+        Rung::FactToScenario => conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT e.id
+                   FROM memories m
+                   JOIN memory_entities me ON me.memory_id = m.id
+                   JOIN entities e ON e.id = me.entity_id
+                  WHERE m.category = ?
+                    AND m.deleted_at IS NULL
+                    AND m.superseded_by IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM promotions p WHERE p.source_id = m.id AND p.rung = ?
+                    )
+                  GROUP BY e.id
+                 HAVING count(*) >= ?
+             )",
+            params![
+                FACT_CATEGORY,
+                Rung::FactToScenario.as_str(),
+                MIN_SCENARIO_FACTS as i64
+            ],
+            |r| r.get(0),
+        )?,
+        Rung::ScenarioToPersona => conn.query_row(
+            "SELECT COUNT(*)
+               FROM memories m
+              WHERE m.category = ?
+                AND m.deleted_at IS NULL
+                AND m.superseded_by IS NULL
+                AND m.sensitive = 0
+                AND m.vitality >= ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM promotions p WHERE p.source_id = m.id AND p.rung = ?
+                )",
+            params![
+                SCENARIO_CATEGORY,
+                PERSONA_VITALITY_FLOOR,
+                Rung::ScenarioToPersona.as_str()
+            ],
+            |r| r.get(0),
+        )?,
+    };
+    Ok(count as usize)
 }
 
 /// One source memory, as far as promotion cares.

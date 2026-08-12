@@ -40,6 +40,7 @@
 //! not an automatic demotion.
 
 use crate::import_paths::{expand_home, is_contained, resolve_lexically, split_path_list};
+use crate::models::{STALE_CANDIDATES_LIMIT_MAX, STALE_CANDIDATES_LIMIT_MIN};
 use rusqlite::{Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -216,10 +217,23 @@ pub struct StaleCandidate {
     pub stale_refs: Vec<StaleRef>,
 }
 
+/// A page of stale-anchor candidates, plus the true backlog behind it.
+///
+/// Matches `RecalibrateCandidatesResult`'s shape (#283): `total_candidates`
+/// is the full, uncapped count of everything [`stale_candidates`] found
+/// stale, not just what fit under `limit` — so a caller can tell whether the
+/// returned page is the whole backlog or just the front of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleCandidatesResult {
+    pub candidates: Vec<StaleCandidate>,
+    pub total_candidates: usize,
+}
+
 /// Re-check every anchored path and report memories where at least one no
 /// longer matches.
 ///
-/// Read-only — see the module doc. `limit` is clamped to `1..=100`, matching
+/// Read-only — see the module doc. `limit` is clamped to
+/// [`STALE_CANDIDATES_LIMIT_MIN`]..=[`STALE_CANDIDATES_LIMIT_MAX`], matching
 /// [`crate::promotion::promotion_candidates`]'s convention, but unlike that
 /// function the bound is applied only in Rust, after staleness is
 /// determined — never as a SQL `LIMIT`. The query's `WHERE` clause is a
@@ -228,6 +242,13 @@ pub struct StaleCandidate {
 /// would cut the row set before that, and could silently drop a real stale
 /// candidate sitting past the first N rows in default order — the opposite
 /// of the "accurate first page" this function promises.
+///
+/// The returned [`StaleCandidatesResult::total_candidates`] is the full
+/// count of everything found stale, not just what fit under `limit` (#283):
+/// every anchored row is `stat`-checked regardless of `limit`, and only the
+/// final list is truncated, so the count behind the page is never silently
+/// capped the way [`crate::promotion::backlog`]'s `BACKLOG_PROBE` caps its
+/// number.
 ///
 /// # Two checks this reads through that write-time anchoring already applies
 ///
@@ -252,8 +273,8 @@ pub struct StaleCandidate {
 ///   `include_sensitive` override, because this is assembled to be read
 ///   rather than asked for, so there is no per-call intent to opt back in
 ///   against.
-pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<Vec<StaleCandidate>> {
-    let limit = limit.clamp(1, 100);
+pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<StaleCandidatesResult> {
+    let limit = limit.clamp(STALE_CANDIDATES_LIMIT_MIN, STALE_CANDIDATES_LIMIT_MAX);
     let mut stmt = conn.prepare(
         "SELECT id, content, metadata
            FROM memories
@@ -268,11 +289,11 @@ pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<Vec<StaleC
         .collect::<SqlResult<_>>()?;
 
     let roots = configured_code_roots();
+    // No early break on `limit` here -- every row is checked so
+    // `total_candidates` below is the real count, not just what fit on the
+    // page. Only the returned `candidates` are truncated to `limit`.
     let mut out = Vec::new();
     for (id, content, metadata_json) in rows {
-        if out.len() >= limit {
-            break;
-        }
         let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&metadata_json) else {
             continue;
         };
@@ -314,5 +335,10 @@ pub fn stale_candidates(conn: &Connection, limit: usize) -> SqlResult<Vec<StaleC
         }
     }
 
-    Ok(out)
+    let total_candidates = out.len();
+    out.truncate(limit);
+    Ok(StaleCandidatesResult {
+        candidates: out,
+        total_candidates,
+    })
 }
