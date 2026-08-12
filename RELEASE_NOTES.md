@@ -8,6 +8,35 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Storage trait (closes #11)
+**2026-08-12**
+
+- **Added:** `dbs-core::storage` — the `Storage` trait plus
+  `PreparedItem`, `BatchResult`, `ItemRow`, `SourceRecord`, mirroring
+  `src/dbs/storage/base.py` in baileyrd/Daily-Backup-System (pinned
+  `@6cc6491`). Trait-only, no concrete backend — that's #12, which is
+  also where `rusqlite` gets added; this issue needed no new dependency.
+- **Scoped deliberately narrower than the reference in two ways,
+  documented in the module doc-comment:**
+  - `iter_items`/`iter_revisions`/`browse_items` take an `ExportQuery`
+    defined locally as a minimal placeholder, not the reference's real
+    `export/base.py::ExportQuery` (its own gap-analysis row) — superseded
+    once that lands.
+  - The reference's `transaction()` context-manager method isn't ported;
+    Rust has no direct trait-object-safe equivalent for an RAII guard
+    over an unknown concrete connection type without more design work
+    than this issue covers. Atomicity for a batch write is instead each
+    such method's own responsibility in the concrete (#12)
+    implementation.
+- **Changed:** `DbsError` gains a `Storage(String)` variant — the
+  reference lets backend exceptions propagate unchecked, but `Storage`'s
+  methods need a concrete error type for their `Result` signatures.
+- 6 new unit tests (`BatchResult::merge` counting and `max_updated_at`
+  precedence, an `InMemoryStorage` test double proving the trait is
+  object-safe and round-trips a source, default `maintain`/
+  `prune_revisions`/`vacuum_into`/`spawn` behavior matching the
+  reference's defaults), 59/59 total passing.
+
 ## Cooperative cancellation + RunContext catch-up (closes #10)
 **2026-08-12**
 

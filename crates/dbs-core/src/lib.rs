@@ -12,6 +12,7 @@ pub mod errors;
 pub mod hashing;
 pub mod models;
 pub mod secrets;
+pub mod storage;
 pub mod timeutil;
 pub mod versioning;
 
@@ -26,5 +27,6 @@ pub use models::{
     SourceStatus, VerifyIssue, VerifyReport,
 };
 pub use secrets::Secrets;
+pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
 pub use timeutil::{iso_z, parse_iso};
 pub use versioning::{is_api_compatible, CURRENT_API_VERSION};
