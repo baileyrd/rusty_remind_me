@@ -187,3 +187,15 @@ not left as one oversized issue.
    `nlm` CLI or runs `notebooklm-mcp` as a subprocess/MCP client, the same
    integration shape as decision 3. Any port would need to replicate its
    cookie-extraction + CSRF-refresh handling, not just its HTTP calls.
+5. **Minor standard crates → auto-approved, named in the PR (decided
+   2026-08-12, mid-implementation).** Small, narrowly-scoped, widely-used
+   crates (`sha2`, `csv`, `uuid`, `urlencoding`/`percent-encoding`, and
+   similar single-purpose RustCrypto/rust-lang-adjacent tier crates) no
+   longer need an individual stop-and-ask — the earlier foundational-
+   dependency decision only enumerated the big, architecturally-visible
+   ones (SQLite, TOML/JSON, CLI parsing, HTTP, async runtime, zip,
+   AES-GCM/scrypt), and dozens of small equivalents were always going to
+   surface across 66 rows. Still stop and ask for anything with real
+   weight: a new architectural choice, broad-scope crates (a web
+   framework, a database engine), or anything replacing an
+   already-decided piece.

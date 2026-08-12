@@ -8,6 +8,23 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Content hashing for change classification (closes #7)
+**2026-08-12**
+
+- **Added:** `dbs-core::hashing` — `canonical_json`/`content_hash`,
+  mirroring `src/dbs/core/hashing.py` in baileyrd/Daily-Backup-System
+  (pinned `@6cc6491`). `serde_json::Value`'s default `Map` is a
+  `BTreeMap` (this workspace doesn't enable `preserve_order`), so
+  `canonical_json` gets sorted-key determinism for free from
+  `serde_json::to_string` — no manual sorting needed, unlike the
+  reference's explicit `sort_keys=True`.
+- **New dependency:** `sha2` (SHA-256). First use of the new "small,
+  narrowly-scoped standard crates are auto-approved" policy decided
+  mid-implementation — see `gap-analysis.md`'s Decisions section, item 5.
+- 6 new unit tests (key sorting at every nesting level, compact
+  separators, non-ASCII kept unescaped, order-independence, real-change
+  detection, digest shape), 35/35 total passing.
+
 ## Least-privilege secrets accessor (closes #6)
 **2026-08-12**
 
