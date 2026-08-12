@@ -8,6 +8,19 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Core error hierarchy (closes #3)
+**2026-08-12**
+
+- **Added:** `dbs-core::errors` — `DbsError`, `ConnectorLoadError`,
+  `ConnectorError`, `BackupRunError`, mirroring `src/dbs/core/errors.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`). The reference uses an
+  exception *class* hierarchy (`RateLimitedError` subclasses
+  `TransientFetchError` so one `except` catches both); Rust has no
+  subclassing, so that relationship is a classification method,
+  `ConnectorError::is_retryable()`, instead of nested variant matching —
+  same semantics as the reference, idiomatic shape for the language. 5 new
+  unit tests, all green.
+
 ## Cargo workspace scaffold + core data model (closes #2)
 **2026-08-12**
 
