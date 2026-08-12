@@ -96,7 +96,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Restore (`dbs restore`, dry-run, manifest/schema-version validation) | fn | spec | both | `src/dbs/restore.py` | — | no | M | |
+| Restore (`dbs restore`, dry-run, manifest/schema-version validation) | fn | spec | both | `src/dbs/restore.py` | — | no | M | Done (#59) — orchestrator landed as `BackupService::restore` (`src/dbs/core/service.py`'s split, not `restore.py`'s own scope) |
 | Verify (DB integrity + archive checksum check) | fn | spec | both | `cli.py` (`dbs verify`) | — | no | S | |
 | `notes_export.py` (incremental per-item markdown, collision map, state file) | fn | spec | both | `src/dbs/notes_export.py` | — | no | M | |
 | `templates.py` (`dbs init` scaffolding writer) | fn | spec | both | `src/dbs/templates.py` | — | no | S | |

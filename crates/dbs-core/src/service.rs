@@ -40,15 +40,23 @@
 //! `finish_run` exactly once, translating a runner error into a `Failed`
 //! result instead.
 
+use std::collections::HashMap;
+use std::path::Path;
+
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::capabilities::Capabilities;
 use crate::config::{Config, SourceConfig, VpnGuard};
+use crate::crypto::{decrypt_file, is_encrypted, resolve_passphrase, DEFAULT_PASSPHRASE_ENV};
 use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
-use crate::models::{Cursor, RunResult, RunStatus, SourceStatus};
+use crate::models::{Cursor, RestoreReport, RunResult, RunStatus, SourceStatus};
 use crate::netns::in_named_netns;
 use crate::registry::{ConnectorRegistry, RegisteredConnector};
-use crate::storage::{BatchResult, ItemRow, Storage};
+use crate::restore::{
+    iter_export_rows, prepared_item_from_row, read_manifest, skipped_extras, verify_archive,
+};
+use crate::storage::migrations::SCHEMA_VERSION;
+use crate::storage::{BatchResult, ItemRow, PreparedItem, Storage};
 use crate::timeutil::parse_iso;
 
 /// Calls `storage.reap_interrupted_runs()` unless `already_reaped` is
@@ -606,6 +614,219 @@ impl<'a> BackupService<'a> {
         };
         self.storage.recent_runs(source_id, limit)
     }
+
+    /// Replays an export (archive zip or raw-bearing ndjson) into the
+    /// DB. Mirrors the reference's `BackupService.restore`.
+    ///
+    /// Rows go through the same classified [`Storage::upsert_items`]
+    /// path a live backup uses, carrying their stored `content_hash`
+    /// verbatim, so a re-restore of the same bundle is a no-op
+    /// ("unchanged"). Existing sources are never reconfigured — a
+    /// source row is created only when missing (type from the bundle,
+    /// empty config). Cursors are untouched: a freshly restored source
+    /// simply does a full run on its next backup. Each restored source
+    /// gets a `mode="restore"` entry in run history.
+    ///
+    /// An encrypted bundle is decrypted to a private temp file first —
+    /// the passphrase comes from `secret_store` or the environment,
+    /// never argv (see [`crate::crypto`]).
+    pub fn restore(
+        &mut self,
+        path: &Path,
+        dry_run: bool,
+        secret_store: Option<&HashMap<String, String>>,
+    ) -> Result<RestoreReport, DbsError> {
+        if !path.is_file() {
+            return Err(DbsError::Config(format!(
+                "no such file: {}",
+                path.display()
+            )));
+        }
+
+        if is_encrypted(path) {
+            let passphrase = resolve_passphrase(secret_store, DEFAULT_PASSPHRASE_ENV)?;
+            let tmp_dir = std::env::temp_dir().join(format!(
+                "dbs-restore-{}-{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&tmp_dir)
+                .map_err(|e| DbsError::Storage(format!("failed to create temp dir: {e}")))?;
+            let plain = tmp_dir.join("bundle");
+            let result = decrypt_file(path, &plain, &passphrase).and_then(|_| {
+                self.restore(&plain, dry_run, secret_store)
+                    .map(|mut report| {
+                        report.path = path.display().to_string();
+                        report
+                    })
+            });
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return result;
+        }
+
+        let manifest = read_manifest(path)?;
+        if manifest.is_some() {
+            // A checksummed bundle is verified before a single row is
+            // ingested; a corrupt or tampered bundle must never be
+            // partially restored.
+            let integrity = verify_archive(path)?;
+            if !integrity.issues.is_empty() {
+                return Err(DbsError::Config(format!(
+                    "bundle failed integrity verification: {}",
+                    integrity
+                        .issues
+                        .iter()
+                        .take(5)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )));
+            }
+        }
+        if let Some(bundle_schema) = manifest
+            .as_ref()
+            .and_then(|m| m.get("db_schema_version"))
+            .and_then(|v| v.as_i64())
+        {
+            if bundle_schema > SCHEMA_VERSION {
+                return Err(DbsError::Config(format!(
+                    "bundle was written by a newer dbs (db_schema_version {bundle_schema} > this build's {SCHEMA_VERSION}); upgrade dbs before restoring."
+                )));
+            }
+        }
+
+        let mut warnings: Vec<String> = Vec::new();
+        let (revisions_skipped, media_skipped) = skipped_extras(manifest.as_ref());
+        if revisions_skipped > 0 {
+            warnings.push(format!(
+                "{revisions_skipped} revision row(s) in the bundle were not restored (restore replays the latest item state only)"
+            ));
+        }
+        if media_skipped > 0 {
+            warnings.push(format!(
+                "{media_skipped} media file(s) in the bundle were not restored"
+            ));
+        }
+
+        let rows = iter_export_rows(path)?;
+
+        let mut fetched: u64 = 0;
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        let mut records: HashMap<String, crate::storage::SourceRecord> = HashMap::new();
+        let mut runs: HashMap<String, i64> = HashMap::new();
+        let mut buffers: HashMap<String, Vec<PreparedItem>> = HashMap::new();
+        let mut stats: HashMap<String, BatchResult> = HashMap::new();
+
+        for row in &rows {
+            fetched += 1;
+            let name = row
+                .get("source")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                return Err(DbsError::Config(format!(
+                    "{}: row {fetched} has no source name",
+                    path.display()
+                )));
+            }
+            let item = prepared_item_from_row(row, &format!("{}: row {fetched}", path.display()))?;
+            *seen.entry(name.clone()).or_insert(0) += 1;
+            if dry_run {
+                continue;
+            }
+            if !records.contains_key(&name) {
+                let existing = match self.storage.get_source(&name)? {
+                    Some(r) => r,
+                    None => {
+                        let stype = row
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        self.storage.upsert_source(
+                            &name,
+                            stype,
+                            &format!("restored:{stype}"),
+                            "{}",
+                            1,
+                        )?
+                    }
+                };
+                let run_id =
+                    self.storage
+                        .begin_run(existing.id, &existing.plugin_id, "restore", None)?;
+                records.insert(name.clone(), existing);
+                runs.insert(name.clone(), run_id);
+                buffers.insert(name.clone(), Vec::new());
+                stats.insert(name.clone(), BatchResult::default());
+            }
+            buffers.get_mut(&name).unwrap().push(item);
+            if buffers[&name].len() >= 500 {
+                let batch = std::mem::take(buffers.get_mut(&name).unwrap());
+                let res =
+                    self.storage
+                        .upsert_items(records[&name].id, runs[&name], &batch, false, 0)?;
+                stats.get_mut(&name).unwrap().merge(&res);
+            }
+        }
+
+        for (name, batch) in buffers.iter_mut() {
+            if batch.is_empty() {
+                continue;
+            }
+            let res = self
+                .storage
+                .upsert_items(records[name].id, runs[name], batch, false, 0)?;
+            stats.get_mut(name).unwrap().merge(&res);
+        }
+
+        for (name, run_id) in &runs {
+            self.storage.finish_run(
+                *run_id,
+                run_status_str(RunStatus::Success),
+                &stats[name],
+                *seen.get(name).unwrap_or(&0),
+                None,
+                None,
+                &[],
+            )?;
+        }
+
+        let mut totals = BatchResult::default();
+        for st in stats.values() {
+            totals.merge(st);
+        }
+
+        if let Some(expected) = manifest
+            .as_ref()
+            .and_then(|m| m.get("counts"))
+            .and_then(|c| c.get("items"))
+            .and_then(|v| v.as_u64())
+        {
+            if expected != fetched {
+                warnings.push(format!(
+                    "manifest says {expected} item(s) but the bundle held {fetched}"
+                ));
+            }
+        }
+
+        let mut sources: Vec<String> = seen.keys().cloned().collect();
+        sources.sort();
+
+        Ok(RestoreReport {
+            path: path.display().to_string(),
+            dry_run,
+            sources,
+            fetched,
+            created: totals.created,
+            updated: totals.updated,
+            unchanged: totals.unchanged,
+            deleted: totals.deleted,
+            revisions_skipped,
+            media_skipped,
+            warnings,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1001,6 +1222,10 @@ mod tests {
         locks: std::collections::HashSet<i64>,
         counts_by_source: HashMap<i64, (u64, u64, u64)>,
         reap_calls: usize,
+        /// `source_id -> (external_id -> content_hash)`, for a real
+        /// (not `unimplemented!()`) `upsert_items` the restore tests
+        /// need to exercise created/updated/unchanged classification.
+        items_by_source: HashMap<i64, HashMap<String, String>>,
     }
 
     impl Storage for FakeStorage {
@@ -1126,13 +1351,30 @@ mod tests {
 
         fn upsert_items(
             &mut self,
-            _: i64,
-            _: i64,
-            _: &[crate::storage::PreparedItem],
-            _: bool,
-            _: u64,
+            source_id: i64,
+            _run_id: i64,
+            items: &[crate::storage::PreparedItem],
+            _store_media: bool,
+            _max_media_bytes: u64,
         ) -> Result<BatchResult, DbsError> {
-            unimplemented!()
+            let mut result = BatchResult::default();
+            let store = self.items_by_source.entry(source_id).or_default();
+            for item in items {
+                match store.get(&item.external_id) {
+                    Some(existing_hash) if existing_hash == &item.content_hash => {
+                        result.unchanged += 1;
+                    }
+                    Some(_) => {
+                        result.updated += 1;
+                        store.insert(item.external_id.clone(), item.content_hash.clone());
+                    }
+                    None => {
+                        result.created += 1;
+                        store.insert(item.external_id.clone(), item.content_hash.clone());
+                    }
+                }
+            }
+            Ok(result)
         }
         fn soft_delete_missing(
             &mut self,
@@ -1570,5 +1812,221 @@ mod tests {
         let runner = ScriptedRunner::success(BatchResult::default(), 0);
         let service = BackupService::new(&mut storage, &config, &registry, &runner);
         assert!(service.history(Some("missing"), 10).unwrap().is_empty());
+    }
+
+    // -- restore --------------------------------------------------------
+
+    fn restore_temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-service-restore-test-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn restore_item_row(external_id: &str, source: &str, content_hash: &str) -> serde_json::Value {
+        serde_json::json!({
+            "source": source,
+            "external_id": external_id,
+            "item_kind": "bookmark",
+            "title": "hello",
+            "content_hash": content_hash,
+            "raw": {"a": 1},
+        })
+    }
+
+    fn write_ndjson_bundle(path: &std::path::Path, rows: &[serde_json::Value]) {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).unwrap();
+        for row in rows {
+            writeln!(file, "{}", serde_json::to_string(row).unwrap()).unwrap();
+        }
+    }
+
+    fn write_archive_bundle(
+        path: &std::path::Path,
+        rows: &[serde_json::Value],
+        manifest_extra: serde_json::Value,
+        tamper_checksum: bool,
+    ) {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+
+        let file = std::fs::File::create(path).unwrap();
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let mut zf = ZipWriter::new(file);
+        let mut text = String::new();
+        for row in rows {
+            text.push_str(&serde_json::to_string(row).unwrap());
+            text.push('\n');
+        }
+        zf.start_file("items/raindrop.ndjson", options).unwrap();
+        zf.write_all(text.as_bytes()).unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        let digest = if tamper_checksum {
+            "0".repeat(64)
+        } else {
+            format!("{:x}", hasher.finalize())
+        };
+        let mut manifest = manifest_extra;
+        manifest["checksums"] = serde_json::json!({"items/raindrop.ndjson": digest});
+        zf.start_file("manifest.json", options).unwrap();
+        zf.write_all(serde_json::to_vec_pretty(&manifest).unwrap().as_slice())
+            .unwrap();
+        zf.finish().unwrap();
+    }
+
+    #[test]
+    fn restore_happy_path_creates_a_source_and_upserts_items() {
+        let dir = restore_temp_dir("happy-path");
+        let path = dir.join("export.ndjson");
+        write_ndjson_bundle(
+            &path,
+            &[
+                restore_item_row("e1", "raindrop", "h1"),
+                restore_item_row("e2", "raindrop", "h2"),
+            ],
+        );
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let report = service.restore(&path, false, None).unwrap();
+        assert_eq!(report.fetched, 2);
+        assert_eq!(report.created, 2);
+        assert_eq!(report.sources, vec!["raindrop".to_string()]);
+        assert!(!report.dry_run);
+        assert!(storage.sources.contains_key("raindrop"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_dry_run_reports_without_writing() {
+        let dir = restore_temp_dir("dry-run");
+        let path = dir.join("export.ndjson");
+        write_ndjson_bundle(&path, &[restore_item_row("e1", "raindrop", "h1")]);
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let report = service.restore(&path, true, None).unwrap();
+        assert!(report.dry_run);
+        assert_eq!(report.fetched, 1);
+        assert_eq!(report.created, 0);
+        assert!(storage.sources.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_rejects_a_bundle_with_a_newer_schema_version() {
+        let dir = restore_temp_dir("schema-mismatch");
+        let path = dir.join("bundle.zip");
+        write_archive_bundle(
+            &path,
+            &[restore_item_row("e1", "raindrop", "h1")],
+            serde_json::json!({"db_schema_version": SCHEMA_VERSION + 1}),
+            false,
+        );
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service.restore(&path, false, None).unwrap_err();
+        assert!(err.to_string().contains("newer dbs"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_rejects_a_corrupt_checksum_archive() {
+        let dir = restore_temp_dir("corrupt-checksum");
+        let path = dir.join("bundle.zip");
+        write_archive_bundle(
+            &path,
+            &[restore_item_row("e1", "raindrop", "h1")],
+            serde_json::json!({"db_schema_version": 1}),
+            true,
+        );
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service.restore(&path, false, None).unwrap_err();
+        assert!(err.to_string().contains("integrity verification"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_decrypts_an_encrypted_bundle_before_restoring() {
+        use crate::crypto::EncryptingWriter;
+        use std::io::Write;
+
+        let dir = restore_temp_dir("encrypted");
+        let path = dir.join("export.ndjson.enc");
+        let row = restore_item_row("e1", "raindrop", "h1");
+        let mut text = serde_json::to_string(&row).unwrap();
+        text.push('\n');
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = EncryptingWriter::new(file, "hunter2").unwrap();
+        writer.write_all(text.as_bytes()).unwrap();
+        writer.finish().unwrap();
+
+        let mut secret_store = HashMap::new();
+        secret_store.insert(
+            crate::crypto::DEFAULT_PASSPHRASE_ENV.to_string(),
+            "hunter2".to_string(),
+        );
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let report = service.restore(&path, false, Some(&secret_store)).unwrap();
+        assert_eq!(report.fetched, 1);
+        assert_eq!(report.created, 1);
+        // The reported path is the file the caller named, not the temp
+        // plaintext used internally to decrypt it.
+        assert_eq!(report.path, path.display().to_string());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_errors_for_a_missing_file() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let err = service
+            .restore(
+                std::path::Path::new("/no/such/dbs-restore-fixture"),
+                false,
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("no such file"));
     }
 }

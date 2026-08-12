@@ -8,6 +8,54 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Restore (closes #59)
+**2026-08-12**
+
+- **Added:** `dbs-core::restore`, porting `src/dbs/restore.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — `read_manifest`
+  (a zip without `manifest.json` is refused as "not a dbs archive"),
+  `iter_export_rows` (items from an archive's `items/*.ndjson` files
+  or a bare ndjson export), `prepared_item_from_row` (maps one export
+  row back to a `PreparedItem`, requiring `external_id`/`content_hash`/
+  a `raw` payload — a `--no-raw` export is refused as "not
+  restore-grade"), `verify_archive` (per-entry sha256 checksum
+  verification, flagging missing/mismatched/unlisted-extra entries),
+  and `skipped_extras` (revision/media counts present but not
+  restored).
+- **Added:** `BackupService::restore`, porting the reference's
+  `BackupService.restore` (`src/dbs/core/service.py`) — replays an
+  export into storage through the same classified `upsert_items` path
+  a live backup uses (so the stored `content_hash` carries over
+  verbatim and a re-restore of the same bundle is a no-op), with
+  encrypted-bundle auto-decryption (via #52's `crypto` module, to a
+  private temp file, passphrase from the environment/secret store,
+  never argv), pre-write integrity verification and schema-version
+  rejection (`db_schema_version` newer than this build's own), and
+  dry-run support (validates and reports without touching storage).
+  Latest item state only (v1): revision history and media blobs in a
+  bundle are counted and reported as *skipped*, matching the
+  reference's own documented scope — replaying revisions verbatim
+  would bypass the engine's one-revision-per-change invariant, and
+  media rows need their items' DB ids.
+- **Documented divergence:** the reference's `iter_export_rows` is a
+  generator streaming one line at a time; this port collects into a
+  `Vec` instead, since a lazy Rust iterator borrowing a `zip::ZipFile`
+  across yields adds real complexity this issue's own acceptance
+  criteria don't exercise (no test needs memory-boundedness) — flagged
+  in the module doc-comment rather than silently narrowed.
+- `FakeStorage`'s `upsert_items` (test-only, in `service.rs`) is now a
+  real (not `unimplemented!()`) classifier — created/updated/unchanged
+  by `(source_id, external_id) -> content_hash` — since the restore
+  tests are the first in this crate to actually exercise batch upsert
+  classification through `BackupService`.
+- 18 new tests: 12 on the pure `restore` functions (manifest
+  present/absent/malformed, ndjson/archive row iteration, every
+  `prepared_item_from_row` validation error, a clean checksum
+  verification, a tampered-entry checksum failure, skipped-extras
+  counting) and 6 on `BackupService::restore` (happy path, dry-run,
+  a newer-schema-version rejection, a corrupt-checksum-archive
+  rejection, an encrypted-bundle round trip, and a missing-file error).
+
 ## Encryption at rest / encrypted exports (closes #52)
 **2026-08-12**
 
