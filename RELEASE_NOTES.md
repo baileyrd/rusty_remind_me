@@ -8,6 +8,21 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## ADR-0001: dynamic plugin registry via subprocess + JSON IPC (closes #5)
+**2026-08-12**
+
+- **Added:** `docs/adr/0001-dynamic-plugin-registry.md`, replacing the ADR
+  seed template with the first real decision. Proposes subprocess + line-
+  delimited JSON IPC for connector loading (each connector a separate
+  `dbs-connector-<type>` executable, a handshake self-describing its
+  contract, a manifest-based registry) instead of a `cdylib` + stable-ABI
+  approach — Rust's lack of a stable ABI makes the `cdylib` path a much
+  higher-risk lockstep-versioning/UB problem than a subprocess boundary,
+  which only needs a stable *wire* protocol.
+- **Known limitation:** this is a proposal (`Status: Proposed`), not yet
+  accepted or implemented. The registry implementation itself is a
+  follow-up issue once this ADR is reviewed.
+
 ## Connector plugin contract + partial RunContext (closes #4)
 **2026-08-12**
 
