@@ -84,7 +84,7 @@ not left as one oversized issue.
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Export base + filter query | fn | spec | both | `src/dbs/export/base.py` | — | no | S | Done (#50) — `ExportResult`/`Exporter`/`ExportSource` (the exporter trait/summary types, as opposed to the query type) remain unported, picked up by the individual exporter issues |
-| JSON exporter | fn | spec | both | `src/dbs/export/json.py` | rusty_json (unverified) | no | S | |
+| JSON exporter | fn | spec | both | `src/dbs/export/json.py` | rusty_json (unverified) | no | S | Done (#51) — also lands the shared `Exporter`/`ExportSource`/`ExportResult`/`get_exporter` base from `export/base.py`, deferred from #50 |
 | NDJSON exporter | fn | spec | both | `src/dbs/export/ndjson.py` | rusty_json (unverified) | no | S | |
 | CSV exporter | fn | spec | both | `src/dbs/export/csv.py` | — | no | S | |
 | Markdown exporter | fn | spec | both | `src/dbs/export/markdown.py` | — | no | S | |

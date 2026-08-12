@@ -11,6 +11,7 @@ pub mod config;
 pub mod connector;
 pub mod engine;
 pub mod errors;
+pub mod export;
 pub mod export_profile;
 pub mod hashing;
 pub mod http;
@@ -31,6 +32,9 @@ pub use config::{
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
 pub use engine::commit_checkpoint;
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
+pub use export::{
+    available_formats, get_exporter, ExportResult, ExportSource, Exporter, JsonExporter,
+};
 pub use export_profile::{
     axis_label, group_values, raw_value, resolve_export_profile, ExportProfile,
     ExportProfileOverride, PAGE_PER,
