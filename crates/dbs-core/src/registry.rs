@@ -80,6 +80,12 @@ pub struct Handshake {
     pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// This connector's default export rules (issue #49) — `None` when
+    /// the connector doesn't declare one, in which case
+    /// `crate::export_profile::resolve_export_profile` falls back to
+    /// `ExportProfile::default()`.
+    #[serde(default)]
+    pub export_profile: Option<crate::export_profile::ExportProfile>,
 }
 
 /// A successfully loaded, contract-valid connector.
@@ -418,6 +424,7 @@ mod tests {
             item_kinds: Vec::new(),
             display_name: None,
             description: None,
+            export_profile: None,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -436,6 +443,7 @@ mod tests {
             item_kinds: vec!["item".to_string()],
             display_name: None,
             description: None,
+            export_profile: None,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -454,6 +462,7 @@ mod tests {
             item_kinds: vec!["item".to_string()],
             display_name: None,
             description: None,
+            export_profile: None,
         };
         let err = validate_contract(&h).unwrap_err();
         assert!(err.contains("incompatible"));
@@ -476,6 +485,7 @@ mod tests {
             item_kinds: vec!["item".to_string()],
             display_name: None,
             description: None,
+            export_profile: None,
         };
         assert!(validate_contract(&h).is_ok());
     }
@@ -495,6 +505,7 @@ mod tests {
                 item_kinds: vec!["link".to_string()],
                 display_name: None,
                 description: None,
+                export_profile: None,
             },
             command: PathBuf::from("dbs-connector-raindrop"),
             args: Vec::new(),

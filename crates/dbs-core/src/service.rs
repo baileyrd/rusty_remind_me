@@ -897,6 +897,7 @@ mod tests {
             max_media_mb: 0,
             requires_vpn: false,
             keep_revisions: 0,
+            export: None,
             options: HashMap::new(),
         }
     }
@@ -1240,6 +1241,7 @@ mod tests {
                 item_kinds: vec!["item".to_string()],
                 display_name: None,
                 description: None,
+                export_profile: None,
             },
             command: std::path::PathBuf::from("dbs-connector-test"),
             args: Vec::new(),
