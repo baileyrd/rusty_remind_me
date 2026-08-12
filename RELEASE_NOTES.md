@@ -8,6 +8,31 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Config loading (closes #13)
+**2026-08-12**
+
+- **Added:** `dbs-core::config` — `Config`, `SourceConfig`,
+  `ConnectorOverride`, `VpnGuard`, `NotifyOn`, `load_config`,
+  `parse_env_file`, mirroring `src/dbs/config.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`). Parsing pipeline
+  matches the reference's order deliberately: reject inline secrets
+  *before* `${ENV}` expansion, then expand, then extract into the typed
+  structs.
+- **New dependency:** `toml`.
+- **Scoped narrower than the reference:** TOML only, no YAML path (the
+  reference's is `pyyaml`-gated and optional there too).
+  `SourceConfig.export` (`ExportProfileOverride`) isn't ported.
+- **Found and recorded a gap-analysis miss:** `core/export_profile.py`
+  was never given its own row — referenced by both `connector.py` and
+  `config.py` but not captured when the original 66-row table was built.
+  Added to `gap-analysis.md`'s Config & secrets section; both
+  `connector.rs` and `config.rs` currently omit the field pending it.
+- 12 new unit tests (defaults, missing file, inline-secret rejection,
+  `*_env` key allowed, missing `type`, env expansion (set + unset),
+  invalid `vpn_guard`, registry override translation, download-dir
+  joining, `.env` parsing with comments/export/quotes, missing `.env`),
+  83/83 total passing.
+
 ## SQLite storage — schema + migrations (closes #12)
 **2026-08-12**
 
