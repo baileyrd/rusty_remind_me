@@ -9,27 +9,46 @@
 //! `dbs.core.engine`/`dbs.storage.base` module boundary. `Storage`'s
 //! trait surface (#11) is unchanged by this issue.
 //!
-//! **This issue's scope: invariant #1 only** — "the cursor never gets
-//! ahead of data." [`commit_checkpoint`] persists buffered items *before*
-//! saving the new cursor, so a crash between the two calls leaves the
-//! cursor lagging committed data (safe — the next run re-fetches the
-//! overlap and idempotent upsert dedups it) and never advances the cursor
-//! past data that was never durably written (unsafe — permanent data
-//! loss). The reference wraps both calls in one DB transaction for
-//! stronger guarantees (atomicity *within* the upsert batch itself, not
-//! just the ordering); this round's `Storage` trait deliberately has no
+//! **Issue #16's scope: invariant #1** — "the cursor never gets ahead of
+//! data." [`commit_checkpoint`] persists buffered items *before* saving
+//! the new cursor, so a crash between the two calls leaves the cursor
+//! lagging committed data (safe — the next run re-fetches the overlap
+//! and idempotent upsert dedups it) and never advances the cursor past
+//! data that was never durably written (unsafe — permanent data loss).
+//! The reference wraps both calls in one DB transaction for stronger
+//! guarantees (atomicity *within* the upsert batch itself, not just the
+//! ordering); this round's `Storage` trait deliberately has no
 //! `transaction()` combinator (#11's own scope note), so real
 //! per-backend atomicity is up to the concrete `SqliteStorage` (#36) to
 //! add if/when it proves necessary — the ordering invariant this issue
 //! covers holds either way.
 //!
-//! Invariants #2 (idempotent upsert classification) through #5 (crash
-//! recovery reaper) are separate issues (#17/#19/#20/#21) building on
-//! top of this.
+//! **Issue #17's scope: preparing a `BackupItem` for storage**
+//! ([`prepare`]/[`compute_hash`]) — validating `item_kind` against the
+//! connector's declared kinds, computing the content hash (a
+//! `revision_token` shortcut when the connector supplies one, otherwise
+//! a normalized projection with volatile fields stripped), and
+//! formatting timestamps. This is genuinely engine-side logic in the
+//! reference (`Engine._prepare`/`Engine._compute_hash` in
+//! `core/engine.py`) — the created/updated/unchanged/deleted/undeleted
+//! *classification* itself (comparing the computed hash against what's
+//! already stored) is backend-specific SQL in the reference's
+//! `SqliteStorage._update_item`, so it belongs to #36
+//! (`SqliteStorage`), not here. #17's title ("idempotent upsert
+//! classification") undersold this — the classification decision is
+//! storage's job; the engine's job is producing what gets compared.
+//!
+//! Invariants #3 (revision writing) through #5 (crash recovery reaper)
+//! are separate issues (#19/#20/#21) building on top of this.
 
-use crate::errors::DbsError;
-use crate::models::Checkpoint;
+use serde_json::json;
+
+use crate::capabilities::Capabilities;
+use crate::errors::{ConnectorError, DbsError};
+use crate::hashing::content_hash;
+use crate::models::{BackupItem, Checkpoint};
 use crate::storage::{BatchResult, PreparedItem, Storage};
+use crate::timeutil::iso_z;
 
 /// Persists `buffered_items` and then `checkpoint`'s cursor, in that
 /// order — never the reverse. Returns the batch's classification counts.
@@ -60,6 +79,79 @@ pub fn commit_checkpoint(
         run_id,
     )?;
     Ok(result)
+}
+
+/// Converts a connector-emitted [`BackupItem`] into a [`PreparedItem`]
+/// ready for a storage backend to classify and persist.
+///
+/// Errors with [`ConnectorError::Contract`] if `item.item_kind` isn't one
+/// of `valid_kinds` — a connector emitting an undeclared kind is a
+/// programming error, surfaced loudly rather than silently accepted.
+pub fn prepare(
+    item: &BackupItem,
+    capabilities: &Capabilities,
+    volatile_fields: &[String],
+    valid_kinds: &[String],
+) -> Result<PreparedItem, ConnectorError> {
+    if !valid_kinds.iter().any(|k| k == &item.item_kind) {
+        return Err(ConnectorError::Contract(format!(
+            "item_kind {:?} (id={:?}) is not in the connector's declared item_kinds {valid_kinds:?}",
+            item.item_kind,
+            item.external_id(),
+        )));
+    }
+    let deleted = item.deleted && capabilities.supports_native_deletes;
+    let content_hash = compute_hash(item, volatile_fields, deleted);
+    let media = if capabilities.produces_media {
+        item.media
+            .iter()
+            .map(|m| serde_json::to_value(m).expect("MediaRef always serializes"))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(PreparedItem {
+        external_id: item.external_id().to_string(),
+        item_kind: item.item_kind.clone(),
+        title: item.title.clone(),
+        url: item.url.clone(),
+        body: item.body.clone(),
+        tags: item.tags.clone(),
+        item_created_at: item.created_at.map(iso_z),
+        item_updated_at: item.updated_at.map(iso_z),
+        content_hash,
+        raw_json: item.raw.to_string(),
+        deleted,
+        media,
+    })
+}
+
+/// A `revision_token`, when the connector supplies one, is the change
+/// signal on its own (an etag/version the upstream API already
+/// guarantees is stable) — the normalized-projection hash below is
+/// skipped entirely rather than computed and ignored.
+fn compute_hash(item: &BackupItem, volatile_fields: &[String], deleted: bool) -> String {
+    if let Some(token) = &item.revision_token {
+        return content_hash(&json!({ "revision_token": token }));
+    }
+    let mut raw_clean = item.raw.clone();
+    if let Some(obj) = raw_clean.as_object_mut() {
+        for key in volatile_fields {
+            obj.remove(key);
+        }
+    }
+    let mut tags_sorted = item.tags.clone();
+    tags_sorted.sort();
+    let projection = json!({
+        "item_kind": item.item_kind,
+        "title": item.title,
+        "url": item.url,
+        "body": item.body,
+        "tags": tags_sorted,
+        "deleted": deleted,
+        "raw": raw_clean,
+    });
+    content_hash(&projection)
 }
 
 #[cfg(test)]
@@ -345,5 +437,136 @@ mod tests {
             storage.last_watermark.as_deref(),
             Some("2026-01-01T00:00:00Z")
         );
+    }
+
+    mod prepare_tests {
+        use super::super::*;
+        use crate::models::BackupItem;
+
+        fn backup_item(raw: serde_json::Value) -> BackupItem {
+            BackupItem::new("ext-1", "post", raw).unwrap()
+        }
+
+        #[test]
+        fn rejects_an_undeclared_item_kind() {
+            let item = backup_item(json!({}));
+            let err = prepare(
+                &item,
+                &Capabilities::default(),
+                &[],
+                &["comment".to_string()],
+            )
+            .unwrap_err();
+            assert!(matches!(err, ConnectorError::Contract(_)));
+        }
+
+        #[test]
+        fn accepts_a_declared_item_kind() {
+            let item = backup_item(json!({"a": 1}));
+            let prepared =
+                prepare(&item, &Capabilities::default(), &[], &["post".to_string()]).unwrap();
+            assert_eq!(prepared.external_id, "ext-1");
+            assert_eq!(prepared.item_kind, "post");
+        }
+
+        #[test]
+        fn deleted_is_false_unless_capability_declares_native_deletes() {
+            let mut item = backup_item(json!({}));
+            item.deleted = true;
+            let no_native_deletes = Capabilities::default();
+            let prepared = prepare(&item, &no_native_deletes, &[], &["post".to_string()]).unwrap();
+            assert!(!prepared.deleted);
+
+            let with_native_deletes = Capabilities {
+                supports_native_deletes: true,
+                ..Capabilities::default()
+            };
+            let prepared =
+                prepare(&item, &with_native_deletes, &[], &["post".to_string()]).unwrap();
+            assert!(prepared.deleted);
+        }
+
+        #[test]
+        fn media_is_empty_unless_capability_declares_produces_media() {
+            let mut item = backup_item(json!({}));
+            item.media = vec![crate::models::MediaRef::new("https://example.com/x.png")];
+
+            let no_media = Capabilities::default();
+            let prepared = prepare(&item, &no_media, &[], &["post".to_string()]).unwrap();
+            assert!(prepared.media.is_empty());
+
+            let with_media = Capabilities {
+                produces_media: true,
+                ..Capabilities::default()
+            };
+            let prepared = prepare(&item, &with_media, &[], &["post".to_string()]).unwrap();
+            assert_eq!(prepared.media.len(), 1);
+        }
+
+        #[test]
+        fn revision_token_shortcuts_the_projection_hash() {
+            let mut a = backup_item(json!({"noisy": "value-a"}));
+            a.revision_token = Some("v1".to_string());
+            let mut b = backup_item(json!({"noisy": "value-b"}));
+            b.revision_token = Some("v1".to_string());
+            // Wildly different raw payloads, same revision_token -> same hash.
+            let hash_a = compute_hash(&a, &[], false);
+            let hash_b = compute_hash(&b, &[], false);
+            assert_eq!(hash_a, hash_b);
+        }
+
+        #[test]
+        fn different_revision_tokens_hash_differently() {
+            let mut a = backup_item(json!({}));
+            a.revision_token = Some("v1".to_string());
+            let mut b = backup_item(json!({}));
+            b.revision_token = Some("v2".to_string());
+            assert_ne!(compute_hash(&a, &[], false), compute_hash(&b, &[], false));
+        }
+
+        #[test]
+        fn volatile_fields_are_stripped_before_hashing() {
+            let a = backup_item(json!({"stable": "x", "fetched_at": "t1"}));
+            let b = backup_item(json!({"stable": "x", "fetched_at": "t2"}));
+            let volatile = vec!["fetched_at".to_string()];
+            assert_eq!(
+                compute_hash(&a, &volatile, false),
+                compute_hash(&b, &volatile, false)
+            );
+            // Without stripping, the two would hash differently.
+            assert_ne!(compute_hash(&a, &[], false), compute_hash(&b, &[], false));
+        }
+
+        #[test]
+        fn tag_order_does_not_affect_the_hash() {
+            let mut a = backup_item(json!({}));
+            a.tags = vec!["b".to_string(), "a".to_string()];
+            let mut b = backup_item(json!({}));
+            b.tags = vec!["a".to_string(), "b".to_string()];
+            assert_eq!(compute_hash(&a, &[], false), compute_hash(&b, &[], false));
+        }
+
+        #[test]
+        fn deleted_flag_participates_in_the_hash() {
+            let item = backup_item(json!({}));
+            assert_ne!(
+                compute_hash(&item, &[], true),
+                compute_hash(&item, &[], false)
+            );
+        }
+
+        #[test]
+        fn timestamps_are_formatted_via_iso_z() {
+            use chrono::{TimeZone, Utc};
+            let mut item = backup_item(json!({}));
+            item.created_at = Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
+            let prepared =
+                prepare(&item, &Capabilities::default(), &[], &["post".to_string()]).unwrap();
+            assert_eq!(
+                prepared.item_created_at.as_deref(),
+                Some("2026-01-01T00:00:00Z")
+            );
+            assert_eq!(prepared.item_updated_at, None);
+        }
     }
 }
