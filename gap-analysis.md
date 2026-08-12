@@ -77,7 +77,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Encryption at rest / encrypted exports (scrypt + AES-256-GCM) | fn | spec | both | `src/dbs/crypto.py` | rusty_tls (unverified — TLS-focused, may not cover AEAD/KDF) | no | M | New dependency needed almost certainly (AES-GCM + scrypt crate) — flagged below |
+| Encryption at rest / encrypted exports (scrypt + AES-256-GCM) | fn | spec | both | `src/dbs/crypto.py` | rusty_tls (unverified — TLS-focused, may not cover AEAD/KDF) | no | M | Done (#52) — `rusty_tls` still unreachable (cross-tier `add_repo` refused), so it stays unverified; added `aes-gcm`/`scrypt`/`rand` dependencies |
 
 ## Export (7 formats)
 
