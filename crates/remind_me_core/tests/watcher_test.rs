@@ -153,6 +153,119 @@ fn supersession_leaves_a_deleted_memory_alone() {
 }
 
 #[test]
+fn a_file_absent_for_n_scans_is_evicted_from_imports_and_no_longer_supersedes() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let dir = scratch("evicted");
+    let path = write(&dir, "notes.md", "# Notes\n\noriginal text");
+    // A short threshold so the test does not need a thousand scans.
+    let mut w = Watcher::new(vec![dir.clone()], Vec::new())
+        .with_grace(0)
+        .with_imports_stale_after_scans(3);
+    w.scan_once(&conn);
+    assert_eq!(
+        live_memories(&conn),
+        vec!["Notes\n\noriginal text".to_string()]
+    );
+
+    // Delete the file and scan past the eviction threshold.
+    std::fs::remove_file(&path).unwrap();
+    for _ in 0..3 {
+        let counts = w.scan_once(&conn);
+        assert_eq!(
+            counts,
+            ScanCounts::default(),
+            "nothing to see, nothing to do"
+        );
+    }
+
+    // The file returns with different content. Its `imports` entry is gone,
+    // so this is a fresh import rather than a supersession: both versions
+    // stay live rather than the old one being marked superseded.
+    write(&dir, "notes.md", "# Notes\n\nrevised text after eviction");
+    let counts = w.scan_once(&conn);
+
+    assert_eq!(counts.ingested, 1);
+    assert_eq!(
+        counts.superseded, 0,
+        "the evicted entry must not still supersede its old import"
+    );
+    let mut memories = live_memories(&conn);
+    memories.sort();
+    let mut expected = vec![
+        "Notes\n\noriginal text".to_string(),
+        "Notes\n\nrevised text after eviction".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(memories, expected);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_file_absent_for_fewer_than_n_scans_still_supersedes_on_return() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let dir = scratch("not_evicted");
+    let path = write(&dir, "notes.md", "# Notes\n\noriginal text");
+    let mut w = Watcher::new(vec![dir.clone()], Vec::new())
+        .with_grace(0)
+        .with_imports_stale_after_scans(3);
+    w.scan_once(&conn);
+
+    // Absent for fewer scans than the threshold.
+    std::fs::remove_file(&path).unwrap();
+    w.scan_once(&conn);
+    w.scan_once(&conn);
+
+    // The file returns changed before eviction: it must still supersede.
+    write(&dir, "notes.md", "# Notes\n\nrevised text");
+    let counts = w.scan_once(&conn);
+
+    assert_eq!(counts.ingested, 1);
+    assert_eq!(
+        counts.superseded, 1,
+        "an entry that has not reached the absence threshold keeps its history"
+    );
+    assert_eq!(
+        live_memories(&conn),
+        vec!["Notes\n\nrevised text".to_string()]
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_file_watched_continuously_never_ages_out_of_imports() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn();
+    let dir = scratch("continuous");
+    write(&dir, "notes.md", "# Notes\n\noriginal text");
+    let mut w = Watcher::new(vec![dir.clone()], Vec::new())
+        .with_grace(0)
+        .with_imports_stale_after_scans(3);
+    w.scan_once(&conn);
+
+    // Many more scans than the eviction threshold, but the file is present
+    // (and unchanged) every time, so its `imports` entry is never absent.
+    for _ in 0..10 {
+        w.scan_once(&conn);
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(&dir, "notes.md", "# Notes\n\nrevised after many scans");
+    let counts = w.scan_once(&conn);
+
+    assert_eq!(counts.ingested, 1);
+    assert_eq!(
+        counts.superseded, 1,
+        "a continuously-present file must never age out of `imports`"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_file_already_imported_by_hand_is_skipped_and_adopted() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();

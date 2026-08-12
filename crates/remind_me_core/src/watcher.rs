@@ -29,6 +29,14 @@
 //! superseded, which every read path already excludes. A memory the user
 //! explicitly deleted is left alone — a re-import must not resurrect or
 //! silently alter something someone chose to remove.
+//!
+//! Supersession depends on remembering, per watched path, which import
+//! produced it — see [`Watcher::imports`] — for as long as that path might
+//! plausibly come back changed. "Plausibly" is bounded rather than
+//! unconditional: an entry is evicted once its file has been missing for
+//! [`DEFAULT_IMPORTS_STALE_SCANS`] consecutive scans, so a watch directory
+//! with years of churn does not carry one entry forever for every filename
+//! ever seen.
 
 use crate::import_paths::{
     import_roots, is_contained, resolve_lexically, split_path_list, SUPPORTED_SUFFIXES,
@@ -51,6 +59,16 @@ pub const WATCH_GRACE_ENV: &str = "REMIND_ME_WATCH_GRACE";
 
 pub const DEFAULT_INTERVAL_SECONDS: u64 = 60;
 pub const DEFAULT_GRACE_SECONDS: u64 = 5;
+
+/// Consecutive absent scans after which an `imports` entry is evicted.
+///
+/// At the default one-minute interval that is a day's worth of scans: long
+/// enough that an ordinary blip (a sync client pausing, a file briefly moved
+/// out and back) does not cost a file its supersession history, short enough
+/// that a directory with years of churn does not grow `imports` by one entry
+/// per filename ever seen. See the comment on [`Watcher::imports`] for what
+/// eviction means for a file that does eventually come back.
+pub const DEFAULT_IMPORTS_STALE_SCANS: u32 = 1_440;
 
 /// Recent errors kept for the status report.
 const ERROR_HISTORY: usize = 10;
@@ -213,7 +231,32 @@ pub struct Watcher {
     /// Signature seen but not yet trusted, pending a second identical sighting.
     pending: HashMap<PathBuf, Signature>,
     /// The import each path most recently produced, for supersession.
+    ///
+    /// Deliberately *not* pruned to `seen` every scan the way `attempted` and
+    /// `pending` are (see `scan_once`): a file that comes back changed still
+    /// has to supersede its previous import's memories, and that requires
+    /// remembering the import across however many scans the file was absent.
+    ///
+    /// That memory is bounded, not indefinite. `imports_absent` counts each
+    /// entry's consecutive absent-from-`seen` scans; once a path reaches
+    /// [`DEFAULT_IMPORTS_STALE_SCANS`] (or `imports_stale_after_scans`, in a
+    /// test) absences in a row, its `imports` entry is evicted on the
+    /// assumption the file is gone for good rather than merely late to
+    /// return. A file that *does* reappear after eviction still gets
+    /// ingested — it just does so as a fresh import with nothing to
+    /// supersede, exactly like a path never seen before. That is judged an
+    /// acceptable trade for keeping this map's size bounded by recent churn
+    /// rather than by every distinct filename the process has ever observed
+    /// over months or years of runtime.
     imports: HashMap<PathBuf, String>,
+    /// Consecutive scans each `imports` entry's path has been missing from
+    /// `seen`. Only holds entries currently absent; a path that is seen
+    /// again has its counter removed (equivalent to resetting it to zero).
+    imports_absent: HashMap<PathBuf, u32>,
+    /// Absence threshold for evicting an `imports` entry. Defaults to
+    /// [`DEFAULT_IMPORTS_STALE_SCANS`]; overridable so tests do not have to
+    /// run a real day's worth of scans to exercise eviction.
+    imports_stale_after_scans: u32,
 
     scans: usize,
     last_scan_at: Option<String>,
@@ -238,6 +281,8 @@ impl Watcher {
             attempted: HashMap::new(),
             pending: HashMap::new(),
             imports: HashMap::new(),
+            imports_absent: HashMap::new(),
+            imports_stale_after_scans: DEFAULT_IMPORTS_STALE_SCANS,
             scans: 0,
             last_scan_at: None,
             files_ingested: 0,
@@ -272,6 +317,14 @@ impl Watcher {
 
     pub fn with_grace(mut self, seconds: u64) -> Self {
         self.grace = seconds;
+        self
+    }
+
+    /// Override how many consecutive absent scans an `imports` entry
+    /// survives before eviction. Test-only in practice — production takes
+    /// [`DEFAULT_IMPORTS_STALE_SCANS`].
+    pub fn with_imports_stale_after_scans(mut self, scans: u32) -> Self {
+        self.imports_stale_after_scans = scans;
         self
     }
 
@@ -327,6 +380,25 @@ impl Watcher {
         // back changed still has to supersede its previous import's memories.
         self.pending.retain(|path, _| seen.contains(path));
         self.attempted.retain(|path, _| seen.contains(path));
+
+        // `imports` is bounded rather than kept forever: track each entry's
+        // consecutive absence from `seen`, and evict once that streak reaches
+        // `imports_stale_after_scans`. A path seen this scan has its streak
+        // cleared, so a file that keeps returning never ages out no matter
+        // how long the process has been running.
+        for path in self.imports.keys() {
+            if seen.contains(path) {
+                self.imports_absent.remove(path);
+            } else {
+                *self.imports_absent.entry(path.clone()).or_insert(0) += 1;
+            }
+        }
+        let stale_after = self.imports_stale_after_scans;
+        let imports_absent = &self.imports_absent;
+        self.imports
+            .retain(|path, _| imports_absent.get(path).copied().unwrap_or(0) < stale_after);
+        self.imports_absent
+            .retain(|path, _| self.imports.contains_key(path));
 
         self.scans += 1;
         self.last_scan_at = Some(Utc::now().to_rfc3339());
