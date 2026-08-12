@@ -12,6 +12,7 @@ pub mod connector;
 pub mod errors;
 pub mod hashing;
 pub mod models;
+pub mod netns;
 pub mod secrets;
 pub mod storage;
 pub mod timeutil;
@@ -30,6 +31,7 @@ pub use models::{
     MediaRef, ProgressEvent, ProgressPhase, ReconcileMarker, RestoreReport, RunResult, RunStatus,
     SourceStatus, VerifyIssue, VerifyReport,
 };
+pub use netns::{in_named_netns, named_netns_exists};
 pub use secrets::Secrets;
 pub use storage::sqlite::open_connection;
 pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
