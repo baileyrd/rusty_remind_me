@@ -8,6 +8,26 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## CSV exporter (closes #54)
+**2026-08-12**
+
+- **Added:** `CsvExporter`, porting `src/dbs/export/csv.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — a flattened,
+  explicitly lossy view over the fixed base columns (`source`, `type`,
+  `external_id`, `item_kind`, `title`, `url`, `body`, `tags`,
+  `created_at`, `updated_at`, `revision`, `deleted`, `deleted_at`,
+  `content_hash`, plus `raw` when `ExportQuery::include_raw` is set).
+  The first physical line is a `# NOTE:` comment warning that CSV is not
+  restore-grade; `tags` is comma-joined, `deleted` is emitted as `"0"`/
+  `"1"`, and `raw` is JSON-encoded. Registered as `"csv"` in
+  `get_exporter`/`available_formats`.
+- **Added dependency:** `csv = "1"` (`dbs-core`), for RFC 4180 quoting/
+  escaping matching the reference's stdlib `csv` module behavior.
+- 7 new tests: empty result set (comment + header only), single item,
+  values needing escaping (commas/quotes/newlines) round-trip through the
+  `csv` crate's own reader, `tags`/`deleted` special-casing, `raw`
+  included/omitted by `include_raw`, and a metadata sanity check.
+
 ## NDJSON exporter (closes #53)
 **2026-08-12**
 
