@@ -8,6 +8,45 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## SQLite Storage: items/batch commit, media archiving (part of #36)
+**2026-08-12**
+
+- **Added:** `upsert_items`, `soft_delete_missing`, and `live_external_ids`
+  on `SqliteStorage`, mirroring `SqliteStorage.upsert_items`/
+  `soft_delete_missing`/`live_external_ids` in
+  `src/dbs/storage/sqlite.py` in baileyrd/Daily-Backup-System (pinned
+  `@6cc6491`) — this is the largest, most correctness-sensitive part of
+  #36. Covers: batch classification against a pre-fetched existing-row
+  index (created/updated/unchanged/deleted/undeleted), revision writing
+  on every content change (`item_revisions`), the still-deleted-item stays
+  deleted rule (a native-deletes source re-emitting a mutated trash item
+  must never resurrect it), tag-scoped reconcile sweeps via a temp table
+  anti-join against `live_ids` (`_sweep_live`, matching the reference's
+  memory-bounded approach rather than loading every live id into
+  memory), and inline media archiving (local-file bytes for
+  `MediaRef::url`, or connector-prefetched bytes via `MediaRef::data`),
+  each capped at `max_media_bytes` with the reference's "record path +
+  size but drop the bytes" over-cap behavior.
+- **Typed media, not a raw dict:** `PreparedItem::media` holds each entry
+  as a `serde_json::Value` round-tripped from `MediaRef` (#4/#17);
+  `upsert_items` deserializes back into `MediaRef` rather than pulling
+  `url`/`data`/etc. out of the `Value` by hand.
+- Whole-batch atomicity: `upsert_items` and `soft_delete_missing` each
+  run inside one `rusqlite` transaction (no reference `transaction()`
+  combinator per #11 — see the module doc-comment).
+- 15 new tests against a real in-memory SQLite connection: empty-batch
+  no-op, insert-as-created, unchanged-on-same-hash, updated-on-hash-
+  change, native-delete-then-undelete, local-file media archiving
+  (writes real bytes to a temp file and reads them back), media bytes
+  skipped without `store_media`, supplied-media byte cap enforcement,
+  sweep removal + idempotent second pass, and tag-scoped
+  `live_external_ids`/`soft_delete_missing` isolation.
+- **Still stubbed, pending a follow-up PR:** export/browse/stats/
+  maintenance (`iter_items`/`iter_revisions`/`iter_media_blobs`/
+  `browse_items`/`get_item`/`get_media_blob`/`metrics`/`maintain`/
+  `prune_revisions`/`vacuum_into`), including FTS5 search. #36 stays
+  open until that lands.
+
 ## SQLite Storage: sources, runs, cursor/state, locking (part of #36)
 **2026-08-12**
 
