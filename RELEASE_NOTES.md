@@ -8,6 +8,26 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## SQLite storage: browse_items video-link thumbnail fallback (closes #48)
+**2026-08-12**
+
+- **Added:** `browse_items`'s `thumb_url` now matches the reference's
+  `src/dbs/storage/sqlite.py` (pinned `@6cc6491`) exactly —
+  `COALESCE(first image media URL, CASE WHEN raw_json->>videoLink
+  matches YouTube/Loom/Vimeo THEN that videoLink END)`. Previously this
+  port only ever returned the first image media's URL; items shaped by
+  connectors that store a `videoLink` field instead of image media (e.g.
+  skool lessons) got no thumbnail at all. Note the reference doesn't
+  derive an actual thumbnail *image* URL here — it passes the raw
+  `videoLink` through, on the assumption a web tier resolves it
+  client-side (YouTube's thumbnail convention, or oEmbed for
+  Loom/Vimeo); this port matches that division of responsibility
+  exactly, not a raw image URL.
+- 5 new tests: YouTube/Loom/Vimeo `videoLink` fallback (one test per
+  host), no thumbnail when neither image media nor a recognized
+  `videoLink` is present, and image media taking priority over a
+  `videoLink` when both exist.
+
 ## SQLite storage: FTS5 full-text index (closes #47)
 **2026-08-12**
 

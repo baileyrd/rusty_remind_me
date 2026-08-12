@@ -60,11 +60,11 @@ not left as one oversized issue.
 | `Storage` trait (ABC) | type | spec | both | `src/dbs/storage/base.py` | rusty_db (unverified) | no | S | |
 | SQLite storage — schema + migrations | fn | spec | both | `src/dbs/storage/{sqlite,migrations}.py` | rusty_db (unverified) | no | M | New dependency: a SQLite crate (`rusqlite` or similar) — flagged below |
 | SQLite storage — upsert/classify/revisions | fn | spec | both | `src/dbs/storage/sqlite.py` | rusty_db (unverified) | no | M | Done (#36) |
-| SQLite storage — browse/query + FTS5 search | fn | spec | both | `src/dbs/storage/sqlite.py` | rusty_db (unverified) | no | M | LIKE-search half done (#36); FTS5 index/triggers/backfill (`_ensure_fts`) and the video-link thumbnail fallback deliberately deferred — see the two new rows below |
+| SQLite storage — browse/query + FTS5 search | fn | spec | both | `src/dbs/storage/sqlite.py` | rusty_db (unverified) | no | M | Done (#36, #47, #48) |
 | SQLite storage — metrics aggregation | fn | spec | both | `src/dbs/storage/sqlite.py` | — | no | S | Done (#36) |
 | SQLite storage — maintenance (VACUUM, WAL checkpoint, `PRAGMA optimize`, snapshot) | fn | spec | both | `src/dbs/storage/sqlite.py` | — | no | M | Done (#36) |
 | SQLite storage — FTS5 full-text index (`_ensure_fts`: virtual table + triggers + backfill, `browse_items`' MATCH-then-LIKE fallback) | fn | spec | both | `src/dbs/storage/sqlite.py` | — | no | S | Done (#47) |
-| SQLite storage — `browse_items` video-link thumbnail fallback (YouTube/Loom/Vimeo URL detection when an item has no image media) | fn | spec | both | `src/dbs/storage/sqlite.py` | — | no | S | **Split out of the row above** — #36's `browse_items` only returns the first image media's URL as `thumbnail`; the video-link heuristic is UI polish for one connector's item shape, not core parity |
+| SQLite storage — `browse_items` video-link thumbnail fallback (YouTube/Loom/Vimeo URL detection when an item has no image media) | fn | spec | both | `src/dbs/storage/sqlite.py` | — | no | S | Done (#48) |
 
 ## Config & secrets
 
