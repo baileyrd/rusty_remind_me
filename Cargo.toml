@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/dbs-core"]
+
+[workspace.package]
+edition = "2021"
+license = "UNLICENSED"
+repository = "https://github.com/baileyrd/rusty_dbs"

@@ -8,6 +8,30 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Cargo workspace scaffold + core data model (closes #2)
+**2026-08-12**
+
+- **Added:** the first Rust code in this repo — a Cargo workspace with a
+  `dbs-core` crate, mirroring `dbs.core.models`/`dbs.core.capabilities` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`): `BackupItem`, `MediaRef`,
+  `Cursor`, `Checkpoint`, `ReconcileMarker`, `FetchEvent`, `RunResult`,
+  `RunStatus`, `ProgressEvent`/`ProgressPhase`, `SourceStatus`,
+  `ConnectorInfo`, `VerifyIssue`/`VerifyReport`, `DoctorCheck`,
+  `MaintenanceReport`, `RestoreReport`, `Capabilities`, `ItemKind`,
+  `AuthCapture`. 11 unit tests, all green; `cargo clippy -D warnings` and
+  `cargo fmt --check` clean.
+- **Added:** `.github/workflows/ci-rust.yml` (fmt --check, clippy -D
+  warnings, test) now that a manifest exists — repo-config's audit had
+  correctly skipped it until now.
+- **Deliberately deferred:** `RunContext` (the reference's per-run injected
+  context) isn't implemented yet — it depends on `Secrets`/
+  `ManagedHTTPClient`/`CancelToken`, which don't exist yet (separate
+  issues). It belongs with the connector trait (#4), not the plain data
+  model.
+- New dependencies: `serde` + `serde_json` + `chrono` (with `serde`
+  feature) — all pre-approved in `gap-analysis.md`'s foundational-dependency
+  decision.
+
 ## Add parity-loop gap analysis against Daily-Backup-System
 **2026-08-12**
 
