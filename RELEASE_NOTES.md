@@ -8,6 +8,25 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Cooperative cancellation + RunContext catch-up (closes #10)
+**2026-08-12**
+
+- **Added:** `dbs-core::cancel::CancelToken` — a thread-safe, one-way
+  cooperative cancellation signal, mirroring `src/dbs/core/cancel.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`). Backed by
+  `Arc<AtomicBool>` rather than the reference's `threading.Event` —
+  cloning a token shares the same underlying flag, so one token is safe
+  to hand to every `--parallel` worker thread, same guarantee as the
+  reference.
+- **Changed:** `RunContext` gains `secrets: Secrets` and
+  `cancel: Option<CancelToken>`. `secrets` should have landed when #6
+  merged but was missed — caught up here rather than left drifting.
+  `http` (#22) and a logger equivalent are still the only pieces left
+  before `RunContext` fully matches the reference.
+- 7 new unit tests (uncancelled start, cancel sets/idempotent, clones
+  share state, independent tokens don't, cross-thread visibility,
+  `RunContext.cancel` reflects a shared token), 53/53 total passing.
+
 ## CORE_API_VERSION gating (closes #9)
 **2026-08-12**
 
