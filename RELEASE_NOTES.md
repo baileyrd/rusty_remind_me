@@ -8,6 +8,35 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## JSON exporter (closes #51)
+**2026-08-12**
+
+- **Added:** `dbs-core::export`, the shared exporter plumbing from
+  `src/dbs/export/base.py`/`__init__.py` in baileyrd/Daily-Backup-System
+  (pinned `@6cc6491`) — `ExportResult` (summary of a completed export),
+  `ExportSource` (a streaming data source trait: `items`/`revisions`/
+  `media_blobs`/`manifest`, implemented by the service over storage +
+  an `ExportQuery` in a later CLI-facing issue, #70), `Exporter` (the
+  per-format contract: `format`/`media_type`/`file_ext`/`write`), and
+  `get_exporter`/`available_formats` (the reference's `EXPORTERS` dict
+  equivalent).
+- **Landed here, not split into its own issue:** #50 (the real
+  `ExportQuery`) deliberately left these base types unported, noting
+  they'd be "picked up by the individual exporter issues." This is the
+  first such issue, so the shared plumbing lands alongside the format it
+  introduces — every subsequent exporter issue (ndjson #53, csv #54,
+  markdown #55, obsidian #56, wiki #57, archive #58) adds its own module
+  plus one more `get_exporter` arm.
+- **Added:** `JsonExporter`, porting `src/dbs/export/json.py` — one JSON
+  array of item objects, brackets/commas streamed directly to the
+  output writer (never buffering the whole export as one string), pretty
+  printed the same as the reference's `indent=2`.
+- 7 new tests: `get_exporter` success/unknown-format, `available_formats`,
+  and the JSON exporter's empty/single/multi-item cases (parsing the
+  written bytes back to verify structure and count rather than asserting
+  exact text, since `ItemRow`'s `HashMap` backing has no defined key
+  order) plus a metadata sanity check (`format`/`media_type`/`file_ext`).
+
 ## Export base: real ExportQuery (closes #50)
 **2026-08-12**
 
