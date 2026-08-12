@@ -9,6 +9,7 @@ pub mod cancel;
 pub mod capabilities;
 pub mod config;
 pub mod connector;
+pub mod engine;
 pub mod errors;
 pub mod hashing;
 pub mod models;
@@ -24,6 +25,7 @@ pub use config::{
     load_config, parse_env_file, Config, ConnectorOverride, NotifyOn, SourceConfig, VpnGuard,
 };
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
+pub use engine::commit_checkpoint;
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use hashing::{canonical_json, content_hash};
 pub use models::{
