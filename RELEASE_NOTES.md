@@ -8,6 +8,31 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Add parity-loop gap analysis against Daily-Backup-System
+**2026-08-12**
+
+- **Added:** `gap-analysis.md` — a full-feature-parity assessment against
+  [baileyrd/Daily-Backup-System](https://github.com/baileyrd/Daily-Backup-System)
+  (pinned `@6cc6491`), produced by the `parity-loop` skill. 66 rows across
+  core/engine, storage, config, crypto, exports, restore/maintain, CLI, web
+  tier, research, and 14 connectors, since the reference has no comparable
+  Rust surface to diff and this repo has no roadmap doc of its own yet.
+- **Decided (user-confirmed):** full feature parity is the round-1 scope;
+  cross-platform floor (Linux + Windows) from round 1; foundational
+  dependencies (SQLite, TOML/JSON, CLI parsing, HTTP, async runtime, zip,
+  crypto) via standard external crates; the connector plugin registry via
+  true dynamic loading (its own ADR-first issue, not a straight port);
+  browser-automation connectors (reddit/skool/youtube) and the research
+  subsystem both shell out to existing Python tooling (yt-dlp/Playwright,
+  and [gemini-notebook-mcp-cli](https://github.com/jacob-bd/gemini-notebook-mcp-cli)
+  for NotebookLM) rather than reimplementing browser automation in Rust.
+- **Known limitation:** the RustyMill sibling check (`rusty_db`,
+  `rusty_json`, `rusty_http`, etc.) is name/purpose-only, not
+  source-verified — this session can't attach `Rusty-Mill/*` repos
+  (cross-owner restriction, already holds `baileyrd`-owned repos). Real
+  verification needs a session that can reach that org, done per-issue in
+  step 3, not assumed from the table.
+
 ## Replace hand-reconstructed PR/issue templates with the real source
 **2026-08-12**
 
