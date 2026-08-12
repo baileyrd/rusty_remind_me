@@ -273,3 +273,74 @@ pub fn manifest_json() -> serde_json::Value {
         "theme_color": "#0a0a0f",
     })
 }
+
+// ---------------------------------------------------------------------------
+// `escape_label_value`/`sample`/`label` are private, so their coverage lives
+// here rather than in `tests/metrics_test.rs` (#284) -- an external
+// integration test has no way to call them directly. The public surface
+// (`metrics_enabled`, the recorders, `render_prometheus_text`,
+// `manifest_json`) is covered there instead.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_label_value_leaves_plain_text_untouched() {
+        assert_eq!(escape_label_value("remind_me_search"), "remind_me_search");
+    }
+
+    #[test]
+    fn escape_label_value_escapes_backslashes_quotes_and_newlines() {
+        // Order matters: backslashes must be escaped first, or a value like
+        // `\"` would have its escaping backslash re-escaped and the quote
+        // would still close the label early.
+        assert_eq!(escape_label_value("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_label_value("has \"quotes\""), "has \\\"quotes\\\"");
+        assert_eq!(escape_label_value("line\nbreak"), "line\\nbreak");
+        assert_eq!(
+            escape_label_value("\\\"\n"),
+            "\\\\\\\"\\n",
+            "a value combining all three must escape every occurrence"
+        );
+    }
+
+    #[test]
+    fn format_labels_is_empty_for_no_labels() {
+        assert_eq!(format_labels(&[]), "");
+    }
+
+    #[test]
+    fn format_labels_renders_prometheus_curly_brace_syntax() {
+        assert_eq!(format_labels(&label("tool", "search")), "{tool=\"search\"}");
+    }
+
+    #[test]
+    fn format_labels_joins_multiple_labels_with_commas() {
+        let labels = vec![
+            ("tool".to_string(), "search".to_string()),
+            ("tier".to_string(), "hybrid".to_string()),
+        ];
+        assert_eq!(format_labels(&labels), "{tool=\"search\",tier=\"hybrid\"}");
+    }
+
+    #[test]
+    fn sample_formats_whole_floats_without_a_trailing_decimal() {
+        assert_eq!(sample("m", 3.0, &[]), "m 3");
+        assert_eq!(sample("m", 0.0, &[]), "m 0");
+        assert_eq!(sample("m", -2.0, &[]), "m -2");
+    }
+
+    #[test]
+    fn sample_keeps_the_fraction_for_non_whole_values() {
+        assert_eq!(sample("m", 1.5, &[]), "m 1.5");
+        assert_eq!(sample("m", 0.25, &[]), "m 0.25");
+    }
+
+    #[test]
+    fn sample_includes_labels_before_the_value() {
+        assert_eq!(
+            sample("remind_me_tool_calls_total", 2.0, &label("tool", "search")),
+            "remind_me_tool_calls_total{tool=\"search\"} 2"
+        );
+    }
+}
