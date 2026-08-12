@@ -8,6 +8,20 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## CORE_API_VERSION gating (closes #9)
+**2026-08-12**
+
+- **Added:** `dbs-core::versioning` — `CORE_API_VERSION`,
+  `CURRENT_API_VERSION` (alias, matching the reference's two-name split),
+  `is_api_compatible`, mirroring `src/dbs/core/versioning.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`).
+- **Changed:** `connector::CORE_API_VERSION` (a placeholder defined
+  directly in #4, before this module existed) is now a re-export from
+  `versioning` instead of its own definition — one source of truth, same
+  public path (`dbs_core::CORE_API_VERSION` still works).
+- 3 new unit tests (same-version compatible, different-version
+  incompatible, alias equality), 46/46 total passing.
+
 ## Timeutil helpers (closes #8)
 **2026-08-12**
 
