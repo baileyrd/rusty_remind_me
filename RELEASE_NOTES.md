@@ -8,6 +8,45 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## SQLite Storage: export, browse, stats, maintenance (closes #36)
+**2026-08-12**
+
+- **Added:** `iter_items`, `iter_revisions`, `iter_media_blobs`,
+  `item_counts`, `browse_items`, `get_item`, `get_media_blob`, `metrics`,
+  `maintain`, `prune_revisions`, and `vacuum_into` on `SqliteStorage` —
+  the third and final trait-section PR against #36, mirroring
+  `src/dbs/storage/sqlite.py` in baileyrd/Daily-Backup-System (pinned
+  `@6cc6491`)'s export/browse/stats/maintenance methods. #36 is now
+  closed: every `Storage` method has a real SQLite-backed implementation.
+- **Scope corrections found while implementing this, both filed as new
+  gap-analysis rows rather than silently absorbed:**
+  - **FTS5 full-text search is not ported.** The reference's
+    `browse_items` tries an FTS5 `MATCH` query first (built by
+    `_ensure_fts`, called from `migrate()`), falling back to `LIKE` only
+    when FTS5 is unavailable or the query trips `MATCH`'s parser. This
+    PR always uses the `LIKE` path — FTS5's index/triggers/backfill need
+    their own `migrate()`-adjacent hook this port doesn't have.
+  - **The video-link thumbnail fallback (YouTube/Loom/Vimeo URL
+    detection) is not ported.** `browse_items` here only returns the
+    first image media's URL as `thumbnail`; the reference derives a
+    thumbnail from a `videoLink` field when an item has no image media —
+    UI polish specific to one connector's item shape.
+- **`iter_items`/`iter_revisions`/`iter_media_blobs` collect eagerly**
+  into a `Vec` rather than streaming a live cursor — a `Box<dyn Iterator
+  + 'a>` borrowing a `rusqlite::Statement`/`Rows` across the call is a
+  self-referential-lifetime problem this port doesn't take on. Export
+  result sets are bounded by what one backup run holds.
+- **Binary blobs have no dedicated wire representation:** `ItemRow`
+  (`HashMap<String, Value>`) has no binary variant, so
+  `get_media_blob`/`iter_media_blobs` encode blob bytes as a JSON array
+  of byte values (`serde_json`'s default `Vec<u8>` encoding) rather than
+  the reference's raw Python `bytes` — no `base64` dependency added for
+  a row type already documented as "kept loose on purpose" (#11).
+- 24 new tests against a real in-memory SQLite connection covering every
+  new method, including a full `upsert → browse → get_item` round trip,
+  media-blob archiving/retrieval, `prune_revisions`' keep-newest-N
+  behavior, and `vacuum_into`'s existing-target refusal.
+
 ## SQLite Storage: items/batch commit, media archiving (part of #36)
 **2026-08-12**
 

@@ -3,12 +3,10 @@
 //! Mirrors `SqliteStorage` in `src/dbs/storage/sqlite.py` in
 //! baileyrd/Daily-Backup-System (pinned `@6cc6491`). Issue #36 is large
 //! (~1100 lines in the reference) and its own acceptance checklist calls
-//! for splitting the work across multiple PRs by trait section. Landed so
-//! far: schema lifecycle, sources, runs, cursor/state, locking (first
-//! PR), and **items/batch commit — `upsert_items`/`soft_delete_missing`/
-//! `live_external_ids`, including media archiving** (this PR). Still
-//! stubbed (`Err(DbsError::Storage(...))`), pending a follow-up PR:
-//! export/browse/stats/maintenance.
+//! for splitting the work across multiple PRs by trait section. Landed:
+//! schema lifecycle, sources, runs, cursor/state, locking (first PR);
+//! items/batch commit including media archiving (second PR); and
+//! **export/browse/stats/maintenance** (this PR, closing #36).
 //!
 //! Differences from the reference, all deliberate:
 //! * The reference's `transaction()` context manager isn't ported (see
@@ -32,10 +30,37 @@
 //!   `url` (a URL is left as a bare reference in v1); connector-prefetched
 //!   bytes travel via `MediaRef::data` instead of a dict `"data"` key —
 //!   same behavior, typed field.
+//! * `iter_items`/`iter_revisions`/`iter_media_blobs` collect their whole
+//!   result set into a `Vec` before returning it as an iterator, rather
+//!   than the reference's lazy `sqlite3` cursor generator. A `Box<dyn
+//!   Iterator + 'a>` borrowing a live `rusqlite::Statement`/`Rows` across
+//!   the call is a self-referential-lifetime problem this port doesn't
+//!   take on; export result sets are bounded by what a single backup run
+//!   holds anyway. Revisit if a real streaming need surfaces.
+//! * **FTS5 full-text search is not ported.** `browse_items`'s reference
+//!   implementation tries an FTS5 `MATCH` query first, falling back to
+//!   `LIKE` only when SQLite lacks the FTS5 module or the query trips
+//!   `MATCH`'s parser; this port always uses the `LIKE` path (own gap:
+//!   FTS5 index creation/triggers/backfill live in the reference's
+//!   `_ensure_fts`, called from `migrate()` — not ported here or in
+//!   #12's `migrate`). Tracked as a new gap-analysis row, same treatment
+//!   as the real `ExportQuery` type (#11's module doc-comment).
+//! * `browse_items`' reference thumbnail derivation falls back to a
+//!   video-link heuristic (YouTube/Loom/Vimeo) when an item has no image
+//!   media; this port only returns the first image media's URL. Also a
+//!   new gap-analysis row.
+//! * `ItemRow` (`HashMap<String, Value>`) has no binary variant, so
+//!   `get_media_blob`/`iter_media_blobs` encode blob bytes as a JSON
+//!   array of byte values (`serde_json`'s default `Vec<u8>` encoding)
+//!   rather than the reference's raw Python `bytes` — no `base64`
+//!   dependency added for a row type already documented as "kept loose
+//!   on purpose" (#11).
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -56,6 +81,47 @@ const CHUNK_SIZE: usize = 400;
 /// Every call site binds the tag as the query's second parameter (`?2`).
 const TAG_FILTER: &str =
     " AND EXISTS (SELECT 1 FROM json_each(items.tags_json) WHERE json_each.value = ?2)";
+
+/// Builds a `WHERE`-ready clause (always starting `1=1`, so callers can
+/// unconditionally append `AND ...`) and its bound parameters from an
+/// [`ExportQuery`], aliasing the `items` table as `i`. Mirrors the
+/// reference's `_build_filter`, narrowed to the fields this port's
+/// simplified `ExportQuery` placeholder actually has (see #11's
+/// module doc-comment on why it's a placeholder).
+fn build_filter(query: &ExportQuery) -> (String, Vec<SqlValue>) {
+    let mut clauses = vec!["1=1".to_string()];
+    let mut params: Vec<SqlValue> = Vec::new();
+    if let Some(source_id) = query.source_id {
+        clauses.push("i.source_id = ?".to_string());
+        params.push(SqlValue::Integer(source_id));
+    }
+    if let Some(kind) = &query.item_kind {
+        clauses.push("i.item_kind = ?".to_string());
+        params.push(SqlValue::Text(kind.clone()));
+    }
+    if let Some(since) = query.since {
+        clauses.push("i.item_created_at >= ?".to_string());
+        params.push(SqlValue::Text(iso_z(since)));
+    }
+    if let Some(until) = query.until {
+        clauses.push("i.item_created_at <= ?".to_string());
+        params.push(SqlValue::Text(iso_z(until)));
+    }
+    if !query.include_deleted {
+        clauses.push("i.deleted = 0".to_string());
+    }
+    (clauses.join(" AND "), params)
+}
+
+/// Escapes SQL `LIKE` wildcards in free-text search input (paired with
+/// `ESCAPE '\\'`).
+fn like_pattern(text: &str) -> String {
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
 
 /// The subset of an existing `items` row `upsert_items` needs to decide
 /// how to classify an incoming [`PreparedItem`] against it.
@@ -599,66 +665,326 @@ impl Storage for SqliteStorage {
     }
 
     // -- export / stats -----------------------------------------------------------
-    // Implemented in a follow-up PR against issue #36.
 
     fn iter_items<'a>(
         &'a self,
-        _query: &ExportQuery,
+        query: &ExportQuery,
     ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::iter_items is not yet implemented (see issue #36)".to_string(),
-        ))
+        let (where_clause, params) = build_filter(query);
+        let sql = format!(
+            "SELECT i.*, s.name AS source_name, s.type AS source_type \
+             FROM items i JOIN sources s ON s.id = i.source_id \
+             WHERE {where_clause} ORDER BY s.name, i.item_created_at, i.external_id"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| storage_err("failed to prepare iter_items", e))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), row_to_item)
+            .map_err(|e| storage_err("failed to run iter_items", e))?;
+        let items: Vec<ItemRow> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| storage_err("failed to read iter_items row", e))?;
+        Ok(Box::new(items.into_iter()))
     }
 
     fn iter_revisions<'a>(
         &'a self,
-        _query: &ExportQuery,
+        query: &ExportQuery,
     ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::iter_revisions is not yet implemented (see issue #36)".to_string(),
-        ))
+        let (where_clause, params) = build_filter(query);
+        let sql = format!(
+            "SELECT s.name AS source_name, s.type AS source_type, i.external_id, \
+             i.item_kind, rv.revision, rv.content_hash, rv.change_kind, \
+             rv.captured_at, rv.title, rv.raw_json \
+             FROM item_revisions rv \
+             JOIN items i ON i.id = rv.item_id \
+             JOIN sources s ON s.id = i.source_id \
+             WHERE {where_clause} ORDER BY s.name, i.external_id, rv.revision"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| storage_err("failed to prepare iter_revisions", e))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), row_to_revision)
+            .map_err(|e| storage_err("failed to run iter_revisions", e))?;
+        let items: Vec<ItemRow> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| storage_err("failed to read iter_revisions row", e))?;
+        Ok(Box::new(items.into_iter()))
     }
 
-    fn item_counts(&self, _source_id: i64) -> Result<(u64, u64, u64), DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::item_counts is not yet implemented (see issue #36)".to_string(),
-        ))
+    fn iter_media_blobs<'a>(
+        &'a self,
+        query: &ExportQuery,
+    ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
+        let (where_clause, params) = build_filter(query);
+        let sql = format!(
+            "SELECT s.name AS source_name, i.external_id, m.filename, m.kind, \
+             m.mime, m.sha256, m.byte_size, m.data \
+             FROM media m JOIN items i ON i.id = m.item_id JOIN sources s ON s.id = i.source_id \
+             WHERE {where_clause} AND m.data IS NOT NULL ORDER BY s.name, i.external_id"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| storage_err("failed to prepare iter_media_blobs", e))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), row_to_media_blob)
+            .map_err(|e| storage_err("failed to run iter_media_blobs", e))?;
+        let items: Vec<ItemRow> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| storage_err("failed to read iter_media_blobs row", e))?;
+        Ok(Box::new(items.into_iter()))
+    }
+
+    fn item_counts(&self, source_id: i64) -> Result<(u64, u64, u64), DbsError> {
+        let (total, deleted): (i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) AS total, \
+                 SUM(CASE WHEN deleted=1 THEN 1 ELSE 0 END) AS deleted \
+                 FROM items WHERE source_id=?1",
+                params![source_id],
+                |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+            )
+            .map_err(|e| storage_err("failed to count items", e))?;
+        let total = total.max(0) as u64;
+        let deleted = deleted.max(0) as u64;
+        Ok((total, total.saturating_sub(deleted), deleted))
     }
 
     fn browse_items(
         &self,
-        _query: &ExportQuery,
-        _text: Option<&str>,
-        _limit: u32,
-        _offset: u32,
+        query: &ExportQuery,
+        text: Option<&str>,
+        limit: u32,
+        offset: u32,
     ) -> Result<(Vec<ItemRow>, u64), DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::browse_items is not yet implemented (see issue #36)".to_string(),
-        ))
+        let (base_where, base_params) = build_filter(query);
+        let (where_clause, params): (String, Vec<SqlValue>) = if let Some(t) = text {
+            let like = like_pattern(t);
+            let mut p = base_params;
+            p.push(SqlValue::Text(like.clone()));
+            p.push(SqlValue::Text(like));
+            (
+                format!(
+                    "{base_where} AND (i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')"
+                ),
+                p,
+            )
+        } else {
+            (base_where, base_params)
+        };
+
+        let total: i64 = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM items i JOIN sources s ON s.id = i.source_id WHERE {where_clause}"
+                ),
+                rusqlite::params_from_iter(params.clone()),
+                |row| row.get(0),
+            )
+            .map_err(|e| storage_err("failed to count browse_items", e))?;
+
+        let sql = format!(
+            "SELECT i.*, s.name AS source_name, s.type AS source_type, \
+             (SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, \
+             (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' \
+              ORDER BY m.id LIMIT 1) AS thumb_url \
+             FROM items i JOIN sources s ON s.id = i.source_id \
+             WHERE {where_clause} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| storage_err("failed to prepare browse_items", e))?;
+        let mut all_params = params;
+        all_params.push(SqlValue::Integer(limit.max(1) as i64));
+        all_params.push(SqlValue::Integer(offset as i64));
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(all_params), row_to_browse_item)
+            .map_err(|e| storage_err("failed to run browse_items", e))?;
+        let items: Vec<ItemRow> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| storage_err("failed to read browse_items row", e))?;
+        Ok((items, total.max(0) as u64))
     }
 
-    fn get_item(&self, _item_id: i64) -> Result<Option<ItemRow>, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::get_item is not yet implemented (see issue #36)".to_string(),
-        ))
+    fn get_item(&self, item_id: i64) -> Result<Option<ItemRow>, DbsError> {
+        let row: Option<ItemRow> = self
+            .conn
+            .query_row(
+                "SELECT i.*, s.name AS source_name, s.type AS source_type \
+                 FROM items i JOIN sources s ON s.id = i.source_id WHERE i.id=?1",
+                params![item_id],
+                row_to_item,
+            )
+            .optional()
+            .map_err(|e| storage_err("failed to read item", e))?;
+        let Some(mut out) = row else {
+            return Ok(None);
+        };
+        out.insert("id".to_string(), Value::from(item_id));
+        out.insert("media".to_string(), self.media_for_item(item_id)?);
+        Ok(Some(out))
     }
 
-    fn get_media_blob(&self, _media_id: i64) -> Result<Option<ItemRow>, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::get_media_blob is not yet implemented (see issue #36)".to_string(),
-        ))
+    fn get_media_blob(&self, media_id: i64) -> Result<Option<ItemRow>, DbsError> {
+        type MediaBlobRow = (i64, i64, Option<String>, Option<String>, Vec<u8>);
+        let row: Option<MediaBlobRow> = self
+            .conn
+            .query_row(
+                "SELECT id, item_id, filename, mime, data FROM media WHERE id=?1 AND data IS NOT NULL",
+                params![media_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()
+            .map_err(|e| storage_err("failed to read media blob", e))?;
+        let Some((id, item_id, filename, mime, data)) = row else {
+            return Ok(None);
+        };
+        let mut out = ItemRow::new();
+        out.insert("id".to_string(), Value::from(id));
+        out.insert("item_id".to_string(), Value::from(item_id));
+        out.insert("filename".to_string(), opt_string(filename));
+        out.insert("mime".to_string(), opt_string(mime));
+        out.insert(
+            "data".to_string(),
+            serde_json::to_value(&data).unwrap_or(Value::Null),
+        );
+        Ok(Some(out))
     }
 
     fn metrics(&self) -> Result<ItemRow, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::metrics is not yet implemented (see issue #36)".to_string(),
-        ))
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.name AS source, i.item_kind AS kind, COUNT(*) AS total, \
+                 SUM(CASE WHEN i.deleted=0 THEN 1 ELSE 0 END) AS live \
+                 FROM items i JOIN sources s ON s.id = i.source_id \
+                 GROUP BY s.name, i.item_kind ORDER BY s.name, i.item_kind",
+            )
+            .map_err(|e| storage_err("failed to prepare metrics", e))?;
+        let by_source_kind: Vec<Value> = stmt
+            .query_map([], |row| {
+                let total: i64 = row.get("total")?;
+                let live: i64 = row.get::<_, Option<i64>>("live")?.unwrap_or(0);
+                Ok(serde_json::json!({
+                    "source": row.get::<_, String>("source")?,
+                    "kind": row.get::<_, String>("kind")?,
+                    "total": total,
+                    "live": live,
+                    "deleted": total - live,
+                }))
+            })
+            .map_err(|e| storage_err("failed to run metrics", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| storage_err("failed to read metrics row", e))?;
+
+        let revision_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM item_revisions", [], |row| row.get(0))
+            .map_err(|e| storage_err("failed to count revisions", e))?;
+        let (media_count, media_bytes): (i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(byte_size), 0) AS bytes \
+                 FROM media WHERE data IS NOT NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| storage_err("failed to count media", e))?;
+
+        let mut out = ItemRow::new();
+        out.insert("by_source_kind".to_string(), Value::Array(by_source_kind));
+        out.insert("revision_count".to_string(), Value::from(revision_count));
+        out.insert("media_count".to_string(), Value::from(media_count));
+        out.insert("media_bytes".to_string(), Value::from(media_bytes));
+        Ok(out)
     }
 
     fn integrity_check(&self) -> Result<String, DbsError> {
         self.conn
             .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
             .map_err(|e| storage_err("failed to run integrity_check", e))
+    }
+
+    // -- maintenance ----------------------------------------------------------------
+
+    fn maintain(&mut self, vacuum: bool) -> Result<ItemRow, DbsError> {
+        let size_before = self.file_size();
+        let wal_ok: i64 = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(|e| storage_err("failed to checkpoint WAL", e))?;
+        self.conn
+            .execute("PRAGMA optimize", [])
+            .map_err(|e| storage_err("failed to optimize", e))?;
+        if vacuum {
+            self.conn
+                .execute("VACUUM", [])
+                .map_err(|e| storage_err("failed to vacuum", e))?;
+        }
+        let size_after = self.file_size();
+
+        let mut out = ItemRow::new();
+        out.insert("path".to_string(), Value::from(self.path.clone()));
+        out.insert("wal_checkpointed".to_string(), Value::from(wal_ok == 0));
+        out.insert("optimized".to_string(), Value::from(true));
+        out.insert("vacuumed".to_string(), Value::from(vacuum));
+        out.insert("size_before".to_string(), Value::from(size_before));
+        out.insert("size_after".to_string(), Value::from(size_after));
+        Ok(out)
+    }
+
+    fn prune_revisions(&mut self, source_id: i64, keep: u32) -> Result<u64, DbsError> {
+        if keep == 0 {
+            return Ok(0);
+        }
+        let affected = self
+            .conn
+            .execute(
+                "DELETE FROM item_revisions WHERE id IN (
+                     SELECT rv.id FROM item_revisions rv
+                     JOIN items i ON i.id = rv.item_id
+                     WHERE i.source_id = ?1
+                       AND rv.id NOT IN (
+                         SELECT rv2.id FROM item_revisions rv2
+                         WHERE rv2.item_id = rv.item_id
+                         ORDER BY rv2.revision DESC LIMIT ?2
+                       )
+                 )",
+                params![source_id, keep],
+            )
+            .map_err(|e| storage_err("failed to prune revisions", e))?;
+        Ok(affected as u64)
+    }
+
+    fn vacuum_into(&self, dest: &Path) -> Result<u64, DbsError> {
+        if dest.exists() {
+            return Err(DbsError::Storage(format!(
+                "snapshot target already exists: {}",
+                dest.display()
+            )));
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                DbsError::Storage(format!("failed to create snapshot parent directory: {e}"))
+            })?;
+        }
+        let dest_str = dest.to_str().ok_or_else(|| {
+            DbsError::Storage("snapshot destination path is not valid UTF-8".to_string())
+        })?;
+        self.conn
+            .execute("VACUUM INTO ?1", params![dest_str])
+            .map_err(|e| storage_err("failed to vacuum into snapshot", e))?;
+        std::fs::metadata(dest)
+            .map(|m| m.len())
+            .map_err(|e| DbsError::Storage(format!("failed to stat snapshot: {e}")))
     }
 }
 
@@ -732,6 +1058,49 @@ impl SqliteStorage {
             }
         }
         Ok(index)
+    }
+
+    /// All media rows for one item (metadata only — `has_data` reports
+    /// whether bytes were archived, without loading them). Mirrors the
+    /// reference's `_media_for_item`.
+    fn media_for_item(&self, item_id: i64) -> Result<Value, DbsError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, url, kind, filename, mime, sha256, byte_size, local_path, \
+                 (data IS NOT NULL) AS has_data \
+                 FROM media WHERE item_id=?1 ORDER BY id",
+            )
+            .map_err(|e| storage_err("failed to prepare media_for_item", e))?;
+        let rows = stmt
+            .query_map(params![item_id], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, i64>("id")?,
+                    "url": row.get::<_, String>("url")?,
+                    "kind": row.get::<_, String>("kind")?,
+                    "filename": row.get::<_, Option<String>>("filename")?,
+                    "mime": row.get::<_, Option<String>>("mime")?,
+                    "sha256": row.get::<_, Option<String>>("sha256")?,
+                    "byte_size": row.get::<_, Option<i64>>("byte_size")?,
+                    "local_path": row.get::<_, Option<String>>("local_path")?,
+                    "has_data": row.get::<_, i64>("has_data")? != 0,
+                }))
+            })
+            .map_err(|e| storage_err("failed to query media_for_item", e))?;
+        let items: Vec<Value> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| storage_err("failed to read media_for_item row", e))?;
+        Ok(Value::Array(items))
+    }
+
+    /// The database file's size in bytes, or `0` for an in-memory database
+    /// or one that no longer exists on disk — mirrors the reference's
+    /// `_file_size` (which also swallows the `:memory:` case as an error
+    /// it treats as "no size").
+    fn file_size(&self) -> i64 {
+        std::fs::metadata(&self.path)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0)
     }
 }
 
@@ -844,6 +1213,209 @@ fn opt_string(v: Option<String>) -> Value {
         Some(s) => Value::from(s),
         None => Value::Null,
     }
+}
+
+/// Mirrors the reference's `_row_to_item` — always includes `raw` (this
+/// port's `ExportQuery` has no `include_raw` toggle; see #11).
+fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    let mut out = ItemRow::new();
+    out.insert(
+        "source".to_string(),
+        Value::from(row.get::<_, String>("source_name")?),
+    );
+    out.insert(
+        "type".to_string(),
+        Value::from(row.get::<_, String>("source_type")?),
+    );
+    out.insert(
+        "external_id".to_string(),
+        Value::from(row.get::<_, String>("external_id")?),
+    );
+    out.insert(
+        "item_kind".to_string(),
+        Value::from(row.get::<_, String>("item_kind")?),
+    );
+    out.insert("title".to_string(), opt_string(row.get("title")?));
+    out.insert("url".to_string(), opt_string(row.get("url")?));
+    out.insert("body".to_string(), opt_string(row.get("body")?));
+    let tags_json: String = row.get("tags_json")?;
+    out.insert(
+        "tags".to_string(),
+        serde_json::from_str(&tags_json).unwrap_or(Value::Array(Vec::new())),
+    );
+    out.insert(
+        "created_at".to_string(),
+        opt_string(row.get("item_created_at")?),
+    );
+    out.insert(
+        "updated_at".to_string(),
+        opt_string(row.get("item_updated_at")?),
+    );
+    out.insert(
+        "content_hash".to_string(),
+        Value::from(row.get::<_, String>("content_hash")?),
+    );
+    out.insert(
+        "revision".to_string(),
+        Value::from(row.get::<_, i64>("revision")?),
+    );
+    out.insert(
+        "first_seen_at".to_string(),
+        Value::from(row.get::<_, String>("first_seen_at")?),
+    );
+    out.insert(
+        "last_seen_at".to_string(),
+        Value::from(row.get::<_, String>("last_seen_at")?),
+    );
+    out.insert(
+        "last_changed_at".to_string(),
+        Value::from(row.get::<_, String>("last_changed_at")?),
+    );
+    out.insert(
+        "deleted".to_string(),
+        Value::from(row.get::<_, i64>("deleted")? != 0),
+    );
+    out.insert("deleted_at".to_string(), opt_string(row.get("deleted_at")?));
+    let raw_json: String = row.get("raw_json")?;
+    out.insert(
+        "raw".to_string(),
+        serde_json::from_str(&raw_json).unwrap_or(Value::Null),
+    );
+    Ok(out)
+}
+
+/// Mirrors the reference's `_row_to_item` revision-row shape used by
+/// `iter_revisions` — a lighter projection than `row_to_item`.
+fn row_to_revision(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    let mut out = ItemRow::new();
+    out.insert(
+        "source".to_string(),
+        Value::from(row.get::<_, String>("source_name")?),
+    );
+    out.insert(
+        "type".to_string(),
+        Value::from(row.get::<_, String>("source_type")?),
+    );
+    out.insert(
+        "external_id".to_string(),
+        Value::from(row.get::<_, String>("external_id")?),
+    );
+    out.insert(
+        "item_kind".to_string(),
+        Value::from(row.get::<_, String>("item_kind")?),
+    );
+    out.insert(
+        "revision".to_string(),
+        Value::from(row.get::<_, i64>("revision")?),
+    );
+    out.insert(
+        "content_hash".to_string(),
+        Value::from(row.get::<_, String>("content_hash")?),
+    );
+    out.insert(
+        "change_kind".to_string(),
+        Value::from(row.get::<_, String>("change_kind")?),
+    );
+    out.insert(
+        "captured_at".to_string(),
+        Value::from(row.get::<_, String>("captured_at")?),
+    );
+    out.insert("title".to_string(), opt_string(row.get("title")?));
+    let raw_json: String = row.get("raw_json")?;
+    out.insert(
+        "raw".to_string(),
+        serde_json::from_str(&raw_json).unwrap_or(Value::Null),
+    );
+    Ok(out)
+}
+
+/// Mirrors the reference's `iter_media_blobs` row shape. `data` is
+/// encoded as a JSON array of byte values — see the module doc-comment
+/// on why (no binary variant in `ItemRow`, no new dependency for it).
+fn row_to_media_blob(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    let mut out = ItemRow::new();
+    out.insert(
+        "source".to_string(),
+        Value::from(row.get::<_, String>("source_name")?),
+    );
+    out.insert(
+        "external_id".to_string(),
+        Value::from(row.get::<_, String>("external_id")?),
+    );
+    out.insert("filename".to_string(), opt_string(row.get("filename")?));
+    out.insert(
+        "kind".to_string(),
+        Value::from(row.get::<_, String>("kind")?),
+    );
+    out.insert("mime".to_string(), opt_string(row.get("mime")?));
+    out.insert("sha256".to_string(), opt_string(row.get("sha256")?));
+    out.insert(
+        "byte_size".to_string(),
+        match row.get::<_, Option<i64>>("byte_size")? {
+            Some(v) => Value::from(v),
+            None => Value::Null,
+        },
+    );
+    let data: Vec<u8> = row.get("data")?;
+    out.insert(
+        "data".to_string(),
+        serde_json::to_value(&data).unwrap_or(Value::Null),
+    );
+    Ok(out)
+}
+
+/// Lighter item shape for the paginated browse listing (no raw payload)
+/// — mirrors the reference's `_row_to_browse_item`, minus the video-link
+/// thumbnail fallback (see the module doc-comment).
+fn row_to_browse_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    let mut out = ItemRow::new();
+    out.insert("id".to_string(), Value::from(row.get::<_, i64>("id")?));
+    out.insert(
+        "source".to_string(),
+        Value::from(row.get::<_, String>("source_name")?),
+    );
+    out.insert(
+        "type".to_string(),
+        Value::from(row.get::<_, String>("source_type")?),
+    );
+    out.insert(
+        "external_id".to_string(),
+        Value::from(row.get::<_, String>("external_id")?),
+    );
+    out.insert(
+        "item_kind".to_string(),
+        Value::from(row.get::<_, String>("item_kind")?),
+    );
+    out.insert("title".to_string(), opt_string(row.get("title")?));
+    out.insert("url".to_string(), opt_string(row.get("url")?));
+    out.insert(
+        "created_at".to_string(),
+        opt_string(row.get("item_created_at")?),
+    );
+    out.insert(
+        "updated_at".to_string(),
+        opt_string(row.get("item_updated_at")?),
+    );
+    out.insert(
+        "revision".to_string(),
+        Value::from(row.get::<_, i64>("revision")?),
+    );
+    out.insert(
+        "deleted".to_string(),
+        Value::from(row.get::<_, i64>("deleted")? != 0),
+    );
+    out.insert("deleted_at".to_string(), opt_string(row.get("deleted_at")?));
+    out.insert(
+        "media_count".to_string(),
+        Value::from(row.get::<_, i64>("media_count")?),
+    );
+    let tags_json: String = row.get("tags_json")?;
+    out.insert(
+        "tags".to_string(),
+        serde_json::from_str(&tags_json).unwrap_or(Value::Array(Vec::new())),
+    );
+    out.insert("thumbnail".to_string(), opt_string(row.get("thumb_url")?));
+    Ok(out)
 }
 
 fn track_watermark(res: &mut BatchResult, updated_at: Option<&str>) {
@@ -1388,18 +1960,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn stubbed_export_methods_return_storage_errors() {
-        let storage = open();
-        assert!(storage.item_counts(1).is_err());
-        assert!(storage.get_item(1).unwrap_err().to_string().contains("#36"));
-        assert!(storage.metrics().is_err());
-        assert!(storage.get_media_blob(1).is_err());
-        assert!(storage
-            .browse_items(&ExportQuery::default(), None, 10, 0)
-            .is_err());
-    }
-
     fn prepared(external_id: &str, hash: &str) -> PreparedItem {
         PreparedItem {
             external_id: external_id.to_string(),
@@ -1701,5 +2261,302 @@ mod tests {
         assert_eq!(count, 1);
         let remaining = storage.live_external_ids(source.id, None).unwrap();
         assert_eq!(remaining, ["e2".to_string()].into_iter().collect());
+    }
+
+    fn seeded_storage() -> (SqliteStorage, SourceRecord, i64) {
+        let mut storage = open();
+        let source = storage
+            .upsert_source("a", "raindrop", "p", "{}", 1)
+            .unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        item.title = Some("Hello World".to_string());
+        item.body = Some("a body about cats".to_string());
+        storage
+            .upsert_items(source.id, run_id, &[item, prepared("e2", "h2")], false, 0)
+            .unwrap();
+        (storage, source, run_id)
+    }
+
+    #[test]
+    fn iter_items_returns_every_matching_item_with_raw() {
+        let (storage, source, _) = seeded_storage();
+        let rows: Vec<ItemRow> = storage
+            .iter_items(&ExportQuery::default())
+            .unwrap()
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["source"], Value::from("a"));
+        assert!(rows.iter().all(|r| r.contains_key("raw")));
+
+        let scoped = ExportQuery {
+            source_id: Some(source.id),
+            ..Default::default()
+        };
+        assert_eq!(storage.iter_items(&scoped).unwrap().count(), 2);
+        let none = ExportQuery {
+            source_id: Some(source.id + 1),
+            ..Default::default()
+        };
+        assert_eq!(storage.iter_items(&none).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn iter_items_excludes_deleted_unless_include_deleted_is_set() {
+        let (mut storage, source, run_id) = seeded_storage();
+        let mut deleted = prepared("e1", "h1");
+        deleted.deleted = true;
+        storage
+            .upsert_items(source.id, run_id, &[deleted], false, 0)
+            .unwrap();
+
+        let live_only = storage.iter_items(&ExportQuery::default()).unwrap().count();
+        assert_eq!(live_only, 1);
+
+        let with_deleted = ExportQuery {
+            include_deleted: true,
+            ..Default::default()
+        };
+        assert_eq!(storage.iter_items(&with_deleted).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn iter_revisions_lists_every_revision_across_a_batch() {
+        let (mut storage, source, run_id) = seeded_storage();
+        storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h1-updated")], false, 0)
+            .unwrap();
+        let revisions: Vec<ItemRow> = storage
+            .iter_revisions(&ExportQuery::default())
+            .unwrap()
+            .collect();
+        // e1 has 2 revisions (created, updated), e2 has 1 (created).
+        assert_eq!(revisions.len(), 3);
+    }
+
+    #[test]
+    fn iter_media_blobs_only_yields_rows_with_archived_bytes() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/x.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: Some(b"bytes".to_vec()),
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], true, 0)
+            .unwrap();
+        let blobs: Vec<ItemRow> = storage
+            .iter_media_blobs(&ExportQuery::default())
+            .unwrap()
+            .collect();
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0]["external_id"], Value::from("e1"));
+    }
+
+    #[test]
+    fn item_counts_reports_total_live_and_deleted() {
+        let (mut storage, source, run_id) = seeded_storage();
+        let mut deleted = prepared("e1", "h1");
+        deleted.deleted = true;
+        storage
+            .upsert_items(source.id, run_id, &[deleted], false, 0)
+            .unwrap();
+        assert_eq!(storage.item_counts(source.id).unwrap(), (2, 1, 1));
+    }
+
+    #[test]
+    fn browse_items_paginates_and_reports_total() {
+        let (storage, _, _) = seeded_storage();
+        let (rows, total) = storage
+            .browse_items(&ExportQuery::default(), None, 1, 0)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn browse_items_text_search_matches_title_or_body() {
+        let (storage, _, _) = seeded_storage();
+        let (rows, total) = storage
+            .browse_items(&ExportQuery::default(), Some("cats"), 10, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0]["external_id"], Value::from("e1"));
+
+        let (_, none_total) = storage
+            .browse_items(&ExportQuery::default(), Some("nonexistent"), 10, 0)
+            .unwrap();
+        assert_eq!(none_total, 0);
+    }
+
+    #[test]
+    fn get_item_includes_media_and_full_raw_payload() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/x.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: None,
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+
+        let (rows, _) = storage
+            .browse_items(&ExportQuery::default(), None, 10, 0)
+            .unwrap();
+        let id = rows[0]["id"].as_i64().unwrap();
+
+        let fetched = storage.get_item(id).unwrap().unwrap();
+        assert_eq!(fetched["external_id"], Value::from("e1"));
+        assert_eq!(fetched["media"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn get_item_returns_none_for_an_unknown_id() {
+        let storage = open();
+        assert!(storage.get_item(999).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_media_blob_round_trips_archived_bytes() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/x.png".to_string(),
+            kind: "image".to_string(),
+            filename: Some("x.png".to_string()),
+            mime: Some("image/png".to_string()),
+            data: Some(b"hello".to_vec()),
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], true, 0)
+            .unwrap();
+
+        let media_id: i64 = storage
+            .conn
+            .query_row("SELECT id FROM media", [], |r| r.get(0))
+            .unwrap();
+        let blob = storage.get_media_blob(media_id).unwrap().unwrap();
+        assert_eq!(blob["filename"], Value::from("x.png"));
+        assert_eq!(
+            blob["data"],
+            serde_json::to_value(b"hello".to_vec()).unwrap()
+        );
+    }
+
+    #[test]
+    fn get_media_blob_returns_none_when_bytes_were_never_archived() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/x.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: None,
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+        let media_id: i64 = storage
+            .conn
+            .query_row("SELECT id FROM media", [], |r| r.get(0))
+            .unwrap();
+        assert!(storage.get_media_blob(media_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn metrics_aggregates_by_source_and_kind() {
+        let (storage, _, _) = seeded_storage();
+        let metrics = storage.metrics().unwrap();
+        let by_source_kind = metrics["by_source_kind"].as_array().unwrap();
+        assert_eq!(by_source_kind.len(), 1);
+        assert_eq!(by_source_kind[0]["total"], Value::from(2));
+        assert_eq!(by_source_kind[0]["live"], Value::from(2));
+        assert_eq!(metrics["revision_count"], Value::from(2));
+    }
+
+    #[test]
+    fn maintain_reports_wal_checkpoint_and_optimize_without_vacuum() {
+        let (mut storage, _, _) = seeded_storage();
+        let report = storage.maintain(false).unwrap();
+        assert_eq!(report["optimized"], Value::from(true));
+        assert_eq!(report["vacuumed"], Value::from(false));
+        assert!(report.contains_key("size_before"));
+    }
+
+    #[test]
+    fn maintain_with_vacuum_reports_vacuumed_true() {
+        let (mut storage, _, _) = seeded_storage();
+        let report = storage.maintain(true).unwrap();
+        assert_eq!(report["vacuumed"], Value::from(true));
+    }
+
+    #[test]
+    fn prune_revisions_keeps_only_the_newest_n_and_is_a_noop_at_zero() {
+        let (mut storage, source, run_id) = seeded_storage();
+        storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h1-v2")], false, 0)
+            .unwrap();
+        storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h1-v3")], false, 0)
+            .unwrap();
+        // e1 now has 3 revisions, e2 has 1 — 4 total.
+        assert_eq!(storage.prune_revisions(source.id, 0).unwrap(), 0);
+        let pruned = storage.prune_revisions(source.id, 1).unwrap();
+        assert_eq!(pruned, 2); // e1's two oldest revisions removed
+        let remaining: i64 = storage
+            .conn
+            .query_row("SELECT COUNT(*) FROM item_revisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2); // e1's newest + e2's only revision
+    }
+
+    #[test]
+    fn vacuum_into_writes_a_snapshot_and_refuses_an_existing_target() {
+        let (storage, _, _) = seeded_storage();
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_dbs_sqlite_storage_vacuum_test_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("snapshot.sqlite3");
+
+        let size = storage.vacuum_into(&dest).unwrap();
+        assert!(size > 0);
+        assert!(dest.exists());
+
+        let err = storage.vacuum_into(&dest).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
