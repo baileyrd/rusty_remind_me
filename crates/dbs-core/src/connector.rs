@@ -153,6 +153,15 @@ pub trait Connector {
         None
     }
 
+    /// This connector's default export rules (issue #49) — `None` means
+    /// every emitted item exports under the generic defaults
+    /// (`ExportProfile::default()`), with no per-source config override
+    /// yet resolved. See `crate::export_profile` for the merge with a
+    /// source's `[sources.NAME.export]` config block.
+    fn export_profile(&self) -> Option<crate::export_profile::ExportProfile> {
+        None
+    }
+
     /// Reports whether the connector's runtime dependencies are ready.
     /// Returns `(ready, hint)`. Default: always ready — override for a
     /// real check (e.g. probing for the `yt-dlp` binary on `PATH`).

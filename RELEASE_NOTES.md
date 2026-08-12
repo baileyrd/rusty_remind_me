@@ -8,6 +8,42 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Export profile: ExportProfile/ExportProfileOverride types (closes #49)
+**2026-08-12**
+
+- **Added:** `dbs-core::export_profile`, porting
+  `src/dbs/core/export_profile.py` in baileyrd/Daily-Backup-System
+  (pinned `@6cc6491`) — `ExportProfile` (per-source selection/rendering
+  rules: `enabled`, `item_kinds`, `group_by`, `body_from`, `page_per`),
+  `ExportProfileOverride` (the `[sources.NAME.export]` config block, every
+  field optional so an unset field keeps the connector's default),
+  `resolve_export_profile` (field-by-field merge + `page_per` validation),
+  `raw_value`/`group_values` (dotted-path resolution against an export
+  row's `raw` payload, falling back to its normalized columns), and
+  `axis_label` (wiki hub-page title casing).
+- **This was missed entirely in the original gap-analysis pass** — the
+  same failure class as `BackupService`/`service.py`: referenced by both
+  `connector.py`'s `export_profile` class attribute and `config.py`'s
+  `SourceConfig.export`, but had no row of its own. `connector.rs` and
+  `config.rs` both previously had no way to declare or override an
+  export profile at all.
+- **Wired in:** `Connector::export_profile()` (new default-`None` trait
+  method, same declarative-default pattern as `capabilities()`/
+  `item_kinds()`); `registry::Handshake::export_profile` (a connector
+  subprocess can now declare its default profile over the ADR-0001
+  JSON-IPC handshake); `SourceConfig::export`, parsed from a
+  `[sources.NAME.export]` TOML block (already reserved in
+  `RESERVED_SOURCE_KEYS` since #13, just never parsed into a typed field
+  until now).
+- 21 new tests: `accepts_kind` selection logic, `resolve_export_profile`
+  field-by-field merge (including the "override wins only where it's
+  actually set" case) and `page_per` validation, `raw_value`'s
+  raw-then-normalized-columns fallback and dotted-path resolution,
+  `group_values`' scalar/list/boolean/non-scalar handling, `axis_label`'s
+  title-casing and empty-path fallback, and three `load_config`
+  integration tests (no `export` block, a fully-populated one, and
+  confirming `export` doesn't leak into connector `options`).
+
 ## SQLite storage: browse_items video-link thumbnail fallback (closes #48)
 **2026-08-12**
 

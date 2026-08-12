@@ -7,12 +7,6 @@
 //! `.env` and are referenced by `*_env` keys; the loader actively
 //! *rejects* a config that inlines a secret value.
 //!
-//! **Scoped narrower than the reference:** `SourceConfig.export`
-//! (`ExportProfileOverride`) isn't ported — `core/export_profile.py` was
-//! missed as its own `gap-analysis.md` row entirely (connector.py's
-//! `export_profile` class attribute has the same gap) and needs filing as
-//! a follow-up issue before either can be wired in for real.
-//!
 //! Parsing pipeline matches the reference's order deliberately: reject
 //! inline secrets *before* `${ENV}` expansion (catches both a literal
 //! secret and an attempt to smuggle one into a secret-named key via
@@ -63,6 +57,11 @@ pub struct SourceConfig {
     /// Prune revision history to the newest N during `dbs maintain` (0 =
     /// keep everything).
     pub keep_revisions: u32,
+    /// The `[sources.NAME.export]` config block (issue #49), merged
+    /// against the connector's declared default via
+    /// `crate::export_profile::resolve_export_profile`. `None` when the
+    /// source declares no export overrides at all.
+    pub export: Option<crate::export_profile::ExportProfileOverride>,
     /// Connector-specific options: every key not in [`RESERVED_SOURCE_KEYS`].
     pub options: HashMap<String, Value>,
 }
@@ -219,6 +218,38 @@ fn as_f64_or(value: Option<&Value>, default: f64) -> f64 {
 
 fn as_bool_or(value: Option<&Value>, default: bool) -> bool {
     value.and_then(Value::as_bool).unwrap_or(default)
+}
+
+/// A TOML array of strings, or `None` if `value` is absent/not an array.
+fn as_string_array(value: Option<&Value>) -> Option<Vec<String>> {
+    value.and_then(Value::as_array).map(|arr| {
+        arr.iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect()
+    })
+}
+
+/// Parses a `[sources.NAME.export]` block into an
+/// [`crate::export_profile::ExportProfileOverride`]. `None` when the
+/// source has no `export` key at all — distinct from a present-but-empty
+/// block, which still parses (to a no-op override).
+fn parse_export_override(
+    body: &toml::map::Map<String, Value>,
+) -> Option<crate::export_profile::ExportProfileOverride> {
+    let Some(Value::Table(export)) = body.get("export") else {
+        return None;
+    };
+    Some(crate::export_profile::ExportProfileOverride {
+        enabled: export.get("enabled").and_then(Value::as_bool),
+        item_kinds: as_string_array(export.get("item_kinds")),
+        group_by: as_string_array(export.get("group_by")),
+        body_from: as_string_array(export.get("body_from")),
+        page_per: export
+            .get("page_per")
+            .and_then(Value::as_str)
+            .map(String::from),
+    })
 }
 
 /// Recursively expands `${ENV_VAR}` references in string values against
@@ -384,6 +415,7 @@ pub fn load_config(path: &Path) -> Result<Config, DbsError> {
                     max_media_mb: as_u32_or(body.get("max_media_mb"), 0),
                     requires_vpn: as_bool_or(body.get("requires_vpn"), false),
                     keep_revisions: as_u32_or(body.get("keep_revisions"), 0),
+                    export: parse_export_override(body),
                     options,
                 },
             );
@@ -610,6 +642,60 @@ mod tests {
             overrides.get("raindrop:allow_override"),
             Some(&"true".to_string())
         );
+    }
+
+    #[test]
+    fn load_config_source_with_no_export_block_has_none() {
+        let file = write_temp_toml(
+            r#"
+            [sources.raindrop]
+            type = "raindrop"
+            "#,
+        );
+        let config = load_config(&file.path).unwrap();
+        assert!(config.sources["raindrop"].export.is_none());
+    }
+
+    #[test]
+    fn load_config_parses_an_export_override_block() {
+        let file = write_temp_toml(
+            r#"
+            [sources.reddit]
+            type = "reddit"
+
+            [sources.reddit.export]
+            enabled = false
+            item_kinds = ["post"]
+            group_by = ["subreddit"]
+            body_from = ["selftext", "comment_body"]
+            page_per = "item"
+            "#,
+        );
+        let config = load_config(&file.path).unwrap();
+        let over = config.sources["reddit"].export.as_ref().unwrap();
+        assert_eq!(over.enabled, Some(false));
+        assert_eq!(over.item_kinds, Some(vec!["post".to_string()]));
+        assert_eq!(over.group_by, Some(vec!["subreddit".to_string()]));
+        assert_eq!(
+            over.body_from,
+            Some(vec!["selftext".to_string(), "comment_body".to_string()])
+        );
+        assert_eq!(over.page_per.as_deref(), Some("item"));
+    }
+
+    #[test]
+    fn load_config_export_block_does_not_leak_into_connector_options() {
+        let file = write_temp_toml(
+            r#"
+            [sources.reddit]
+            type = "reddit"
+
+            [sources.reddit.export]
+            enabled = false
+            "#,
+        );
+        let config = load_config(&file.path).unwrap();
+        assert!(!config.sources["reddit"].options.contains_key("export"));
     }
 
     #[test]
