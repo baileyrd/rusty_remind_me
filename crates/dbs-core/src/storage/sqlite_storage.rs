@@ -3,12 +3,12 @@
 //! Mirrors `SqliteStorage` in `src/dbs/storage/sqlite.py` in
 //! baileyrd/Daily-Backup-System (pinned `@6cc6491`). Issue #36 is large
 //! (~1100 lines in the reference) and its own acceptance checklist calls
-//! for splitting the work across multiple PRs by trait section; this PR
-//! covers **schema lifecycle, sources, runs, cursor/state, and locking**.
-//! The remaining sections — items/upsert (the largest and most
-//! correctness-sensitive part), and export/browse/stats/maintenance — are
-//! stubbed here (`Err(DbsError::Storage(...))`) and land in follow-up
-//! PRs against the same issue.
+//! for splitting the work across multiple PRs by trait section. Landed so
+//! far: schema lifecycle, sources, runs, cursor/state, locking (first
+//! PR), and **items/batch commit — `upsert_items`/`soft_delete_missing`/
+//! `live_external_ids`, including media archiving** (this PR). Still
+//! stubbed (`Err(DbsError::Storage(...))`), pending a follow-up PR:
+//! export/browse/stats/maintenance.
 //!
 //! Differences from the reference, all deliberate:
 //! * The reference's `transaction()` context manager isn't ported (see
@@ -24,18 +24,48 @@
 //! * The reference's `finish_run` accepts `items_failed`; the `Storage`
 //!   trait's `finish_run` does not expose that parameter (see #11), so
 //!   the column keeps whatever `upsert_items`/schema default left it at.
+//! * `PreparedItem::media` holds each `MediaRef` (#4/#17) round-tripped
+//!   through `serde_json::Value` — `upsert_items` deserializes each entry
+//!   back into a typed `MediaRef` rather than pulling fields out of the
+//!   `Value` by hand.
+//! * The reference's media resolution only ever reads **local files** off
+//!   `url` (a URL is left as a bare reference in v1); connector-prefetched
+//!   bytes travel via `MediaRef::data` instead of a dict `"data"` key —
+//!   same behavior, typed field.
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::errors::DbsError;
-use crate::models::Cursor;
+use crate::models::{Cursor, MediaRef};
 use crate::storage::sqlite::open_connection;
 use crate::storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
 use crate::timeutil::{iso_z, parse_iso};
+
+/// SQLite's default variable limit is comfortably above this; matches the
+/// reference's own chunk size for `IN (...)` clauses built from a
+/// caller-controlled list.
+const CHUNK_SIZE: usize = 400;
+
+/// Restricts a query to items carrying a given tag (`tags_json` is a JSON
+/// array of strings) — the storage half of a tag-scoped reconcile sweep.
+/// Every call site binds the tag as the query's second parameter (`?2`).
+const TAG_FILTER: &str =
+    " AND EXISTS (SELECT 1 FROM json_each(items.tags_json) WHERE json_each.value = ?2)";
+
+/// The subset of an existing `items` row `upsert_items` needs to decide
+/// how to classify an incoming [`PreparedItem`] against it.
+#[derive(Debug, Clone)]
+struct ExistingRow {
+    id: i64,
+    content_hash: String,
+    revision: i64,
+    deleted: bool,
+}
 
 fn is_memory_path(path: &str) -> bool {
     path.is_empty() || path == ":memory:" || path.starts_with("file::memory:")
@@ -274,41 +304,187 @@ impl Storage for SqliteStorage {
     }
 
     // -- items / batch commit -------------------------------------------------
-    // Implemented in a follow-up PR against issue #36.
 
     fn upsert_items(
         &mut self,
-        _source_id: i64,
-        _run_id: i64,
-        _items: &[PreparedItem],
-        _store_media: bool,
-        _max_media_bytes: u64,
+        source_id: i64,
+        run_id: i64,
+        items: &[PreparedItem],
+        store_media: bool,
+        max_media_bytes: u64,
     ) -> Result<BatchResult, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::upsert_items is not yet implemented (see issue #36)".to_string(),
-        ))
+        let mut res = BatchResult::default();
+        if items.is_empty() {
+            return Ok(res);
+        }
+        let now = self.now();
+        let external_ids: Vec<&str> = items.iter().map(|it| it.external_id.as_str()).collect();
+        let mut existing = self.existing_index(source_id, &external_ids)?;
+
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| storage_err("failed to begin upsert_items transaction", e))?;
+        for it in items {
+            track_watermark(&mut res, it.item_updated_at.as_deref());
+            match existing.remove(&it.external_id) {
+                None => {
+                    let inserted = insert_item(
+                        &tx,
+                        source_id,
+                        run_id,
+                        it,
+                        &now,
+                        &mut res,
+                        store_media,
+                        max_media_bytes,
+                    )?;
+                    existing.insert(it.external_id.clone(), inserted);
+                }
+                Some(ex) => {
+                    let updated = update_item(
+                        &tx,
+                        run_id,
+                        &ex,
+                        it,
+                        &now,
+                        &mut res,
+                        store_media,
+                        max_media_bytes,
+                    )?;
+                    existing.insert(it.external_id.clone(), updated);
+                }
+            }
+        }
+        tx.commit()
+            .map_err(|e| storage_err("failed to commit upsert_items transaction", e))?;
+        Ok(res)
     }
 
     fn soft_delete_missing(
         &mut self,
-        _source_id: i64,
-        _live_ids: &HashSet<String>,
-        _run_id: i64,
-        _tag: Option<&str>,
+        source_id: i64,
+        live_ids: &HashSet<String>,
+        run_id: i64,
+        tag: Option<&str>,
     ) -> Result<u64, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::soft_delete_missing is not yet implemented (see issue #36)".to_string(),
-        ))
+        let now = self.now();
+        let mut count: u64 = 0;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| storage_err("failed to begin soft_delete_missing transaction", e))?;
+
+        tx.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _sweep_live(external_id TEXT PRIMARY KEY) WITHOUT ROWID",
+            [],
+        )
+        .map_err(|e| storage_err("failed to create sweep temp table", e))?;
+        tx.execute("DELETE FROM _sweep_live", [])
+            .map_err(|e| storage_err("failed to clear sweep temp table", e))?;
+        let live_ids_vec: Vec<&str> = live_ids.iter().map(String::as_str).collect();
+        for chunk in live_ids_vec.chunks(CHUNK_SIZE) {
+            let placeholders = vec!["(?)"; chunk.len()].join(",");
+            let sql =
+                format!("INSERT OR IGNORE INTO _sweep_live(external_id) VALUES {placeholders}");
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            tx.execute(&sql, params.as_slice())
+                .map_err(|e| storage_err("failed to populate sweep temp table", e))?;
+        }
+
+        let mut victims_sql = "SELECT id, revision, content_hash, raw_json, title \
+             FROM items WHERE source_id=?1 AND deleted=0 \
+             AND external_id NOT IN (SELECT external_id FROM _sweep_live)"
+            .to_string();
+        if tag.is_some() {
+            victims_sql.push_str(TAG_FILTER);
+        }
+        struct Victim {
+            id: i64,
+            revision: i64,
+            content_hash: String,
+            raw_json: String,
+            title: Option<String>,
+        }
+        let victims: Vec<Victim> = {
+            let mut stmt = tx
+                .prepare(&victims_sql)
+                .map_err(|e| storage_err("failed to prepare sweep victim query", e))?;
+            let row_fn = |row: &rusqlite::Row<'_>| {
+                Ok(Victim {
+                    id: row.get(0)?,
+                    revision: row.get(1)?,
+                    content_hash: row.get(2)?,
+                    raw_json: row.get(3)?,
+                    title: row.get(4)?,
+                })
+            };
+            let rows = if let Some(t) = tag {
+                stmt.query_map(params![source_id, t], row_fn)
+            } else {
+                stmt.query_map(params![source_id], row_fn)
+            }
+            .map_err(|e| storage_err("failed to list sweep victims", e))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| storage_err("failed to read sweep victim row", e))?
+        };
+
+        for v in &victims {
+            let new_rev = v.revision + 1;
+            tx.execute(
+                "UPDATE items SET deleted=1, deleted_at=?1, revision=?2, \
+                 last_changed_at=?1, observed_run_id=?3 WHERE id=?4",
+                params![now, new_rev, run_id, v.id],
+            )
+            .map_err(|e| storage_err("failed to soft-delete item", e))?;
+            tx.execute(
+                "INSERT INTO item_revisions(
+                     item_id, revision, content_hash, raw_json, title,
+                     captured_at, captured_run_id, change_kind)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,'deleted')",
+                params![
+                    v.id,
+                    new_rev,
+                    v.content_hash,
+                    v.raw_json,
+                    v.title,
+                    now,
+                    run_id
+                ],
+            )
+            .map_err(|e| storage_err("failed to write sweep deletion revision", e))?;
+            count += 1;
+        }
+        tx.execute("DELETE FROM _sweep_live", [])
+            .map_err(|e| storage_err("failed to clear sweep temp table", e))?;
+        tx.commit()
+            .map_err(|e| storage_err("failed to commit soft_delete_missing transaction", e))?;
+        Ok(count)
     }
 
     fn live_external_ids(
         &self,
-        _source_id: i64,
-        _tag: Option<&str>,
+        source_id: i64,
+        tag: Option<&str>,
     ) -> Result<HashSet<String>, DbsError> {
-        Err(DbsError::Storage(
-            "SqliteStorage::live_external_ids is not yet implemented (see issue #36)".to_string(),
-        ))
+        let mut sql = "SELECT external_id FROM items WHERE source_id=?1 AND deleted=0".to_string();
+        if tag.is_some() {
+            sql.push_str(TAG_FILTER);
+        }
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| storage_err("failed to prepare live_external_ids", e))?;
+        let row_fn = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+        let rows = if let Some(t) = tag {
+            stmt.query_map(params![source_id, t], row_fn)
+        } else {
+            stmt.query_map(params![source_id], row_fn)
+        }
+        .map_err(|e| storage_err("failed to list live external ids", e))?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(|e| storage_err("failed to read live external id row", e))
     }
 
     // -- cursor / state ---------------------------------------------------------
@@ -510,6 +686,53 @@ impl SqliteStorage {
         };
         Ok(Some((finished - started).num_milliseconds().max(0)))
     }
+
+    /// Looks up existing `items` rows for a batch of external ids, chunked
+    /// to stay under SQLite's bound-variable limit — mirrors the
+    /// reference's `_existing_index`.
+    fn existing_index(
+        &self,
+        source_id: i64,
+        external_ids: &[&str],
+    ) -> Result<HashMap<String, ExistingRow>, DbsError> {
+        let mut index = HashMap::new();
+        for chunk in external_ids.chunks(CHUNK_SIZE) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT id, external_id, content_hash, revision, deleted \
+                 FROM items WHERE source_id=? AND external_id IN ({placeholders})"
+            );
+            let mut stmt = self
+                .conn
+                .prepare(&sql)
+                .map_err(|e| storage_err("failed to prepare existing_index query", e))?;
+            let mut bound: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            bound.push(&source_id);
+            for id in chunk {
+                bound.push(id);
+            }
+            let rows = stmt
+                .query_map(bound.as_slice(), |row| {
+                    let external_id: String = row.get(1)?;
+                    Ok((
+                        external_id,
+                        ExistingRow {
+                            id: row.get(0)?,
+                            content_hash: row.get(2)?,
+                            revision: row.get(3)?,
+                            deleted: row.get::<_, i64>(4)? != 0,
+                        },
+                    ))
+                })
+                .map_err(|e| storage_err("failed to query existing items", e))?;
+            for row in rows {
+                let (external_id, existing) =
+                    row.map_err(|e| storage_err("failed to read existing item row", e))?;
+                index.insert(external_id, existing);
+            }
+        }
+        Ok(index)
+    }
 }
 
 fn row_to_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceRecord> {
@@ -621,6 +844,313 @@ fn opt_string(v: Option<String>) -> Value {
         Some(s) => Value::from(s),
         None => Value::Null,
     }
+}
+
+fn track_watermark(res: &mut BatchResult, updated_at: Option<&str>) {
+    let Some(updated_at) = updated_at else {
+        return;
+    };
+    let advance = match &res.max_updated_at {
+        Some(current) => updated_at > current.as_str(),
+        None => true,
+    };
+    if advance {
+        res.max_updated_at = Some(updated_at.to_string());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_item(
+    tx: &rusqlite::Transaction<'_>,
+    source_id: i64,
+    run_id: i64,
+    it: &PreparedItem,
+    now: &str,
+    res: &mut BatchResult,
+    store_media: bool,
+    max_media_bytes: u64,
+) -> Result<ExistingRow, DbsError> {
+    let deleted = it.deleted;
+    let change_kind = if deleted { "deleted" } else { "created" };
+    let tags_json = serde_json::to_string(&it.tags)
+        .map_err(|e| DbsError::Storage(format!("failed to encode tags: {e}")))?;
+    tx.execute(
+        "INSERT INTO items(
+             source_id, external_id, item_kind, title, url, body, tags_json,
+             item_created_at, item_updated_at, content_hash, raw_json, revision,
+             first_seen_at, last_seen_at, last_changed_at, observed_run_id,
+             deleted, deleted_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,1,?12,?12,?12,?13,?14,?15)",
+        params![
+            source_id,
+            it.external_id,
+            it.item_kind,
+            it.title,
+            it.url,
+            it.body,
+            tags_json,
+            it.item_created_at,
+            it.item_updated_at,
+            it.content_hash,
+            it.raw_json,
+            now,
+            run_id,
+            deleted as i64,
+            if deleted { Some(now) } else { None },
+        ],
+    )
+    .map_err(|e| storage_err("failed to insert item", e))?;
+    let item_id = tx.last_insert_rowid();
+    insert_revision(tx, item_id, 1, it, now, run_id, change_kind)?;
+    replace_media(tx, item_id, it, now, store_media, max_media_bytes)?;
+    res.revisions += 1;
+    if deleted {
+        res.deleted += 1;
+    } else {
+        res.created += 1;
+    }
+    Ok(ExistingRow {
+        id: item_id,
+        content_hash: it.content_hash.clone(),
+        revision: 1,
+        deleted,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_item(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: i64,
+    ex: &ExistingRow,
+    it: &PreparedItem,
+    now: &str,
+    res: &mut BatchResult,
+    store_media: bool,
+    max_media_bytes: u64,
+) -> Result<ExistingRow, DbsError> {
+    let was_deleted = ex.deleted;
+    let hash_changed = ex.content_hash != it.content_hash;
+    let mut new_rev = ex.revision;
+    let mut deleted = was_deleted;
+    let mut content_hash = ex.content_hash.clone();
+
+    if it.deleted && !was_deleted {
+        new_rev += 1;
+        write_full_update(tx, ex.id, new_rev, it, now, run_id, true)?;
+        insert_revision(tx, ex.id, new_rev, it, now, run_id, "deleted")?;
+        replace_media(tx, ex.id, it, now, store_media, max_media_bytes)?;
+        res.deleted += 1;
+        res.revisions += 1;
+        deleted = true;
+        content_hash = it.content_hash.clone();
+    } else if was_deleted && !it.deleted {
+        new_rev += 1;
+        write_full_update(tx, ex.id, new_rev, it, now, run_id, false)?;
+        insert_revision(tx, ex.id, new_rev, it, now, run_id, "undeleted")?;
+        replace_media(tx, ex.id, it, now, store_media, max_media_bytes)?;
+        res.undeleted += 1;
+        res.revisions += 1;
+        deleted = false;
+        content_hash = it.content_hash.clone();
+    } else if hash_changed {
+        // A still-deleted item whose payload changed stays deleted — a
+        // native-deletes source may re-emit trash items with mutated
+        // payloads, and an update must never resurrect them.
+        new_rev += 1;
+        write_full_update(tx, ex.id, new_rev, it, now, run_id, it.deleted)?;
+        insert_revision(tx, ex.id, new_rev, it, now, run_id, "updated")?;
+        replace_media(tx, ex.id, it, now, store_media, max_media_bytes)?;
+        res.updated += 1;
+        res.revisions += 1;
+        deleted = it.deleted;
+        content_hash = it.content_hash.clone();
+    } else {
+        tx.execute(
+            "UPDATE items SET last_seen_at=?1, observed_run_id=?2 WHERE id=?3",
+            params![now, run_id, ex.id],
+        )
+        .map_err(|e| storage_err("failed to bump item last_seen_at", e))?;
+        res.unchanged += 1;
+    }
+    Ok(ExistingRow {
+        id: ex.id,
+        content_hash,
+        revision: new_rev,
+        deleted,
+    })
+}
+
+fn write_full_update(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: i64,
+    new_rev: i64,
+    it: &PreparedItem,
+    now: &str,
+    run_id: i64,
+    deleted: bool,
+) -> Result<(), DbsError> {
+    let tags_json = serde_json::to_string(&it.tags)
+        .map_err(|e| DbsError::Storage(format!("failed to encode tags: {e}")))?;
+    tx.execute(
+        "UPDATE items SET
+             item_kind=?1, title=?2, url=?3, body=?4, tags_json=?5,
+             item_created_at=?6, item_updated_at=?7, content_hash=?8, raw_json=?9,
+             revision=?10, last_seen_at=?11, last_changed_at=?11, observed_run_id=?12,
+             deleted=?13,
+             deleted_at=CASE WHEN ?13 THEN COALESCE(deleted_at, ?11) ELSE NULL END
+         WHERE id=?14",
+        params![
+            it.item_kind,
+            it.title,
+            it.url,
+            it.body,
+            tags_json,
+            it.item_created_at,
+            it.item_updated_at,
+            it.content_hash,
+            it.raw_json,
+            new_rev,
+            now,
+            run_id,
+            deleted as i64,
+            item_id,
+        ],
+    )
+    .map_err(|e| storage_err("failed to write item update", e))?;
+    Ok(())
+}
+
+fn insert_revision(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: i64,
+    revision: i64,
+    it: &PreparedItem,
+    now: &str,
+    run_id: i64,
+    kind: &str,
+) -> Result<(), DbsError> {
+    tx.execute(
+        "INSERT INTO item_revisions(
+             item_id, revision, content_hash, raw_json, title,
+             captured_at, captured_run_id, change_kind)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            item_id,
+            revision,
+            it.content_hash,
+            it.raw_json,
+            it.title,
+            now,
+            run_id,
+            kind,
+        ],
+    )
+    .map_err(|e| storage_err("failed to insert item revision", e))?;
+    Ok(())
+}
+
+/// Deletes then re-inserts every media row for `item_id` — a no-op when
+/// `it.media` is empty, matching the reference (items that never declare
+/// media never touch the `media` table). `OR REPLACE` (not `OR IGNORE`):
+/// the same item listing the same URL twice with differing metadata keeps
+/// the latest rather than dropping it.
+fn replace_media(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: i64,
+    it: &PreparedItem,
+    now: &str,
+    store_media: bool,
+    max_media_bytes: u64,
+) -> Result<(), DbsError> {
+    if it.media.is_empty() {
+        return Ok(());
+    }
+    tx.execute("DELETE FROM media WHERE item_id=?1", params![item_id])
+        .map_err(|e| storage_err("failed to clear existing media", e))?;
+    for raw in &it.media {
+        let m: MediaRef = serde_json::from_value(raw.clone())
+            .map_err(|e| DbsError::Storage(format!("invalid media entry: {e}")))?;
+        let (data, byte_size, sha, local_path) = if store_media {
+            if let Some(supplied) = &m.data {
+                let (d, size, s) = resolve_supplied_media(supplied, max_media_bytes);
+                (d, size, s, None)
+            } else {
+                resolve_local_media(&m.url, max_media_bytes)
+            }
+        } else {
+            (None, None, None, None)
+        };
+        let fetched_at = data.as_ref().map(|_| now.to_string());
+        tx.execute(
+            "INSERT OR REPLACE INTO media
+                 (item_id, url, kind, filename, mime, local_path, sha256, fetched_at, data, byte_size)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                item_id,
+                m.url,
+                m.kind,
+                m.filename,
+                m.mime,
+                local_path,
+                sha,
+                fetched_at,
+                data,
+                byte_size,
+            ],
+        )
+        .map_err(|e| storage_err("failed to insert media row", e))?;
+    }
+    Ok(())
+}
+
+/// Loads a local-file media reference for inline storage. Only **local
+/// files** are ingested — a bare URL is left as a reference (v1). A file
+/// larger than `max_bytes` (when `>0`) is recorded by path + size, but
+/// its bytes are not stored, so an opt-in archive can't be ballooned by
+/// one huge asset. Returns `(data, byte_size, sha256, local_path)`.
+fn resolve_local_media(
+    url: &str,
+    max_bytes: u64,
+) -> (Option<Vec<u8>>, Option<i64>, Option<String>, Option<String>) {
+    let expanded = crate::storage::sqlite::shellexpand_home(url);
+    let path = std::path::Path::new(&expanded);
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => m,
+        _ => return (None, None, None, None),
+    };
+    let size = metadata.len() as i64;
+    let local_path = path.to_string_lossy().into_owned();
+    if max_bytes > 0 && metadata.len() > max_bytes {
+        return (None, Some(size), None, Some(local_path));
+    }
+    match std::fs::read(path) {
+        Ok(data) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let sha = format!("{:x}", hasher.finalize());
+            let len = data.len() as i64;
+            (Some(data), Some(len), Some(sha), Some(local_path))
+        }
+        Err(_) => (None, Some(size), None, Some(local_path)),
+    }
+}
+
+/// Accepts bytes a connector already fetched over HTTP (`MediaRef::data`).
+/// Size-capped identically to [`resolve_local_media`] — over-cap bytes
+/// are dropped but the size is still reported. Returns `(data,
+/// byte_size, sha256)`.
+fn resolve_supplied_media(
+    data: &[u8],
+    max_bytes: u64,
+) -> (Option<Vec<u8>>, Option<i64>, Option<String>) {
+    let size = data.len() as i64;
+    if max_bytes > 0 && (data.len() as u64) > max_bytes {
+        return (None, Some(size), None);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let sha = format!("{:x}", hasher.finalize());
+    (Some(data.to_vec()), Some(size), Some(sha))
 }
 
 #[cfg(test)]
@@ -859,14 +1389,317 @@ mod tests {
     }
 
     #[test]
-    fn stubbed_item_and_export_methods_return_storage_errors() {
+    fn stubbed_export_methods_return_storage_errors() {
         let storage = open();
-        assert!(storage
-            .live_external_ids(1, None)
-            .unwrap_err()
-            .to_string()
-            .contains("not yet implemented"));
         assert!(storage.item_counts(1).is_err());
         assert!(storage.get_item(1).unwrap_err().to_string().contains("#36"));
+        assert!(storage.metrics().is_err());
+        assert!(storage.get_media_blob(1).is_err());
+        assert!(storage
+            .browse_items(&ExportQuery::default(), None, 10, 0)
+            .is_err());
+    }
+
+    fn prepared(external_id: &str, hash: &str) -> PreparedItem {
+        PreparedItem {
+            external_id: external_id.to_string(),
+            item_kind: "post".to_string(),
+            title: Some("Title".to_string()),
+            url: Some("https://example.com".to_string()),
+            body: Some("Body".to_string()),
+            tags: vec!["a".to_string(), "b".to_string()],
+            item_created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            item_updated_at: Some("2026-01-02T00:00:00Z".to_string()),
+            content_hash: hash.to_string(),
+            raw_json: "{}".to_string(),
+            deleted: false,
+            media: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn upsert_items_with_no_items_is_a_noop() {
+        let mut storage = open();
+        let result = storage.upsert_items(1, 1, &[], false, 0).unwrap();
+        assert_eq!(result, BatchResult::default());
+    }
+
+    #[test]
+    fn upsert_items_inserts_new_items_as_created() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let items = vec![prepared("e1", "h1"), prepared("e2", "h2")];
+        let result = storage
+            .upsert_items(source.id, run_id, &items, false, 0)
+            .unwrap();
+        assert_eq!(result.created, 2);
+        assert_eq!(result.revisions, 2);
+        assert_eq!(
+            result.max_updated_at.as_deref(),
+            Some("2026-01-02T00:00:00Z")
+        );
+
+        let live = storage.live_external_ids(source.id, None).unwrap();
+        assert_eq!(live.len(), 2);
+        assert!(live.contains("e1"));
+    }
+
+    #[test]
+    fn upsert_items_reports_unchanged_when_hash_is_the_same() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let item = prepared("e1", "h1");
+        storage
+            .upsert_items(source.id, run_id, std::slice::from_ref(&item), false, 0)
+            .unwrap();
+        let result = storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+        assert_eq!(result.unchanged, 1);
+        assert_eq!(result.created, 0);
+    }
+
+    #[test]
+    fn upsert_items_reports_updated_when_hash_changes() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h1")], false, 0)
+            .unwrap();
+        let result = storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h2")], false, 0)
+            .unwrap();
+        assert_eq!(result.updated, 1);
+        assert_eq!(result.revisions, 1);
+    }
+
+    #[test]
+    fn upsert_items_marks_a_native_delete_then_can_undelete() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h1")], false, 0)
+            .unwrap();
+
+        let mut deleted_item = prepared("e1", "h1");
+        deleted_item.deleted = true;
+        let result = storage
+            .upsert_items(source.id, run_id, &[deleted_item], false, 0)
+            .unwrap();
+        assert_eq!(result.deleted, 1);
+        assert!(storage
+            .live_external_ids(source.id, None)
+            .unwrap()
+            .is_empty());
+
+        let result = storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h2")], false, 0)
+            .unwrap();
+        assert_eq!(result.undeleted, 1);
+        assert!(storage
+            .live_external_ids(source.id, None)
+            .unwrap()
+            .contains("e1"));
+    }
+
+    #[test]
+    fn upsert_items_stores_local_file_media_when_store_media_is_set() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_dbs_sqlite_storage_media_test_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("thumb.png");
+        std::fs::write(&file_path, b"fake-png-bytes").unwrap();
+
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: file_path.to_string_lossy().into_owned(),
+            kind: "image".to_string(),
+            filename: Some("thumb.png".to_string()),
+            mime: Some("image/png".to_string()),
+            data: None,
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+
+        storage
+            .upsert_items(source.id, run_id, &[item], true, 0)
+            .unwrap();
+
+        let has_data: i64 = storage
+            .conn
+            .query_row("SELECT data IS NOT NULL FROM media", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_data, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upsert_items_skips_media_bytes_without_store_media() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/x.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: None,
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+        let has_data: i64 = storage
+            .conn
+            .query_row("SELECT data IS NOT NULL FROM media", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_data, 0);
+    }
+
+    #[test]
+    fn upsert_items_caps_supplied_media_bytes_at_max_media_bytes() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        let media = MediaRef {
+            url: "https://example.com/x.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: Some(vec![0u8; 100]),
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], true, 10)
+            .unwrap();
+        let (has_data, byte_size): (i64, i64) = storage
+            .conn
+            .query_row("SELECT data IS NOT NULL, byte_size FROM media", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(has_data, 0);
+        assert_eq!(byte_size, 100);
+    }
+
+    #[test]
+    fn soft_delete_missing_removes_items_absent_from_live_ids() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        storage
+            .upsert_items(
+                source.id,
+                run_id,
+                &[prepared("e1", "h1"), prepared("e2", "h2")],
+                false,
+                0,
+            )
+            .unwrap();
+
+        let live: HashSet<String> = ["e1".to_string()].into_iter().collect();
+        let count = storage
+            .soft_delete_missing(source.id, &live, run_id, None)
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let remaining = storage.live_external_ids(source.id, None).unwrap();
+        assert_eq!(remaining, live);
+    }
+
+    #[test]
+    fn soft_delete_missing_is_idempotent_on_a_second_pass() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        storage
+            .upsert_items(source.id, run_id, &[prepared("e1", "h1")], false, 0)
+            .unwrap();
+        let empty: HashSet<String> = HashSet::new();
+        assert_eq!(
+            storage
+                .soft_delete_missing(source.id, &empty, run_id, None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            storage
+                .soft_delete_missing(source.id, &empty, run_id, None)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn live_external_ids_filters_by_tag_when_given() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut tagged = prepared("e1", "h1");
+        tagged.tags = vec!["keep".to_string()];
+        let untagged = prepared("e2", "h2");
+        storage
+            .upsert_items(source.id, run_id, &[tagged, untagged], false, 0)
+            .unwrap();
+
+        let all = storage.live_external_ids(source.id, None).unwrap();
+        assert_eq!(all.len(), 2);
+        let only_tagged = storage.live_external_ids(source.id, Some("keep")).unwrap();
+        assert_eq!(only_tagged, ["e1".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn soft_delete_missing_with_tag_only_touches_tagged_items() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut tagged = prepared("e1", "h1");
+        tagged.tags = vec!["sweep".to_string()];
+        let untagged = prepared("e2", "h2");
+        storage
+            .upsert_items(source.id, run_id, &[tagged, untagged], false, 0)
+            .unwrap();
+
+        let empty: HashSet<String> = HashSet::new();
+        let count = storage
+            .soft_delete_missing(source.id, &empty, run_id, Some("sweep"))
+            .unwrap();
+        assert_eq!(count, 1);
+        let remaining = storage.live_external_ids(source.id, None).unwrap();
+        assert_eq!(remaining, ["e2".to_string()].into_iter().collect());
     }
 }

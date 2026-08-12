@@ -60,7 +60,7 @@ pub fn open_connection(path: &str) -> Result<Connection, DbsError> {
 /// Minimal `~` expansion (home directory only, at the start of the path)
 /// — avoids pulling in a dedicated crate for a single-purpose need this
 /// small; not a general shell-expansion implementation.
-fn shellexpand_home(path: &str) -> String {
+pub(crate) fn shellexpand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {
             return Path::new(&home).join(rest).to_string_lossy().into_owned();
