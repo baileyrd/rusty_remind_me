@@ -106,6 +106,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-connector-support"
+version = "0.1.0"
+
+[[package]]
 name = "dbs-core"
 version = "0.1.0"
 dependencies = [

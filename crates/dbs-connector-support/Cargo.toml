@@ -1,0 +1,9 @@
+[package]
+name = "dbs-connector-support"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared helpers for rusty_dbs connector implementations — not part of the dbs-core public contract, matching dbs.connectors._util in the reference"
+
+[dependencies]

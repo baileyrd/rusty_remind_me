@@ -8,6 +8,36 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Shared connector watchdog/timeout helper (closes #14)
+**2026-08-12**
+
+- **Added:** a new workspace crate, `dbs-connector-support`, and its
+  first module, `watchdog` (`run_with_watchdog`/`WatchdogTimeout`/
+  `WatchdogError`), mirroring `src/dbs/connectors/_util.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`). Real crate boundary,
+  not just a doc convention — the reference's own docstring separates
+  "core public contract" from "connector implementation detail," and
+  ADR-0001's subprocess connectors will link against this, not
+  `dbs-core`. First connector-side shared code.
+- Abandons a stalled worker thread past its deadline the same way the
+  reference does (Rust threads can't be force-killed either), but
+  distinguishes the call's own error (`WatchdogError::Inner`) from a
+  timeout (`WatchdogError::Timeout`) and a worker panic
+  (`WatchdogError::WorkerPanicked`) as three separate cases — cleaner
+  than the reference's box-and-reraise pattern, which Rust's type system
+  doesn't really have an equivalent for anyway.
+- **Deliberately not ported:** `impersonate_target` (yt-dlp/`curl_cffi`
+  TLS-fingerprint tuning) — round-1's browser-automation decision has
+  `rusty_dbs` shell out to the yt-dlp *binary*, not call its Python
+  library API, so this Python-library-specific helper has no Rust
+  equivalent to write. `ext_for_mime` is deferred to whichever media/
+  export issue actually needs it.
+- 7 new unit tests (zero-timeout inline execution, fast completion,
+  inner-error propagation, wall-clock timeout without a heartbeat, an
+  active heartbeat preventing timeout during healthy long-running work,
+  worker-panic handling, timeout message wording), 90/90 total passing
+  across the workspace.
+
 ## Config loading (closes #13)
 **2026-08-12**
 
