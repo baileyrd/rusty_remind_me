@@ -89,7 +89,7 @@ not left as one oversized issue.
 | CSV exporter | fn | spec | both | `src/dbs/export/csv.py` | — | no | S | Done (#54) |
 | Markdown exporter | fn | spec | both | `src/dbs/export/markdown.py` | — | no | S | Done (#55) |
 | Obsidian vault exporter | fn | spec | both | `src/dbs/export/obsidian.py` | — | no | M | Done (#56) — added the `zip` crate dependency (pulled forward from this row's own note below) |
-| Wiki exporter (topic/item grouping, wikilinks) | fn | spec | both | `src/dbs/export/wiki.py` | — | no | M | |
+| Wiki exporter (topic/item grouping, wikilinks) | fn | spec | both | `src/dbs/export/wiki.py` | — | no | M | Done (#57) — added `ExportSource::profiles()`, a new default-empty trait method the per-source `ExportProfile` grouping/`page_per` overrides read through |
 | Self-describing archive exporter (checksummed manifest zip) | fn | spec | both | `src/dbs/export/archive.py` | — | no | M | `zip` crate dependency already added in #56 (Obsidian exporter) |
 
 ## Restore, verify, maintain, notes/wiki helpers
