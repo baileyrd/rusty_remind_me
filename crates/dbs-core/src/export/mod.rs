@@ -22,6 +22,7 @@
 //! actually invokes `Exporter::write` against a real file), not this
 //! trait's.
 
+mod archive;
 mod csv;
 mod json;
 mod markdown;
@@ -38,6 +39,7 @@ use crate::errors::DbsError;
 use crate::export_profile::ExportProfile;
 use crate::storage::{ExportQuery, ItemRow};
 
+pub use archive::ArchiveExporter;
 pub use csv::CsvExporter;
 pub use json::JsonExporter;
 pub use markdown::MarkdownExporter;
@@ -107,6 +109,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
         "markdown" => Ok(Box::new(MarkdownExporter)),
         "obsidian" => Ok(Box::new(ObsidianExporter)),
         "wiki" => Ok(Box::new(WikiExporter)),
+        "archive" => Ok(Box::new(ArchiveExporter)),
         other => Err(DbsError::Config(format!(
             "unknown export format {other:?}. Available: {:?}",
             available_formats()
@@ -117,7 +120,9 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
 /// Every currently-registered format key, sorted — grows as each
 /// exporter issue above lands.
 pub fn available_formats() -> Vec<&'static str> {
-    vec!["json", "ndjson", "csv", "markdown", "obsidian", "wiki"]
+    vec![
+        "json", "ndjson", "csv", "markdown", "obsidian", "wiki", "archive",
+    ]
 }
 
 #[cfg(test)]
@@ -169,10 +174,16 @@ mod tests {
     }
 
     #[test]
+    fn get_exporter_finds_archive() {
+        let exporter = get_exporter("archive").unwrap();
+        assert_eq!(exporter.format(), "archive");
+    }
+
+    #[test]
     fn available_formats_lists_every_registered_format() {
         assert_eq!(
             available_formats(),
-            vec!["json", "ndjson", "csv", "markdown", "obsidian", "wiki"]
+            vec!["json", "ndjson", "csv", "markdown", "obsidian", "wiki", "archive"]
         );
     }
 }

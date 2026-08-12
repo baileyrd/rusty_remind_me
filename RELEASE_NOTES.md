@@ -8,6 +8,32 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Archive exporter (closes #58)
+**2026-08-12**
+
+- **Added:** `ArchiveExporter`, porting `src/dbs/export/archive.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — a self-describing,
+  self-*verifying* zip bundle: `items/<source>.ndjson` and (with
+  `include_revisions`) `revisions/<source>.ndjson`, one file per
+  source, streamed straight to the open zip entry a line at a time;
+  archived media blobs under `media/<source>/<external_id>/`; and a
+  `manifest.json` (schema versions from `ExportSource::manifest()`,
+  the query, counts, `checksum_algorithm: "sha256"`, and a `checksums`
+  map — a running sha256 computed per entry while streaming, not
+  after the fact). This is the format `dbs restore`/`dbs verify`
+  (filed separately) will validate a bundle's bytes against before
+  ingesting anything. Registered as `"archive"` in `get_exporter`/
+  `available_formats` — the last of the seven export formats.
+- Reuses the `zip = "2"` dependency added in #56 (Obsidian exporter);
+  no new dependency needed, as anticipated in that PR's gap-analysis
+  note.
+- 6 new tests: empty result set (manifest only, no per-source entries),
+  a single item with its NDJSON entry's checksum independently
+  recomputed and compared against the manifest, revisions gated by
+  `include_revisions`, multiple sources producing separate entries and
+  `by_source` counts, a media blob's checksum round-tripped the same
+  way, and a metadata sanity check.
+
 ## Wiki exporter (closes #57)
 **2026-08-12**
 
