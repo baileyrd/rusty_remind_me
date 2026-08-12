@@ -40,6 +40,7 @@ pub use netns::{in_named_netns, named_netns_exists};
 pub use secrets::Secrets;
 pub use service::reap_once;
 pub use storage::sqlite::open_connection;
+pub use storage::sqlite_storage::SqliteStorage;
 pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
 pub use timeutil::{iso_z, parse_iso};
 pub use versioning::{is_api_compatible, CURRENT_API_VERSION};
