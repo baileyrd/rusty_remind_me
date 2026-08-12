@@ -11,6 +11,7 @@ pub mod errors;
 pub mod hashing;
 pub mod models;
 pub mod secrets;
+pub mod timeutil;
 
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
@@ -22,3 +23,4 @@ pub use models::{
     SourceStatus, VerifyIssue, VerifyReport,
 };
 pub use secrets::Secrets;
+pub use timeutil::{iso_z, parse_iso};
