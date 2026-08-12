@@ -8,6 +8,28 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## netns — VPN network-namespace membership check (closes #24)
+**2026-08-12**
+
+- **Added:** `dbs-core::netns` — `named_netns_exists`/`in_named_netns`,
+  mirroring `src/dbs/core/netns.py` in baileyrd/Daily-Backup-System
+  (pinned `@6cc6491`). Guards `requires_vpn` sources against backing up
+  outside the VPN wrapper's network namespace (which would leak traffic
+  via the host's real IP) by comparing `(device, inode)` of
+  `/proc/self/ns/net` against the named-netns bind mount — the same check
+  `ip netns identify` does.
+- Genuinely Linux-only, confirmed by reading the reference directly (not
+  assumed from the module name) back when this was filed. The reference
+  reaches its non-Linux degradation implicitly (the `/proc`/`/run` paths
+  simply don't exist off Linux, so `os.stat` raises and gets caught);
+  this port makes that explicit via `#[cfg(target_os = "linux")]` instead
+  of relying on path-not-found as the portability strategy.
+- 4 new unit tests (empty name disables both checks, a nonexistent
+  namespace doesn't exist, not-in-a-nonexistent-namespace, a
+  platform-specific test confirming the Linux path does a real
+  `stat`-based comparison rather than short-circuiting), 94/94 total
+  passing across the workspace.
+
 ## Shared connector watchdog/timeout helper (closes #14)
 **2026-08-12**
 
