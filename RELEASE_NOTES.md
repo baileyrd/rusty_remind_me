@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## templates: dbs init scaffolding writer (closes #62)
+**2026-08-12**
+
+- **Added:** `dbs-core::templates`, porting `src/dbs/templates.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — `CONFIG_TEMPLATE`/
+  `ENV_TEMPLATE` (embedded verbatim via `include_str!` from sibling
+  `.template` files, byte-for-byte the reference's two constants), and
+  `write_scaffolding` (the writer half, which the reference itself
+  keeps in `cli.py`'s `init` command rather than `templates.py` — no
+  CLI crate exists yet to host it, so it lands here, same rationale as
+  `BackupService::export`/`verify`/`restore` landing as library methods
+  ahead of the CLI cluster).
+- Idempotent by design, matching the reference: an existing config is
+  left alone unless `force` is set (never silently clobbered), and
+  `.env.example` is never overwritten at all, `force` or not — only
+  the config template gets a force override.
+- Deliberately doesn't create `export_dir`/`download_root` directories
+  at init time, matching the reference: neither directory is `mkdir`'d
+  by `dbs init` in `cli.py` either, only referenced in the written
+  config for later, lazy creation when actually used.
+- 6 new tests: a fresh directory writes both files, an
+  already-initialized directory clobbers neither without `--force`,
+  `--force` overwrites the config but still never the `.env.example`,
+  both templates contain their expected content, and the written
+  config round-trips through `toml::from_str` (byte-for-byte
+  TOML-syntax fidelity, not just "some text got written").
+
 ## notes_export: incremental per-item Markdown export (closes #61)
 **2026-08-12**
 
