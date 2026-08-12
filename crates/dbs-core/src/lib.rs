@@ -12,6 +12,7 @@ pub mod hashing;
 pub mod models;
 pub mod secrets;
 pub mod timeutil;
+pub mod versioning;
 
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
@@ -24,3 +25,4 @@ pub use models::{
 };
 pub use secrets::Secrets;
 pub use timeutil::{iso_z, parse_iso};
+pub use versioning::{is_api_compatible, CURRENT_API_VERSION};

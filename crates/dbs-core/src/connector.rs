@@ -27,13 +27,7 @@ use chrono::{DateTime, Utc};
 use crate::capabilities::{AuthCapture, Capabilities, ItemKind};
 use crate::errors::ConnectorError;
 use crate::models::{Cursor, FetchEvent};
-
-/// The `dbs.CORE_API_VERSION` this crate implements against.
-///
-/// Formalized by issue #9 (CORE_API_VERSION gating), which will relocate
-/// this into its own `versioning` module with the real gating check this
-/// is currently just a placeholder default for.
-pub const CORE_API_VERSION: u32 = 1;
+pub use crate::versioning::CORE_API_VERSION;
 
 /// Everything a connector needs for one run, injected by the engine.
 ///
