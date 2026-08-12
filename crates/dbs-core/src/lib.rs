@@ -24,6 +24,7 @@ pub mod restore;
 pub mod secrets;
 pub mod service;
 pub mod storage;
+pub mod templates;
 pub mod timeutil;
 pub mod versioning;
 
@@ -69,5 +70,6 @@ pub use service::reap_once;
 pub use storage::sqlite::open_connection;
 pub use storage::sqlite_storage::SqliteStorage;
 pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
+pub use templates::{write_scaffolding, ScaffoldResult, CONFIG_TEMPLATE, ENV_TEMPLATE};
 pub use timeutil::{iso_z, parse_iso};
 pub use versioning::{is_api_compatible, CURRENT_API_VERSION};

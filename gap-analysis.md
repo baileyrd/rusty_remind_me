@@ -99,7 +99,7 @@ not left as one oversized issue.
 | Restore (`dbs restore`, dry-run, manifest/schema-version validation) | fn | spec | both | `src/dbs/restore.py` | — | no | M | Done (#59) — orchestrator landed as `BackupService::restore` (`src/dbs/core/service.py`'s split, not `restore.py`'s own scope) |
 | Verify (DB integrity + archive checksum check) | fn | spec | both | `cli.py` (`dbs verify`) | — | no | S | Done (#60) — orchestrator landed as `BackupService::verify`; archive checksum half already done in #59's `restore::verify_archive` |
 | `notes_export.py` (incremental per-item markdown, collision map, state file) | fn | spec | both | `src/dbs/notes_export.py` | — | no | M | Done (#61) — pulled forward `BackupService::export` (an `ExportQuery`-to-file orchestrator) from #70, since this issue cannot exist without it |
-| `templates.py` (`dbs init` scaffolding writer) | fn | spec | both | `src/dbs/templates.py` | — | no | S | |
+| `templates.py` (`dbs init` scaffolding writer) | fn | spec | both | `src/dbs/templates.py` | — | no | S | Done (#62) — writer landed as a library function (`write_scaffolding`), same "no CLI crate yet" pattern as `BackupService::export`/`verify`/`restore` |
 
 ## CLI (`dbs.cli`, ~22 subcommands)
 
