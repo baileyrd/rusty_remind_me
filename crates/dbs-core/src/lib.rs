@@ -9,6 +9,7 @@ pub mod cancel;
 pub mod capabilities;
 pub mod config;
 pub mod connector;
+pub mod crypto;
 pub mod engine;
 pub mod errors;
 pub mod export;
@@ -30,6 +31,10 @@ pub use config::{
     load_config, parse_env_file, Config, ConnectorOverride, NotifyOn, SourceConfig, VpnGuard,
 };
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
+pub use crypto::{
+    decrypt_file, decrypt_stream, is_encrypted, resolve_passphrase, EncryptingWriter,
+    DEFAULT_PASSPHRASE_ENV, MAGIC as CRYPTO_MAGIC,
+};
 pub use engine::commit_checkpoint;
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use export::{

@@ -8,6 +8,47 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Encryption at rest / encrypted exports (closes #52)
+**2026-08-12**
+
+- **Added:** `dbs-core::crypto`, porting `src/dbs/crypto.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — passphrase
+  encryption for export bundles: `EncryptingWriter<W>` (a
+  `std::io::Write` adapter that chunks plaintext into 1 MiB
+  AES-256-GCM frames as it streams, so multi-GB archives never buffer
+  in memory), `decrypt_stream`/`decrypt_file` (frame-by-frame decrypt
+  with wrong-passphrase/tamper/reorder/truncation all surfacing as
+  `DbsError::Config`, never partial silence), `is_encrypted` (magic-header
+  sniff), and `resolve_passphrase` (secret store, then
+  `DBS_EXPORT_PASSPHRASE`, then error — never silently unencrypted).
+  Format is byte-for-byte the reference's: `DBSENC01` magic, 16-byte
+  salt, 8-byte nonce prefix, then `len(u32 BE) || ciphertext` frames
+  with a counter nonce and `b"dbs"`/`b"dbs-final"` AAD distinguishing
+  the terminator frame (what makes truncation detectable).
+- **Added dependencies:** `aes-gcm = "0.10"`, `scrypt = "0.11"`,
+  `rand = "0.8"` (`dbs-core`) — `rusty_tls` was checked first per this
+  issue's own acceptance criterion (`add_repo` on `Rusty-Mill/rusty_tls`)
+  and is unreachable from this session (cross-tier repo access
+  refused: "session already has repos from owner(s) [baileyrd]"), so
+  there was nothing there to verify against; fell back to the
+  pre-approved standard RustCrypto crates named in the issue itself.
+  Key derivation matches the reference's scrypt parameters exactly
+  (`n=2^14, r=8, p=1`, 32-byte key).
+- **Deliberate divergence:** the reference's `EncryptingWriter.close()`
+  (called implicitly via Python's context-manager protocol) becomes
+  `EncryptingWriter::finish(self) -> Result<W, DbsError>`, an explicit
+  consuming method — Rust's `Drop` can't propagate the I/O error the
+  final frame's write can raise, so there's no implicit-close
+  equivalent; a writer that's never `finish()`-ed simply never
+  produces a file at all (no half-written output), the same safety
+  property the reference gets from "never implicitly close."
+- 12 new tests: small-plaintext round trip, a round trip crossing the
+  1 MiB chunk boundary, empty-plaintext round trip, wrong passphrase,
+  tampered ciphertext (AEAD auth failure), a truncated file missing
+  its final frame, a bad magic header, `is_encrypted` on encrypted/
+  plaintext/missing files, a real-file `decrypt_file` round trip, and
+  `resolve_passphrase`'s store-then-env-then-error precedence.
+
 ## Archive exporter (closes #58)
 **2026-08-12**
 
