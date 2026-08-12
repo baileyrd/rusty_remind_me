@@ -8,6 +8,35 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Wiki exporter (closes #57)
+**2026-08-12**
+
+- **Added:** `WikiExporter`, porting `src/dbs/export/wiki.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — a zipped,
+  synthesis-layer wiki (as opposed to `obsidian`'s one-note-per-item
+  mirror): `pages/<slug>.md` per item or per source/axis hub, a
+  generated `index.md` grouping pages by topic with `[[wikilinks]]`,
+  and the same `manifest.json` shape as `obsidian`'s, plus
+  `wiki_grouping`. `ExportQuery::wiki_grouping` (`"topic"`, the
+  default, or `"item"`) selects the export-wide shape; a per-source
+  `ExportProfile` (`page_per`/`group_by`/`body_from`) can override it,
+  naming a connector's own grouping axes (e.g. Reddit's `subreddit`)
+  instead of collapsing onto the generic `Tag:` namespace.
+  Registered as `"wiki"` in `get_exporter`/`available_formats`.
+- **Added `ExportSource::profiles()`**, a new default-empty trait
+  method (`HashMap<String, ExportProfile>` keyed by source name) — the
+  seam the wiki exporter reads per-source rendering rules through;
+  wiring a real source's resolved profiles is the separate CLI-facing
+  issue #70, same deferral as `ExportSource` itself.
+- Unknown `wiki_grouping` values error via `DbsError::Config` rather
+  than panicking, matching the reference's `ValueError`.
+- 7 new tests: empty result set (index + manifest only), topic
+  grouping creating a source hub and a tag hub cross-linked to each
+  other, item grouping creating one page per item with no hub pages,
+  multi-topic grouping creating a distinct hub per tag, a filtered
+  subset, an unknown-grouping config error, and a metadata sanity
+  check.
+
 ## Obsidian vault exporter (closes #56)
 **2026-08-12**
 

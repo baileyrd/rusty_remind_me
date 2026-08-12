@@ -27,6 +27,7 @@ mod json;
 mod markdown;
 mod ndjson;
 mod obsidian;
+mod wiki;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -34,6 +35,7 @@ use std::io::Write;
 use serde_json::Value;
 
 use crate::errors::DbsError;
+use crate::export_profile::ExportProfile;
 use crate::storage::{ExportQuery, ItemRow};
 
 pub use csv::CsvExporter;
@@ -41,6 +43,7 @@ pub use json::JsonExporter;
 pub use markdown::MarkdownExporter;
 pub use ndjson::NdjsonExporter;
 pub use obsidian::ObsidianExporter;
+pub use wiki::WikiExporter;
 
 /// Summary of a completed export.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -64,6 +67,13 @@ pub trait ExportSource {
     fn revisions(&self) -> Box<dyn Iterator<Item = ItemRow> + '_>;
     fn media_blobs(&self) -> Box<dyn Iterator<Item = ItemRow> + '_>;
     fn manifest(&self) -> ItemRow;
+    /// Per-source export rendering rules, keyed by source name — read
+    /// only by the wiki exporter. Defaults to empty (every source gets
+    /// [`ExportProfile::default`]) since wiring a real source's
+    /// resolved profiles through is a separate CLI-facing issue, #70.
+    fn profiles(&self) -> HashMap<String, ExportProfile> {
+        HashMap::new()
+    }
 }
 
 /// Base contract every exporter implements.
@@ -96,6 +106,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
         "csv" => Ok(Box::new(CsvExporter)),
         "markdown" => Ok(Box::new(MarkdownExporter)),
         "obsidian" => Ok(Box::new(ObsidianExporter)),
+        "wiki" => Ok(Box::new(WikiExporter)),
         other => Err(DbsError::Config(format!(
             "unknown export format {other:?}. Available: {:?}",
             available_formats()
@@ -106,7 +117,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
 /// Every currently-registered format key, sorted — grows as each
 /// exporter issue above lands.
 pub fn available_formats() -> Vec<&'static str> {
-    vec!["json", "ndjson", "csv", "markdown", "obsidian"]
+    vec!["json", "ndjson", "csv", "markdown", "obsidian", "wiki"]
 }
 
 #[cfg(test)]
@@ -152,10 +163,16 @@ mod tests {
     }
 
     #[test]
+    fn get_exporter_finds_wiki() {
+        let exporter = get_exporter("wiki").unwrap();
+        assert_eq!(exporter.format(), "wiki");
+    }
+
+    #[test]
     fn available_formats_lists_every_registered_format() {
         assert_eq!(
             available_formats(),
-            vec!["json", "ndjson", "csv", "markdown", "obsidian"]
+            vec!["json", "ndjson", "csv", "markdown", "obsidian", "wiki"]
         );
     }
 }
