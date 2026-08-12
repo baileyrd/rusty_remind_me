@@ -10,9 +10,9 @@
 //! `rusqlite` gets added as a dependency; this module needs none):
 //!
 //! * `iter_items`/`browse_items`/`iter_revisions` take an [`ExportQuery`]
-//!   defined *here* as a minimal placeholder, not the reference's real
-//!   `export/base.py::ExportQuery`, which is its own gap-analysis row.
-//!   Superseded when that issue lands.
+//!   defined *here*, matching the reference's real `export/base.py::
+//!   ExportQuery` field-for-field as of issue #50 (an earlier, narrower
+//!   placeholder shape stood in for it before that issue landed).
 //! * The reference's `transaction()` context-manager method isn't ported.
 //!   Rust has no direct equivalent for a trait-object-safe RAII guard
 //!   scoped to an unknown concrete connection type without more design
@@ -108,15 +108,58 @@ pub struct SourceRecord {
     pub created_at: String,
 }
 
-/// Minimal placeholder standing in for the reference's
-/// `export/base.py::ExportQuery` — see the module doc-comment.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Filters applied to an export. Mirrors `export/base.py::ExportQuery`
+/// in baileyrd/Daily-Backup-System (pinned `@6cc6491`) — supersedes the
+/// narrower placeholder this type used to be (issue #50).
+///
+/// `since`/`until` match `item_created_at`; `since_updated`/
+/// `until_updated` independently match `item_updated_at` (the
+/// connector-reported upstream edit time, e.g. Raindrop's
+/// `lastUpdate` — not this crate's own bookkeeping timestamps). Every
+/// field here is AND-ed together — this query has no OR semantics. A
+/// caller that wants "created OR updated since X" issues two queries,
+/// one per pair, and unions the results itself.
+///
+/// `wiki_grouping` is the one field here that isn't a filter: it's page
+/// layout for the wiki exporter (`"topic"` or `"item"`) and every other
+/// exporter ignores it, same as `include_revisions` is only read by the
+/// archive exporter. It rides on the query so callers keep sharing one
+/// request object rather than growing a per-format side channel.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExportQuery {
-    pub source_id: Option<i64>,
-    pub item_kind: Option<String>,
+    /// Restrict to these source names; `None`/empty means every source.
+    pub sources: Option<Vec<String>>,
+    /// Restrict to these item kinds; `None`/empty means every kind.
+    pub item_types: Option<Vec<String>>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
+    pub since_updated: Option<DateTime<Utc>>,
+    pub until_updated: Option<DateTime<Utc>>,
     pub include_deleted: bool,
+    /// Read only by the archive exporter.
+    pub include_revisions: bool,
+    /// Whether `iter_items`/`iter_revisions` include each row's raw
+    /// payload — an export run with `--no-raw` sets this `false`.
+    pub include_raw: bool,
+    /// Read only by the wiki exporter: `"topic"` or `"item"`.
+    pub wiki_grouping: String,
+}
+
+impl Default for ExportQuery {
+    fn default() -> Self {
+        Self {
+            sources: None,
+            item_types: None,
+            since: None,
+            until: None,
+            since_updated: None,
+            until_updated: None,
+            include_deleted: false,
+            include_revisions: false,
+            include_raw: true,
+            wiki_grouping: "topic".to_string(),
+        }
+    }
 }
 
 /// Persistence contract for the engine/service.
