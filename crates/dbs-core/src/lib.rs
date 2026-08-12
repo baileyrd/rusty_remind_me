@@ -19,6 +19,7 @@ pub mod http;
 pub mod models;
 pub mod netns;
 pub mod registry;
+pub mod restore;
 pub mod secrets;
 pub mod service;
 pub mod storage;
@@ -56,6 +57,10 @@ pub use netns::{in_named_netns, named_netns_exists};
 pub use registry::{
     ConnectorCandidate, ConnectorRegistry, Handshake, LoadFailure, LoadReport, RegisteredConnector,
     DEFAULT_HANDSHAKE_TIMEOUT,
+};
+pub use restore::{
+    iter_export_rows, prepared_item_from_row, read_manifest, skipped_extras, verify_archive,
+    ArchiveIntegrity,
 };
 pub use secrets::Secrets;
 pub use service::reap_once;
