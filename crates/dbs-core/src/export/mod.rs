@@ -22,6 +22,7 @@
 //! actually invokes `Exporter::write` against a real file), not this
 //! trait's.
 
+mod csv;
 mod json;
 mod ndjson;
 
@@ -33,6 +34,7 @@ use serde_json::Value;
 use crate::errors::DbsError;
 use crate::storage::{ExportQuery, ItemRow};
 
+pub use csv::CsvExporter;
 pub use json::JsonExporter;
 pub use ndjson::NdjsonExporter;
 
@@ -87,6 +89,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
     match format {
         "json" => Ok(Box::new(JsonExporter)),
         "ndjson" => Ok(Box::new(NdjsonExporter)),
+        "csv" => Ok(Box::new(CsvExporter)),
         other => Err(DbsError::Config(format!(
             "unknown export format {other:?}. Available: {:?}",
             available_formats()
@@ -97,7 +100,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
 /// Every currently-registered format key, sorted — grows as each
 /// exporter issue above lands.
 pub fn available_formats() -> Vec<&'static str> {
-    vec!["json", "ndjson"]
+    vec!["json", "ndjson", "csv"]
 }
 
 #[cfg(test)]
@@ -125,7 +128,13 @@ mod tests {
     }
 
     #[test]
+    fn get_exporter_finds_csv() {
+        let exporter = get_exporter("csv").unwrap();
+        assert_eq!(exporter.format(), "csv");
+    }
+
+    #[test]
     fn available_formats_lists_every_registered_format() {
-        assert_eq!(available_formats(), vec!["json", "ndjson"]);
+        assert_eq!(available_formats(), vec!["json", "ndjson", "csv"]);
     }
 }
