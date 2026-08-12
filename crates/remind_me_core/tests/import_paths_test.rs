@@ -119,6 +119,7 @@ fn an_empty_roots_list_contains_nothing() {
 // `resolve_lexically`
 // ---------------------------------------------------------------------------
 
+#[cfg(not(windows))]
 #[test]
 fn parent_dir_components_are_folded_without_touching_the_filesystem() {
     // `/a` does not exist on this machine, so this also proves the folding
@@ -127,6 +128,21 @@ fn parent_dir_components_are_folded_without_touching_the_filesystem() {
     assert_eq!(
         resolve_lexically(Path::new("/a/b/../c/./d")),
         PathBuf::from("/a/c/d")
+    );
+}
+
+// Windows counterpart of the test above: same lexical-folding behavior, but
+// `resolve_lexically` returns a `\\?\`-prefixed, backslash-separated path on
+// this platform (see its own doc comment), so the expected value has to
+// match that shape rather than the Unix one. An explicit drive letter keeps
+// this deterministic regardless of which drive the CI runner's checkout
+// happens to be on.
+#[cfg(windows)]
+#[test]
+fn parent_dir_components_are_folded_without_touching_the_filesystem() {
+    assert_eq!(
+        resolve_lexically(Path::new(r"C:\a\b\..\c\.\d")),
+        PathBuf::from(r"\\?\C:\a\c\d")
     );
 }
 
@@ -144,6 +160,7 @@ fn a_relative_path_is_anchored_to_the_current_directory() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn a_nonexistent_path_still_resolves_rather_than_failing() {
     // Unlike `Path::canonicalize`, which errors on a path that does not
@@ -152,6 +169,21 @@ fn a_nonexistent_path_still_resolves_rather_than_failing() {
     assert_eq!(
         resolved,
         PathBuf::from("/definitely/not/on/this/machine-284.md")
+    );
+}
+
+// Windows counterpart: same "resolves without touching the filesystem"
+// guarantee, but the expected shape is `\\?\`-prefixed and backslash
+// separated on this platform, matching `resolve_lexically`'s documented
+// Windows behavior. An explicit drive letter keeps this deterministic
+// regardless of which drive the CI runner's checkout happens to be on.
+#[cfg(windows)]
+#[test]
+fn a_nonexistent_path_still_resolves_rather_than_failing() {
+    let resolved = resolve_lexically(Path::new(r"C:\definitely\not\on\this\machine-284.md"));
+    assert_eq!(
+        resolved,
+        PathBuf::from(r"\\?\C:\definitely\not\on\this\machine-284.md")
     );
 }
 
