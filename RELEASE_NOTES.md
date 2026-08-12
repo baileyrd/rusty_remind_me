@@ -8,6 +8,20 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Timeutil helpers (closes #8)
+**2026-08-12**
+
+- **Added:** `dbs-core::timeutil` — `iso_z`/`parse_iso`, mirroring
+  `src/dbs/core/timeutil.py` in baileyrd/Daily-Backup-System (pinned
+  `@6cc6491`). Smaller than the reference: `chrono::DateTime<Utc>` is
+  always UTC and always timezone-aware in the type system, so there's no
+  naive-vs-aware branch needed on the formatting side — only on parsing
+  untrusted input text, where a naive (no-offset) string is still treated
+  as UTC, same as the reference.
+- 8 new unit tests (zero/nonzero fractional seconds, `None`/empty/
+  whitespace input, `Z` suffix, explicit offset conversion, naive-as-UTC,
+  garbage rejection, round-trip), 43/43 total passing.
+
 ## Content hashing for change classification (closes #7)
 **2026-08-12**
 
