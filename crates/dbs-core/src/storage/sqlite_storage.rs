@@ -123,6 +123,27 @@ fn like_pattern(text: &str) -> String {
     format!("%{escaped}%")
 }
 
+/// A safe FTS5 `MATCH` expression built from free user text.
+///
+/// Each whitespace token becomes a quoted phrase (so MATCH operators
+/// like `AND`/`NOT`/`*`/`:` in user input can't change the query's
+/// meaning), implicitly ANDed; the final token gets a `*` prefix-match
+/// so typing "hell" still finds "Hello". Embedded quotes are doubled per
+/// FTS5 escaping rules. Matches the reference's `_fts_match_query`.
+fn fts_match_query(text: &str) -> String {
+    let tokens: Vec<String> = text
+        .split_whitespace()
+        .map(|t| t.replace('"', "\"\""))
+        .collect();
+    if tokens.is_empty() {
+        return "\"\"".to_string();
+    }
+    let mut quoted: Vec<String> = tokens.iter().map(|t| format!("\"{t}\"")).collect();
+    let last = quoted.len() - 1;
+    quoted[last].push('*');
+    quoted.join(" ")
+}
+
 /// The subset of an existing `items` row `upsert_items` needs to decide
 /// how to classify an incoming [`PreparedItem`] against it.
 #[derive(Debug, Clone)]
@@ -146,6 +167,9 @@ fn storage_err(context: &str, e: rusqlite::Error) -> DbsError {
 pub struct SqliteStorage {
     path: String,
     conn: Connection,
+    /// Set by [`Self::ensure_fts`] — `false` degrades `browse_items`'s
+    /// text search to the `LIKE`-only path (see #47).
+    fts_enabled: bool,
 }
 
 impl SqliteStorage {
@@ -153,20 +177,93 @@ impl SqliteStorage {
     /// private in-memory database for `":memory:"`/`""`/`file::memory:`.
     pub fn open(path: &str) -> Result<Self, DbsError> {
         let conn = open_connection(path)?;
-        Ok(Self {
+        let mut storage = Self {
             path: path.to_string(),
             conn,
-        })
+            fts_enabled: false,
+        };
+        storage.fts_enabled = storage.ensure_fts()?;
+        Ok(storage)
     }
 
     fn now(&self) -> String {
         iso_z(Utc::now())
+    }
+
+    /// Creates/refreshes the FTS5 index over `items(title, body)`.
+    ///
+    /// Deliberately **not** a numbered migration (see
+    /// `storage::migrations`): a build of SQLite without the FTS5 module
+    /// would fail a migration permanently, whereas this ensure-step just
+    /// returns `false` and `browse_items` falls back to `LIKE` — matches
+    /// the reference's `_ensure_fts`. External-content table + triggers
+    /// keep the index in sync with every write path; the backfill runs
+    /// once (index empty, `items` not).
+    fn ensure_fts(&mut self) -> Result<bool, DbsError> {
+        let existed: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='items_fts'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| storage_err("failed to check for an existing FTS5 index", e))?
+            .unwrap_or(false);
+
+        if self
+            .conn
+            .execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(\
+                     title, body, content='items', content_rowid='id')",
+                [],
+            )
+            .is_err()
+        {
+            // SQLite built without the FTS5 module — degrade safely.
+            return Ok(false);
+        }
+
+        self.conn
+            .execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS items_fts_ai AFTER INSERT ON items BEGIN \
+                     INSERT INTO items_fts(rowid, title, body) VALUES (new.id, new.title, new.body); \
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS items_fts_ad AFTER DELETE ON items BEGIN \
+                     INSERT INTO items_fts(items_fts, rowid, title, body) \
+                     VALUES ('delete', old.id, old.title, old.body); \
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE OF title, body ON items BEGIN \
+                     INSERT INTO items_fts(items_fts, rowid, title, body) \
+                     VALUES ('delete', old.id, old.title, old.body); \
+                     INSERT INTO items_fts(rowid, title, body) VALUES (new.id, new.title, new.body); \
+                 END;",
+            )
+            .map_err(|e| storage_err("failed to create FTS5 sync triggers", e))?;
+
+        if !existed {
+            // First enable on a pre-FTS database: build the index from
+            // the existing rows. ('rebuild' is FTS5's own backfill for
+            // external-content tables — a bare COUNT can't detect
+            // emptiness here, since reads pass through to the content
+            // table.)
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(|e| storage_err("failed to begin FTS5 backfill transaction", e))?;
+            tx.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])
+                .map_err(|e| storage_err("failed to backfill the FTS5 index", e))?;
+            tx.commit()
+                .map_err(|e| storage_err("failed to commit the FTS5 backfill", e))?;
+        }
+        Ok(true)
     }
 }
 
 impl Storage for SqliteStorage {
     fn migrate(&mut self) -> Result<(), DbsError> {
         crate::storage::migrations::migrate(&mut self.conn)?;
+        self.fts_enabled = self.ensure_fts()?;
         Ok(())
     }
 
@@ -763,55 +860,51 @@ impl Storage for SqliteStorage {
         limit: u32,
         offset: u32,
     ) -> Result<(Vec<ItemRow>, u64), DbsError> {
+        // Text search: FTS5 when available (all-words, case-insensitive,
+        // final-token prefix so search-as-you-type works), falling back
+        // to the original LIKE substring scan — both when SQLite lacks
+        // the FTS5 module and when a pathological query string trips
+        // MATCH's parser. Mirrors the reference's `attempts` list.
         let (base_where, base_params) = build_filter(query);
-        let (where_clause, params): (String, Vec<SqlValue>) = if let Some(t) = text {
+        let mut attempts: Vec<(String, Vec<SqlValue>)> = Vec::new();
+        if let Some(t) = text {
+            if self.fts_enabled {
+                let mut p = base_params.clone();
+                p.push(SqlValue::Text(fts_match_query(t)));
+                attempts.push((
+                    format!(
+                        "{base_where} AND i.id IN \
+                         (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)"
+                    ),
+                    p,
+                ));
+            }
+        }
+        if let Some(t) = text {
             let like = like_pattern(t);
-            let mut p = base_params;
+            let mut p = base_params.clone();
             p.push(SqlValue::Text(like.clone()));
             p.push(SqlValue::Text(like));
-            (
+            attempts.push((
                 format!(
                     "{base_where} AND (i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')"
                 ),
                 p,
-            )
+            ));
         } else {
-            (base_where, base_params)
-        };
+            attempts.push((base_where, base_params));
+        }
 
-        let total: i64 = self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM items i JOIN sources s ON s.id = i.source_id WHERE {where_clause}"
-                ),
-                rusqlite::params_from_iter(params.clone()),
-                |row| row.get(0),
-            )
-            .map_err(|e| storage_err("failed to count browse_items", e))?;
-
-        let sql = format!(
-            "SELECT i.*, s.name AS source_name, s.type AS source_type, \
-             (SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, \
-             (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' \
-              ORDER BY m.id LIMIT 1) AS thumb_url \
-             FROM items i JOIN sources s ON s.id = i.source_id \
-             WHERE {where_clause} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
-        );
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .map_err(|e| storage_err("failed to prepare browse_items", e))?;
-        let mut all_params = params;
-        all_params.push(SqlValue::Integer(limit.max(1) as i64));
-        all_params.push(SqlValue::Integer(offset as i64));
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(all_params), row_to_browse_item)
-            .map_err(|e| storage_err("failed to run browse_items", e))?;
-        let items: Vec<ItemRow> = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| storage_err("failed to read browse_items row", e))?;
-        Ok((items, total.max(0) as u64))
+        let mut last_err = None;
+        for (where_clause, params) in attempts {
+            match self.try_browse_items(&where_clause, params, limit, offset) {
+                Ok(result) => return Ok(result),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            DbsError::Storage("browse_items produced no query attempts".to_string())
+        }))
     }
 
     fn get_item(&self, item_id: i64) -> Result<Option<ItemRow>, DbsError> {
@@ -1101,6 +1194,52 @@ impl SqliteStorage {
         std::fs::metadata(&self.path)
             .map(|m| m.len() as i64)
             .unwrap_or(0)
+    }
+
+    /// Runs one `browse_items` "attempt" (a fully-built `where_clause` +
+    /// `params`, from either the FTS5 or `LIKE` search path, or no text
+    /// search at all) — count then page. A single unit so
+    /// `browse_items` can try the next attempt on any error.
+    fn try_browse_items(
+        &self,
+        where_clause: &str,
+        params: Vec<SqlValue>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<ItemRow>, u64), DbsError> {
+        let total: i64 = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM items i JOIN sources s ON s.id = i.source_id WHERE {where_clause}"
+                ),
+                rusqlite::params_from_iter(params.clone()),
+                |row| row.get(0),
+            )
+            .map_err(|e| storage_err("failed to count browse_items", e))?;
+
+        let sql = format!(
+            "SELECT i.*, s.name AS source_name, s.type AS source_type, \
+             (SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, \
+             (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' \
+              ORDER BY m.id LIMIT 1) AS thumb_url \
+             FROM items i JOIN sources s ON s.id = i.source_id \
+             WHERE {where_clause} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| storage_err("failed to prepare browse_items", e))?;
+        let mut all_params = params;
+        all_params.push(SqlValue::Integer(limit.max(1) as i64));
+        all_params.push(SqlValue::Integer(offset as i64));
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(all_params), row_to_browse_item)
+            .map_err(|e| storage_err("failed to run browse_items", e))?;
+        let items: Vec<ItemRow> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| storage_err("failed to read browse_items row", e))?;
+        Ok((items, total.max(0) as u64))
     }
 }
 
@@ -2397,6 +2536,99 @@ mod tests {
             .browse_items(&ExportQuery::default(), Some("nonexistent"), 10, 0)
             .unwrap();
         assert_eq!(none_total, 0);
+    }
+
+    #[test]
+    fn fts5_is_enabled_on_a_fresh_in_memory_database() {
+        let storage = open();
+        assert!(storage.fts_enabled);
+    }
+
+    #[test]
+    fn fts_match_query_quotes_tokens_and_prefix_matches_the_last_one() {
+        assert_eq!(fts_match_query("hello world"), "\"hello\" \"world\"*");
+        assert_eq!(fts_match_query("hell"), "\"hell\"*");
+        assert_eq!(fts_match_query(""), "\"\"");
+        assert_eq!(fts_match_query("say \"hi\""), "\"say\" \"\"\"hi\"\"\"*");
+    }
+
+    #[test]
+    fn browse_items_fts_search_is_case_insensitive_and_prefix_matches() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        item.title = Some("Hello World".to_string());
+        item.body = None;
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+
+        let (_, total) = storage
+            .browse_items(&ExportQuery::default(), Some("hel"), 10, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        let (_, total_ci) = storage
+            .browse_items(&ExportQuery::default(), Some("WORLD"), 10, 0)
+            .unwrap();
+        assert_eq!(total_ci, 1);
+    }
+
+    #[test]
+    fn browse_items_fts_search_requires_every_token() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        item.title = Some("Hello World".to_string());
+        item.body = None;
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+
+        let (_, total) = storage
+            .browse_items(&ExportQuery::default(), Some("hello goodbye"), 10, 0)
+            .unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn browse_items_fts_index_stays_in_sync_after_a_title_update() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        item.title = Some("Alpha".to_string());
+        item.body = None;
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+        let (_, before) = storage
+            .browse_items(&ExportQuery::default(), Some("alpha"), 10, 0)
+            .unwrap();
+        assert_eq!(before, 1);
+
+        let mut updated = prepared("e1", "h2");
+        updated.title = Some("Beta".to_string());
+        updated.body = None;
+        storage
+            .upsert_items(source.id, run_id, &[updated], false, 0)
+            .unwrap();
+
+        let (_, old_term) = storage
+            .browse_items(&ExportQuery::default(), Some("alpha"), 10, 0)
+            .unwrap();
+        assert_eq!(old_term, 0);
+        let (_, new_term) = storage
+            .browse_items(&ExportQuery::default(), Some("beta"), 10, 0)
+            .unwrap();
+        assert_eq!(new_term, 1);
     }
 
     #[test]
