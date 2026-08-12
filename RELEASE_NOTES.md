@@ -8,6 +8,24 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Markdown exporter (closes #55)
+**2026-08-12**
+
+- **Added:** `MarkdownExporter`, porting `src/dbs/export/markdown.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — a human-readable
+  document grouped by source, with a `##` heading per source, a `###`
+  heading per item (title, falling back to `url` then `external_id`),
+  a metadata line (`kind`/`created`/`**deleted**`), a bare `<url>`
+  autolink, backtick-wrapped tags, and the body. Lossy by design.
+  Registered as `"markdown"` in `get_exporter`/`available_formats`.
+- Ports the reference's Python-truthiness field checks (`null`/`false`/
+  `0`/empty string/collection all falsy) and title-flattening/escaping
+  (collapses whitespace, escapes `[`/`]`) faithfully.
+- 8 new tests: empty result set, a fully-populated item, multi-source
+  grouping (one heading per source, not per item), a deleted-item flag,
+  title fallback chain, title flattening/escaping, missing-source
+  fallback to `(unknown)`, and a metadata sanity check.
+
 ## CSV exporter (closes #54)
 **2026-08-12**
 
