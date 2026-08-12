@@ -6,10 +6,12 @@
 //! full capability inventory and round-1 scope decisions.
 
 pub mod capabilities;
+pub mod connector;
 pub mod errors;
 pub mod models;
 
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
+pub use connector::{Connector, RunContext, CORE_API_VERSION};
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use models::{
     BackupItem, Checkpoint, ConnectorInfo, Cursor, DoctorCheck, FetchEvent, MaintenanceReport,

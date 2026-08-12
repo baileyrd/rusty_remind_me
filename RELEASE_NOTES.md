@@ -8,6 +8,25 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Connector plugin contract + partial RunContext (closes #4)
+**2026-08-12**
+
+- **Added:** `dbs-core::connector` — the `Connector` trait and a first-pass
+  `RunContext`, mirroring `src/dbs/core/connector.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`). `fetch` returns
+  `Box<dyn Iterator<Item = Result<FetchEvent, ConnectorError>>>` rather than
+  an associated type, keeping `Connector` object-safe (`Box<dyn
+  Connector>`) — a deliberate head start on issue #5's dynamic-plugin-
+  loading design, which needs trait objects across a `cdylib` boundary.
+- **Known limitation, scoped deliberately:** `RunContext` omits
+  `secrets`/`http`/`cancel`/`logger` — those depend on #6, #22, #10, none
+  of which exist yet. It carries only `source_id`/`source_name`/`cursor`/
+  `since`/`run_id`/`mode`/`limit`/media options/`items_failed` for now;
+  grows to match the reference once those land.
+- 5 new unit tests (default-method values, a `FakeConnector` exercising
+  `fetch`, object-safety, `report_failed` accumulation, `ReconcileMarker`
+  round-trip through `FetchEvent`) — 21/21 total passing.
+
 ## Core error hierarchy (closes #3)
 **2026-08-12**
 
