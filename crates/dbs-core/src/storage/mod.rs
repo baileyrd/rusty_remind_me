@@ -23,6 +23,13 @@
 //! * Fallible operations return `Result<_, DbsError>` (via the new
 //!   `DbsError::Storage` variant) — Python lets backend exceptions
 //!   propagate unchecked, but Rust doesn't have unchecked exceptions.
+//!
+//! `sqlite`/`migrations` (issue #12) provide a concrete SQLite connection
+//! and schema, but not yet a full `Storage` implementation over them —
+//! that's the engine issues (#16/#17/#19/#20) building on top.
+
+pub mod migrations;
+pub mod sqlite;
 
 use std::collections::HashMap;
 use std::path::Path;

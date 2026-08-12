@@ -27,6 +27,7 @@ pub use models::{
     SourceStatus, VerifyIssue, VerifyReport,
 };
 pub use secrets::Secrets;
+pub use storage::sqlite::open_connection;
 pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
 pub use timeutil::{iso_z, parse_iso};
 pub use versioning::{is_api_compatible, CURRENT_API_VERSION};
