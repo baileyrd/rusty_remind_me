@@ -8,6 +8,38 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## SQLite storage — schema + migrations (closes #12)
+**2026-08-12**
+
+- **Added:** `dbs-core::storage::migrations` — the 6 ordered migrations
+  (`schema_migrations`, `sources`, `sync_runs`, `items`, `item_revisions`,
+  `media`, `sync_state`, `source_locks` tables and their indexes) and a
+  `migrate()` runner, ported verbatim from `src/dbs/storage/migrations.py`
+  in baileyrd/Daily-Backup-System (pinned `@6cc6491`). Each migration
+  commits atomically with its `schema_migrations` bookkeeping row via
+  `BEGIN IMMEDIATE`, re-checking applied versions after acquiring the
+  write lock — same race-safety the reference calls out for concurrent
+  callers opening the same not-yet-migrated database.
+- **Added:** `dbs-core::storage::sqlite::open_connection` — connection
+  setup matching `SqliteStorage._configure`'s pragmas exactly
+  (`journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`,
+  `busy_timeout=30000`), plus parent-directory creation and minimal `~`
+  expansion for file paths.
+- **New dependency:** `rusqlite` (`bundled` feature — compiles SQLite
+  from source rather than depending on a system library, so CI and a
+  future Windows build don't need to locate one).
+- **Scoped narrower than the reference:** this is schema + connection
+  setup only, not a full `Storage` implementation — the upsert/query
+  methods land with the engine issues (#16/#17/#19/#20) building on top.
+  In-memory path handling is also simplified: URI query params like
+  `?cache=shared` aren't honored, unlike the reference's plain
+  `sqlite3.connect(path)`.
+- 11 new unit tests (all migrations apply to a fresh DB, idempotent
+  re-run, every expected table exists, migration-0002 columns are
+  actually usable via real inserts, schema version, statement splitting,
+  pragmas set correctly, memory-path variants, parent-directory creation,
+  `~` expansion), 70/70 total passing.
+
 ## Storage trait (closes #11)
 **2026-08-12**
 
