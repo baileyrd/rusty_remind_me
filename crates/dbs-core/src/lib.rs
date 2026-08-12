@@ -5,6 +5,7 @@
 //! working toward parity with, and this repo's `gap-analysis.md` for the
 //! full capability inventory and round-1 scope decisions.
 
+pub mod cancel;
 pub mod capabilities;
 pub mod connector;
 pub mod errors;
@@ -14,6 +15,7 @@ pub mod secrets;
 pub mod timeutil;
 pub mod versioning;
 
+pub use cancel::CancelToken;
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};

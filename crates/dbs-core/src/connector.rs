@@ -13,27 +13,26 @@
 //! shape here is a first pass; #5's ADR may require revisiting it once
 //! the ABI story is settled.
 //!
-//! [`RunContext`] is **partial** in this issue: it carries only the
-//! pieces that already exist ([`Cursor`], timestamps, run bookkeeping). It
-//! deliberately omits secrets, the managed HTTP client, and the
-//! cancellation token — those land with #6, #22, and #10 respectively, at
-//! which point this struct grows to match the reference's full
-//! `RunContext`.
+//! [`RunContext`] grows toward the reference's full shape as its
+//! dependent pieces land: `secrets` (#6) and `cancel` (#10) are now
+//! present; the managed HTTP client (#22) and a logger equivalent are
+//! still missing.
 
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
+use crate::cancel::CancelToken;
 use crate::capabilities::{AuthCapture, Capabilities, ItemKind};
 use crate::errors::ConnectorError;
 use crate::models::{Cursor, FetchEvent};
+use crate::secrets::Secrets;
 pub use crate::versioning::CORE_API_VERSION;
 
 /// Everything a connector needs for one run, injected by the engine.
 ///
-/// Partial — see the module doc-comment. `source_id`/`source_name`/
-/// `cursor`/`since`/`run_id`/`mode` mirror the reference exactly;
-/// `secrets`/`http`/`cancel`/`logger` are not yet present.
+/// Still missing `http` (#22) and a logger equivalent relative to the
+/// reference's full `RunContext`.
 #[derive(Debug, Clone)]
 pub struct RunContext {
     pub source_id: i64,
@@ -41,6 +40,7 @@ pub struct RunContext {
     pub cursor: Option<Cursor>,
     /// Engine watermark = max(updated_at) committed so far.
     pub since: Option<DateTime<Utc>>,
+    pub secrets: Secrets,
     pub run_id: i64,
     /// `"incremental"` | `"reconcile"` | `"full"`.
     pub mode: String,
@@ -55,6 +55,10 @@ pub struct RunContext {
     /// but didn't fully succeed either — e.g. a media download to retry
     /// next run).
     pub items_failed: u32,
+    /// Cooperative cancellation signal (CLI Ctrl+C / a future web "Stop").
+    /// The engine (later issue) polls it between fetched items and halts
+    /// gracefully when set. `None` means the run cannot be cancelled.
+    pub cancel: Option<CancelToken>,
 }
 
 impl RunContext {
@@ -233,6 +237,7 @@ mod tests {
             source_name: "fake".to_string(),
             cursor: None,
             since: None,
+            secrets: Secrets::new(std::collections::HashMap::new(), Vec::new()),
             run_id: 1,
             mode: "incremental".to_string(),
             full_refresh: false,
@@ -241,6 +246,7 @@ mod tests {
             max_media_bytes: 0,
             download_dir: None,
             items_failed: 0,
+            cancel: None,
         }
     }
 
@@ -291,6 +297,16 @@ mod tests {
             emitted_checkpoint: false,
         });
         assert_eq!(connector.type_name(), "fake");
+    }
+
+    #[test]
+    fn run_context_cancel_field_reflects_the_shared_token() {
+        let token = CancelToken::new();
+        let mut ctx = fake_ctx();
+        ctx.cancel = Some(token.clone());
+        assert!(!ctx.cancel.as_ref().unwrap().cancelled());
+        token.cancel();
+        assert!(ctx.cancel.as_ref().unwrap().cancelled());
     }
 
     #[test]
