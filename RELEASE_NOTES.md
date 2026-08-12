@@ -8,6 +8,34 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Engine — soft-delete sweep safety decision (closes #20, subsumes #19)
+**2026-08-12**
+
+- **Added:** `dbs-core::engine::sweep_deletions`, mirroring the deletion-
+  sweep block in `Engine.run_source` (`core/engine.py`,
+  baileyrd/Daily-Backup-System, pinned `@6cc6491`): per reconcile scope
+  (`"source"` or `"tag:<value>"`), compares a full enumeration against
+  what storage still has live and refuses to sweep — recording a warning
+  instead — when the enumeration is empty while live items exist, or
+  when the fraction that would be deleted exceeds
+  `sweep_safety_fraction`. Both are the signature of a truncated
+  upstream listing, not genuine mass deletion; an unrecognized scope
+  shape is refused rather than silently widened into a source-wide
+  sweep.
+- **#19 (revision history writing) is subsumed here, not implemented
+  separately:** same discovery as #17's classification logic — revision
+  writing (`_insert_revision`) is backend-specific SQL in the
+  reference's `SqliteStorage`, with no independent engine-side content.
+  It's tracked as part of #36.
+- 8 new unit tests (unrecognized scope skipped with a warning, a safe
+  source-scope sweep deletes the missing items, a tag scope passes the
+  tag through to storage, an empty enumeration against existing live
+  items is refused, a fraction over the safety threshold is refused
+  with the percentage in the warning text, a fraction exactly at the
+  threshold is allowed — strict `>`, not `>=`, matching the reference —
+  zero existing live items is never unsafe, multiple scopes evaluated
+  independently), 119/119 total passing across the workspace.
+
 ## Service — crash-recovery reap-once guarantee (closes #21)
 **2026-08-12**
 

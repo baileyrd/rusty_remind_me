@@ -38,8 +38,24 @@
 //! classification") undersold this — the classification decision is
 //! storage's job; the engine's job is producing what gets compared.
 //!
-//! Invariants #3 (revision writing) through #5 (crash recovery reaper)
-//! are separate issues (#19/#20/#21) building on top of this.
+//! **Issue #20's scope: the deletion-sweep safety decision**
+//! ([`sweep_deletions`]) — per reconcile scope, compares the connector's
+//! full-enumeration result against what storage still has live, and
+//! refuses to sweep (recording a warning instead) when the deletion
+//! would be implausibly large — almost certainly a truncated upstream
+//! listing rather than genuine mass deletion. Callers gate this on
+//! `ctx.mode in ("full", "reconcile") and caps.supports_full_enumeration`
+//! before calling it (that precondition lives in the future full
+//! `run_source` loop, not here — same "extract the well-defined,
+//! testable piece" pattern as #16/#17).
+//!
+//! Invariant #3 (revision writing) turned out to have no independent
+//! engine-side content — same discovery as #17's classification logic,
+//! it's backend-specific SQL in the reference's `SqliteStorage.
+//! _insert_revision`. It's tracked as part of #36, not a separate engine
+//! issue. #19 is effectively subsumed rather than implemented here.
+
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
@@ -152,6 +168,81 @@ fn compute_hash(item: &BackupItem, volatile_fields: &[String], deleted: bool) ->
         "raw": raw_clean,
     });
     content_hash(&projection)
+}
+
+/// Outcome of one [`sweep_deletions`] call.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SweepOutcome {
+    pub deleted: u64,
+    pub revisions: u64,
+    /// One entry per scope that was skipped (unrecognized) or refused
+    /// (unsafe) — never silent, matching the reference's behavior of
+    /// always surfacing a sweep refusal as a run warning.
+    pub warnings: Vec<String>,
+}
+
+/// Decides, per reconcile scope, whether it's safe to soft-delete items
+/// missing from a full enumeration — and does so when it is.
+///
+/// A scope is refused (a warning is recorded, no delete happens) when
+/// the enumeration is empty while storage still has live items, or when
+/// the fraction of live items that would be deleted exceeds
+/// `sweep_safety_fraction` — both are the signature of a truncated
+/// upstream listing, not genuine mass deletion. `reconcile_scopes` maps
+/// scope name (`"source"` or `"tag:<value>"`) to the full set of live
+/// external ids the connector enumerated for that scope; an
+/// unrecognized scope shape is refused rather than silently widened
+/// into a source-wide sweep.
+pub fn sweep_deletions(
+    storage: &mut dyn Storage,
+    source_id: i64,
+    run_id: i64,
+    reconcile_scopes: &HashMap<String, HashSet<String>>,
+    sweep_safety_fraction: f64,
+) -> Result<SweepOutcome, DbsError> {
+    let mut outcome = SweepOutcome::default();
+    for (scope, live) in reconcile_scopes {
+        let tag: Option<&str> = if scope == "source" {
+            None
+        } else if let Some(t) = scope.strip_prefix("tag:") {
+            Some(t)
+        } else {
+            outcome.warnings.push(format!(
+                "deletion sweep skipped for unrecognized reconcile scope {scope:?}"
+            ));
+            continue;
+        };
+
+        let existing_live = storage.live_external_ids(source_id, tag)?;
+        let would_delete = existing_live.difference(live).count();
+        let n_live = existing_live.len();
+        let fraction = if n_live > 0 {
+            would_delete as f64 / n_live as f64
+        } else {
+            0.0
+        };
+        let unsafe_sweep = n_live > 0 && (live.is_empty() || fraction > sweep_safety_fraction);
+        if unsafe_sweep {
+            let where_ = if tag.is_some() {
+                format!(" within {scope:?}")
+            } else {
+                String::new()
+            };
+            outcome.warnings.push(format!(
+                "deletion sweep skipped for safety{where_}: enumeration would delete \
+                 {would_delete}/{n_live} live items ({:.0}% > {:.0}%); the upstream \
+                 listing looks incomplete",
+                fraction * 100.0,
+                sweep_safety_fraction * 100.0
+            ));
+            continue;
+        }
+
+        let swept = storage.soft_delete_missing(source_id, live, run_id, tag)?;
+        outcome.deleted += swept;
+        outcome.revisions += swept;
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -567,6 +658,286 @@ mod tests {
                 Some("2026-01-01T00:00:00Z")
             );
             assert_eq!(prepared.item_updated_at, None);
+        }
+    }
+
+    mod sweep_tests {
+        use super::super::*;
+        use crate::models::Cursor;
+        use crate::storage::{ExportQuery, ItemRow, SourceRecord};
+        use chrono::{DateTime, Utc};
+
+        /// Tracks `live_external_ids`/`soft_delete_missing` calls against
+        /// a fixed "existing live" set per (source, tag) pair, so tests
+        /// can control exactly what a sweep decision sees.
+        #[derive(Default)]
+        struct SweepStorage {
+            /// Keyed by tag ("" for the source-wide scope).
+            existing_live: HashMap<String, HashSet<String>>,
+            delete_calls: Vec<(Option<String>, usize)>,
+        }
+
+        impl SweepStorage {
+            fn with_live(tag: &str, ids: &[&str]) -> Self {
+                let mut s = Self::default();
+                s.existing_live
+                    .insert(tag.to_string(), ids.iter().map(|s| s.to_string()).collect());
+                s
+            }
+        }
+
+        impl Storage for SweepStorage {
+            fn migrate(&mut self) -> Result<(), DbsError> {
+                unimplemented!()
+            }
+            fn close(&mut self) {}
+            fn upsert_source(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: u32,
+            ) -> Result<SourceRecord, DbsError> {
+                unimplemented!()
+            }
+            fn get_source(&self, _: &str) -> Result<Option<SourceRecord>, DbsError> {
+                unimplemented!()
+            }
+            fn list_sources(&self) -> Result<Vec<SourceRecord>, DbsError> {
+                unimplemented!()
+            }
+            fn delete_source(&mut self, _: &str) -> Result<bool, DbsError> {
+                unimplemented!()
+            }
+            fn begin_run(
+                &mut self,
+                _: i64,
+                _: &str,
+                _: &str,
+                _: Option<&str>,
+            ) -> Result<i64, DbsError> {
+                unimplemented!()
+            }
+            fn finish_run(
+                &mut self,
+                _: i64,
+                _: &str,
+                _: &BatchResult,
+                _: u64,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: &[String],
+            ) -> Result<(), DbsError> {
+                unimplemented!()
+            }
+            fn reap_interrupted_runs(&mut self) -> Result<Vec<i64>, DbsError> {
+                unimplemented!()
+            }
+            fn recent_runs(&self, _: Option<i64>, _: u32) -> Result<Vec<ItemRow>, DbsError> {
+                unimplemented!()
+            }
+            fn upsert_items(
+                &mut self,
+                _: i64,
+                _: i64,
+                _: &[PreparedItem],
+                _: bool,
+                _: u64,
+            ) -> Result<BatchResult, DbsError> {
+                unimplemented!()
+            }
+            fn soft_delete_missing(
+                &mut self,
+                _source_id: i64,
+                live_ids: &HashSet<String>,
+                _run_id: i64,
+                tag: Option<&str>,
+            ) -> Result<u64, DbsError> {
+                let key = tag.unwrap_or("").to_string();
+                let existing = self.existing_live.get(&key).cloned().unwrap_or_default();
+                let swept = existing.difference(live_ids).count();
+                self.delete_calls.push((tag.map(str::to_string), swept));
+                Ok(swept as u64)
+            }
+            fn live_external_ids(
+                &self,
+                _source_id: i64,
+                tag: Option<&str>,
+            ) -> Result<HashSet<String>, DbsError> {
+                let key = tag.unwrap_or("").to_string();
+                Ok(self.existing_live.get(&key).cloned().unwrap_or_default())
+            }
+            fn save_cursor(
+                &mut self,
+                _: i64,
+                _: Option<&Cursor>,
+                _: Option<&str>,
+                _: i64,
+            ) -> Result<(), DbsError> {
+                unimplemented!()
+            }
+            fn load_cursor(
+                &self,
+                _: i64,
+            ) -> Result<(Option<Cursor>, Option<DateTime<Utc>>), DbsError> {
+                unimplemented!()
+            }
+            fn get_run_count(&self, _: i64) -> Result<u64, DbsError> {
+                unimplemented!()
+            }
+            fn increment_run_count(&mut self, _: i64) -> Result<(), DbsError> {
+                unimplemented!()
+            }
+            fn acquire_lock(&mut self, _: i64, _: i64) -> Result<bool, DbsError> {
+                unimplemented!()
+            }
+            fn release_lock(&mut self, _: i64) -> Result<(), DbsError> {
+                unimplemented!()
+            }
+            fn iter_items<'a>(
+                &'a self,
+                _: &ExportQuery,
+            ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
+                unimplemented!()
+            }
+            fn iter_revisions<'a>(
+                &'a self,
+                _: &ExportQuery,
+            ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
+                unimplemented!()
+            }
+            fn item_counts(&self, _: i64) -> Result<(u64, u64, u64), DbsError> {
+                unimplemented!()
+            }
+            fn browse_items(
+                &self,
+                _: &ExportQuery,
+                _: Option<&str>,
+                _: u32,
+                _: u32,
+            ) -> Result<(Vec<ItemRow>, u64), DbsError> {
+                unimplemented!()
+            }
+            fn get_item(&self, _: i64) -> Result<Option<ItemRow>, DbsError> {
+                unimplemented!()
+            }
+            fn get_media_blob(&self, _: i64) -> Result<Option<ItemRow>, DbsError> {
+                unimplemented!()
+            }
+            fn metrics(&self) -> Result<ItemRow, DbsError> {
+                unimplemented!()
+            }
+            fn integrity_check(&self) -> Result<String, DbsError> {
+                unimplemented!()
+            }
+        }
+
+        fn ids(items: &[&str]) -> HashSet<String> {
+            items.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn unrecognized_scope_is_skipped_with_a_warning_and_no_delete() {
+            let mut storage = SweepStorage::default();
+            let mut scopes = HashMap::new();
+            scopes.insert("bogus-scope".to_string(), ids(&["1"]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 0);
+            assert_eq!(outcome.warnings.len(), 1);
+            assert!(outcome.warnings[0].contains("unrecognized"));
+            assert!(storage.delete_calls.is_empty());
+        }
+
+        #[test]
+        fn safe_source_scope_sweep_deletes_missing_items() {
+            // Existing live: 1,2,3,4. Enumeration: 1,2,3 (only "4" missing
+            // -> 1/4 = 25%, under the 50% safety fraction).
+            let mut storage = SweepStorage::with_live("", &["1", "2", "3", "4"]);
+            let mut scopes = HashMap::new();
+            scopes.insert("source".to_string(), ids(&["1", "2", "3"]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 1);
+            assert_eq!(outcome.revisions, 1);
+            assert!(outcome.warnings.is_empty());
+            assert_eq!(storage.delete_calls, vec![(None, 1)]);
+        }
+
+        #[test]
+        fn tag_scope_passes_the_tag_through_to_storage() {
+            let mut storage = SweepStorage::with_live("topic-a", &["1", "2"]);
+            let mut scopes = HashMap::new();
+            scopes.insert("tag:topic-a".to_string(), ids(&["1", "2"]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 0);
+            assert_eq!(storage.delete_calls, vec![(Some("topic-a".to_string()), 0)]);
+        }
+
+        #[test]
+        fn empty_enumeration_against_existing_live_items_is_refused() {
+            let mut storage = SweepStorage::with_live("", &["1", "2"]);
+            let mut scopes = HashMap::new();
+            scopes.insert("source".to_string(), ids(&[]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 0);
+            assert_eq!(outcome.warnings.len(), 1);
+            assert!(outcome.warnings[0].contains("safety"));
+            assert!(storage.delete_calls.is_empty());
+        }
+
+        #[test]
+        fn fraction_over_the_safety_threshold_is_refused() {
+            // 4 live, enumeration has only 1 -> 3/4 = 75% would be deleted,
+            // over the 50% threshold.
+            let mut storage = SweepStorage::with_live("", &["1", "2", "3", "4"]);
+            let mut scopes = HashMap::new();
+            scopes.insert("source".to_string(), ids(&["1"]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 0);
+            assert!(outcome.warnings[0].contains("75%"));
+            assert!(storage.delete_calls.is_empty());
+        }
+
+        #[test]
+        fn fraction_exactly_at_the_threshold_is_allowed() {
+            // 4 live, enumeration missing exactly 2 -> 2/4 = 50%, not
+            // strictly over a 50% threshold.
+            let mut storage = SweepStorage::with_live("", &["1", "2", "3", "4"]);
+            let mut scopes = HashMap::new();
+            scopes.insert("source".to_string(), ids(&["1", "2"]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 2);
+            assert!(outcome.warnings.is_empty());
+        }
+
+        #[test]
+        fn no_existing_live_items_is_never_unsafe() {
+            // Nothing to accidentally mass-delete.
+            let mut storage = SweepStorage::with_live("", &[]);
+            let mut scopes = HashMap::new();
+            scopes.insert("source".to_string(), ids(&[]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 0);
+            assert!(outcome.warnings.is_empty());
+        }
+
+        #[test]
+        fn multiple_scopes_are_each_evaluated_independently() {
+            let mut storage = SweepStorage::default();
+            storage
+                .existing_live
+                .insert("".to_string(), ids(&["1", "2"]));
+            storage
+                .existing_live
+                .insert("a".to_string(), ids(&["3", "4"]));
+            let mut scopes = HashMap::new();
+            // "source" scope: safe (nothing missing).
+            scopes.insert("source".to_string(), ids(&["1", "2"]));
+            // "tag:a" scope: unsafe (100% would be deleted).
+            scopes.insert("tag:a".to_string(), ids(&[]));
+            let outcome = sweep_deletions(&mut storage, 1, 1, &scopes, 0.5).unwrap();
+            assert_eq!(outcome.deleted, 0);
+            assert_eq!(outcome.warnings.len(), 1);
         }
     }
 }
