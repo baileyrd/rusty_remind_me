@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Engine — prepare + content-hash computation (closes #17)
+**2026-08-12**
+
+- **Added:** `dbs-core::engine::{prepare, compute_hash}`, mirroring
+  `Engine._prepare`/`Engine._compute_hash` in `core/engine.py`
+  (baileyrd/Daily-Backup-System, pinned `@6cc6491`): validates
+  `item_kind` against the connector's declared kinds
+  (`ConnectorError::Contract` if not declared), computes the content
+  hash (a `revision_token` shortcut when the connector supplies one,
+  otherwise a normalized projection with volatile fields stripped and
+  tags sorted), gates `deleted`/media on the connector's capabilities,
+  and formats timestamps via `iso_z`.
+- **Scope correction, stated plainly rather than left implicit:** #17's
+  title ("idempotent upsert classification") undersold what's actually
+  engine-side in the reference. The created/updated/unchanged/deleted/
+  undeleted *classification* — comparing the computed hash against
+  what's already stored — is backend-specific SQL in the reference's
+  `SqliteStorage._update_item`, not engine code. That belongs to #36
+  (`SqliteStorage`). This issue is genuinely just `prepare`/
+  `compute_hash`, the same functions `core/engine.py` actually has.
+- 10 new unit tests (undeclared-kind rejection, declared-kind
+  acceptance, `deleted` gated on `supports_native_deletes`, media gated
+  on `produces_media`, `revision_token` short-circuiting the projection
+  hash for both matching and differing tokens, volatile-field stripping,
+  tag-order independence, the `deleted` flag participating in the hash,
+  timestamp formatting), 108/108 total passing across the workspace.
+
 ## Engine — cursor/checkpoint transaction safety (closes #16)
 **2026-08-12**
 
