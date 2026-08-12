@@ -33,8 +33,8 @@ pub use connector::{Connector, RunContext, CORE_API_VERSION};
 pub use engine::commit_checkpoint;
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use export::{
-    available_formats, get_exporter, CsvExporter, ExportResult, ExportSource, Exporter,
-    JsonExporter, MarkdownExporter, NdjsonExporter, ObsidianExporter, WikiExporter,
+    available_formats, get_exporter, ArchiveExporter, CsvExporter, ExportResult, ExportSource,
+    Exporter, JsonExporter, MarkdownExporter, NdjsonExporter, ObsidianExporter, WikiExporter,
 };
 pub use export_profile::{
     axis_label, group_values, raw_value, resolve_export_profile, ExportProfile,
