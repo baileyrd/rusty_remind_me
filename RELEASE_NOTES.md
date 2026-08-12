@@ -8,6 +8,30 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Replace hand-reconstructed PR/issue templates with the real source
+**2026-08-12**
+
+- **Fixed:** swapped the four hand-reconstructed PR templates and two
+  hand-reconstructed issue templates for the actual files from
+  `baileyrd/skill_pack` (`my_loops/repo-config/assets/templates/.github/`,
+  commit `ae532fb`), now that this session has that repo cloned. The
+  reconstructions from the previous entry turned out to differ meaningfully
+  from source, not just cosmetically — most notably the issue templates are
+  GitHub issue-form YAML (`bug_report.yml`, `feature_request.yml`) with
+  structured fields, not the plain Markdown-with-frontmatter files guessed
+  from the changelog description. `config.yml` also gained a
+  `Security vulnerability` contact link (pointing at this repo's GitHub
+  Security Advisories) and `blank_issues_enabled: false`, both present in
+  source and absent from the reconstruction.
+- **Reported upstream:** filed
+  [baileyrd/skill_pack#1](https://github.com/baileyrd/skill_pack/issues/1)
+  documenting this as (at least) a third occurrence of the sync-gap pattern
+  already logged twice in that repo's own `RELEASE_NOTES.md` — the local
+  `synced/repo-config` copy was missing `assets/templates/.github/` entirely
+  and had lost the executable bit on both scripts, while the source repo
+  itself is confirmed correct on both counts.
+- CI workflow still correctly absent — no `Cargo.toml` yet to run it against.
+
 ## Apply repo-config governance scaffold
 **2026-08-12**
 

@@ -1,13 +1,14 @@
-## Chore
+## What
+<!-- Dependency bump, CI/tooling change, refactor with no behavior change, etc. -->
 
-<!-- Dependency bump, tooling, CI, refactor with no behavior change, etc. What and why. -->
+## Why
+<!-- Justify any new/updated third-party dependency; note if this is a toolchain bump -->
 
-## Impact
-
-<!-- What could this break? How was that checked? -->
+## Risk
+- [ ] Low — internal only, no public API/behavior change
+- [ ] Medium/High — described below
 
 ## Checklist
-
-- [ ] No intended behavior change (or it's called out above and belongs in a different template)
-- [ ] Dependency/toolchain bumps, if any, checked for breaking changes in their changelog
-- [ ] CI green
+- [ ] Tests still pass unmodified (or updated where mechanically necessary)
+- [ ] Lockfile/changelog updated if applicable
+- [ ] No secrets/credentials committed or logged

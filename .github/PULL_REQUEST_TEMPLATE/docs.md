@@ -1,9 +1,10 @@
-## Docs
+## What's changing
+<!-- README, docstrings, ADR, runbook, etc. -->
 
-<!-- What's being documented or corrected, and why it needed the change. -->
+## Why
+<!-- Stale, incorrect, missing, or newly needed -->
 
 ## Checklist
-
-- [ ] Links checked (internal references, external URLs)
-- [ ] Code samples, if any, actually run against the current codebase
-- [ ] No behavioral/code change bundled in — docs-only
+- [ ] Links checked
+- [ ] Code samples (if any) actually run
+- [ ] No behavior/code changes bundled in — docs only

@@ -1,19 +1,20 @@
-## Feature
+## Summary
+<!-- What does this add, and why? -->
 
-<!-- What does this add, and why does the repo need it? -->
-
-## Approach
-
-<!-- The *why* behind non-obvious decisions. Alternatives considered, if any. -->
+## Changes
+-
 
 ## Testing
+<!-- Happy path + failure/boundary cases. Link CI run if applicable. -->
+- [ ] Tests added/updated
+- [ ] Manually verified locally
 
-- [ ] Happy path covered
-- [ ] At least one failure/boundary case covered
-- [ ] Spike/prototype — tests intentionally deferred (say why above)
+## Breaking changes / migrations
+- [ ] None
+- [ ] Yes — described below (schema change, public API change, config change)
 
 ## Checklist
-
-- [ ] Docstrings/comments added or updated on any public surface touched
-- [ ] No secrets or credentials committed or logged
-- [ ] New third-party dependencies, if any, are justified above
+- [ ] Docstrings/comments added for new public surface
+- [ ] No secrets/credentials committed or logged
+- [ ] External input validated at the boundary
+- [ ] Diff is focused (no unrelated changes bundled in)
