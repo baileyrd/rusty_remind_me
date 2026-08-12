@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-11 — `promote()` now rejects duplicate calls with identical sources (#274)
+
+### Fixed
+- **Two `promote()` calls with the same `source_ids` created two independent promoted memories from the same evidence.** The write used `INSERT OR IGNORE INTO promotions (promoted_id, source_id, ...)`, which only dedupes rows *within* one call's source list — a fresh `promoted_id` is minted every call, so nothing stopped a repeated call (retried tool invocation, re-run backlog pass, etc.) from producing a second scenario or persona statement grounded in the exact same facts. Added `existing_live_promotion`, which checks whether the exact `source_ids` set (as an unordered set, at the same rung) already has a *live* promoted memory — not deleted, not superseded — before writing anything, and returns the new `PromotionError::DuplicateSources` naming the existing memory's id if so. A promotion whose earlier promoted memory has since been superseded or deleted no longer counts, so re-promoting the same sources after that is treated as a fresh, legitimate call.
+
+### Provenance
+
+Fixed per GitHub issue #274.
+
 ## 2026-08-11 — `watcher.rs`'s `imports` map now evicts entries absent for N scans (#286)
 
 ### Fixed

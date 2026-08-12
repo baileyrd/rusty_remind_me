@@ -114,6 +114,8 @@ pub enum PromotionError {
     SensitiveSource(String),
     /// The distillation itself was empty.
     EmptyContent,
+    /// This exact source set already has a live promotion at this rung.
+    DuplicateSources(String),
 }
 
 impl std::fmt::Display for PromotionError {
@@ -144,6 +146,13 @@ impl std::fmt::Display for PromotionError {
                 id
             ),
             Self::EmptyContent => write!(f, "the promoted content is empty"),
+            Self::DuplicateSources(id) => write!(
+                f,
+                "this exact set of sources already has a live promotion, {:?} — \
+                 promoting it again would mint a second, independent memory from the \
+                 same evidence rather than the one that already exists",
+                id
+            ),
         }
     }
 }
@@ -328,6 +337,61 @@ fn load_source(conn: &Connection, id: &str) -> SqlResult<Option<SourceRow>> {
     })
 }
 
+/// The already-promoted memory whose source set exactly matches `source_ids`
+/// at `rung`, if its promoted memory is still live (not deleted, not
+/// superseded).
+///
+/// `INSERT OR IGNORE` on `promotions` only dedupes rows *within* one call's
+/// source list — nothing stopped two separate `promote()` calls with
+/// identical `source_ids` from minting two independent promoted memories
+/// from the same evidence (#274). This is the check that closes that gap:
+/// same rung, same source set as an unordered set (order and any accidental
+/// duplicates in the caller's list don't matter), and the promotion has to
+/// still be live — a superseded or deleted promoted memory no longer counts,
+/// so re-promoting the same sources after that is a fresh, legitimate call.
+fn existing_live_promotion(
+    conn: &Connection,
+    rung: Rung,
+    source_ids: &[String],
+) -> SqlResult<Option<String>> {
+    let mut wanted: Vec<String> = source_ids.to_vec();
+    wanted.sort_unstable();
+    wanted.dedup();
+
+    // Any promoted_id sharing at least one source at this rung is a
+    // candidate; each is then checked for an exact set match and liveness.
+    // Cheap in practice: fan-out per source is small, and this only runs on
+    // the write path, not the hot read path.
+    let mut candidates_stmt = conn
+        .prepare("SELECT DISTINCT promoted_id FROM promotions WHERE source_id = ? AND rung = ?")?;
+    let mut sources_stmt =
+        conn.prepare("SELECT source_id FROM promotions WHERE promoted_id = ? AND rung = ?")?;
+    let mut live_stmt = conn.prepare(
+        "SELECT count(*) FROM memories
+          WHERE id = ? AND deleted_at IS NULL AND superseded_by IS NULL",
+    )?;
+
+    let candidate_ids: Vec<String> = candidates_stmt
+        .query_map(params![wanted[0], rung.as_str()], |r| r.get(0))?
+        .collect::<SqlResult<_>>()?;
+
+    for promoted_id in candidate_ids {
+        let mut existing: Vec<String> = sources_stmt
+            .query_map(params![promoted_id, rung.as_str()], |r| r.get(0))?
+            .collect::<SqlResult<_>>()?;
+        existing.sort_unstable();
+        existing.dedup();
+        if existing != wanted {
+            continue;
+        }
+        let live: i64 = live_stmt.query_row(params![promoted_id], |r| r.get(0))?;
+        if live > 0 {
+            return Ok(Some(promoted_id));
+        }
+    }
+    Ok(None)
+}
+
 /// Accept a distillation and record what it was built from.
 pub fn promote(conn: &Connection, input: &PromoteInput) -> Result<PromotionResult, PromotionError> {
     if input.rung == Rung::CaptureToFact {
@@ -354,6 +418,13 @@ pub fn promote(conn: &Connection, input: &PromoteInput) -> Result<PromotionResul
         if source.sensitive && input.rung == Rung::ScenarioToPersona {
             return Err(PromotionError::SensitiveSource(id.clone()));
         }
+    }
+
+    // Same evidence, promoted twice, is not a new promotion — see
+    // `existing_live_promotion` for why "live" is the bar rather than "ever
+    // promoted".
+    if let Some(promoted_id) = existing_live_promotion(conn, input.rung, &input.source_ids)? {
+        return Err(PromotionError::DuplicateSources(promoted_id));
     }
 
     let now_iso = Utc::now().to_rfc3339();

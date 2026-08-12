@@ -345,6 +345,90 @@ fn a_promotion_with_an_unusable_source_is_refused_whole() {
 }
 
 #[test]
+fn promoting_the_same_sources_twice_is_rejected() {
+    let db = db("duplicate_sources");
+    let conn = db.conn();
+    let facts = facts_about(&conn, "Duplicate Island", 3);
+
+    let first = promote(
+        &conn,
+        &PromoteInput {
+            rung: Rung::FactToScenario,
+            source_ids: facts.clone(),
+            content: "First telling of the same evidence".into(),
+        },
+    )
+    .unwrap();
+
+    // Same sources, different order, and a distinct description of the
+    // "distillation" — none of that should matter. `INSERT OR IGNORE` only
+    // dedupes rows within a single call, so without this check two calls
+    // like this create two independent scenario memories from one set of
+    // facts (#274).
+    let mut reordered = facts.clone();
+    reordered.reverse();
+
+    let err = promote(
+        &conn,
+        &PromoteInput {
+            rung: Rung::FactToScenario,
+            source_ids: reordered,
+            content: "Second telling of the same evidence".into(),
+        },
+    )
+    .unwrap_err();
+
+    match err {
+        PromotionError::DuplicateSources(ref id) => assert_eq!(id, &first.promoted_id),
+        other => panic!("expected DuplicateSources, got {:?}", other),
+    }
+
+    // Exactly one scenario memory exists for this evidence, not two.
+    let rows: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM memories WHERE category = ?",
+            params![SCENARIO_CATEGORY],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn a_superseded_promotion_no_longer_blocks_re_promoting_its_sources() {
+    let db = db("duplicate_sources_after_supersede");
+    let conn = db.conn();
+    let facts = facts_about(&conn, "Rottnest Reprise", 3);
+
+    let first = promote(
+        &conn,
+        &PromoteInput {
+            rung: Rung::FactToScenario,
+            source_ids: facts.clone(),
+            content: "Original telling".into(),
+        },
+    )
+    .unwrap();
+
+    // Once the earlier promoted memory is no longer live, its source set no
+    // longer counts as "already promoted" -- a live promotion is the bar,
+    // not "ever promoted".
+    supersede(&conn, &first.promoted_id);
+
+    let second = promote(
+        &conn,
+        &PromoteInput {
+            rung: Rung::FactToScenario,
+            source_ids: facts,
+            content: "Re-told after the original was superseded".into(),
+        },
+    )
+    .unwrap();
+
+    assert_ne!(second.promoted_id, first.promoted_id);
+}
+
+#[test]
 fn a_promotion_needs_sources_and_content() {
     let db = db("empty");
     let conn = db.conn();
