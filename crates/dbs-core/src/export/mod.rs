@@ -26,6 +26,7 @@ mod csv;
 mod json;
 mod markdown;
 mod ndjson;
+mod obsidian;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -39,6 +40,7 @@ pub use csv::CsvExporter;
 pub use json::JsonExporter;
 pub use markdown::MarkdownExporter;
 pub use ndjson::NdjsonExporter;
+pub use obsidian::ObsidianExporter;
 
 /// Summary of a completed export.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -93,6 +95,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
         "ndjson" => Ok(Box::new(NdjsonExporter)),
         "csv" => Ok(Box::new(CsvExporter)),
         "markdown" => Ok(Box::new(MarkdownExporter)),
+        "obsidian" => Ok(Box::new(ObsidianExporter)),
         other => Err(DbsError::Config(format!(
             "unknown export format {other:?}. Available: {:?}",
             available_formats()
@@ -103,7 +106,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
 /// Every currently-registered format key, sorted — grows as each
 /// exporter issue above lands.
 pub fn available_formats() -> Vec<&'static str> {
-    vec!["json", "ndjson", "csv", "markdown"]
+    vec!["json", "ndjson", "csv", "markdown", "obsidian"]
 }
 
 #[cfg(test)]
@@ -143,10 +146,16 @@ mod tests {
     }
 
     #[test]
+    fn get_exporter_finds_obsidian() {
+        let exporter = get_exporter("obsidian").unwrap();
+        assert_eq!(exporter.format(), "obsidian");
+    }
+
+    #[test]
     fn available_formats_lists_every_registered_format() {
         assert_eq!(
             available_formats(),
-            vec!["json", "ndjson", "csv", "markdown"]
+            vec!["json", "ndjson", "csv", "markdown", "obsidian"]
         );
     }
 }

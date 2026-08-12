@@ -88,9 +88,9 @@ not left as one oversized issue.
 | NDJSON exporter | fn | spec | both | `src/dbs/export/ndjson.py` | rusty_json (unverified) | no | S | Done (#53) |
 | CSV exporter | fn | spec | both | `src/dbs/export/csv.py` | — | no | S | Done (#54) |
 | Markdown exporter | fn | spec | both | `src/dbs/export/markdown.py` | — | no | S | Done (#55) |
-| Obsidian vault exporter | fn | spec | both | `src/dbs/export/obsidian.py` | — | no | M | |
+| Obsidian vault exporter | fn | spec | both | `src/dbs/export/obsidian.py` | — | no | M | Done (#56) — added the `zip` crate dependency (pulled forward from this row's own note below) |
 | Wiki exporter (topic/item grouping, wikilinks) | fn | spec | both | `src/dbs/export/wiki.py` | — | no | M | |
-| Self-describing archive exporter (checksummed manifest zip) | fn | spec | both | `src/dbs/export/archive.py` | — | no | M | New dependency: zip crate |
+| Self-describing archive exporter (checksummed manifest zip) | fn | spec | both | `src/dbs/export/archive.py` | — | no | M | `zip` crate dependency already added in #56 (Obsidian exporter) |
 
 ## Restore, verify, maintain, notes/wiki helpers
 
