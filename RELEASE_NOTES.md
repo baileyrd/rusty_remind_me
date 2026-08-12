@@ -8,6 +8,37 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Engine — cursor/checkpoint transaction safety (closes #16)
+**2026-08-12**
+
+- **Added:** `dbs-core::engine::commit_checkpoint` — persists buffered
+  items before saving the new cursor, never the reverse, mirroring
+  invariant #1 in `docs/architecture.md`'s "Anatomy of a backup run"
+  (`src/dbs/core/engine.py`, baileyrd/Daily-Backup-System, pinned
+  `@6cc6491`): "the cursor never gets ahead of data." A crash between the
+  two calls leaves the cursor lagging committed data (safe — the next
+  run re-fetches the overlap and idempotent upsert, #17, dedups it) and
+  never advances the cursor past data that was never durably written.
+- **Design note:** kept as its own `engine` module rather than folded
+  into the `Storage` trait, matching the reference's own
+  `dbs.core.engine`/`dbs.storage.base` boundary — `Storage`'s trait
+  surface (#11) is unchanged. The reference wraps both calls in one DB
+  transaction for atomicity *within* the upsert batch itself; this
+  round's `Storage` trait deliberately has no `transaction()` combinator
+  (#11's scope note), so that stronger guarantee is left to the concrete
+  `SqliteStorage` (new issue #36, filed this session) if it proves
+  necessary — the ordering invariant holds either way.
+- **Found and filed a sequencing gap:** #12 was scoped to schema +
+  connection setup only, not an actual `Storage` implementation — there's
+  no real backend to persist through yet. Filed #36 to close it. The
+  engine issues don't block on it; they're tested against a `Storage`
+  test double instead, same pattern as #11's `InMemoryStorage`.
+- 4 new unit tests (items-then-cursor ordering, a simulated crash between
+  the two calls leaving the cursor lagging not ahead, a recovered run
+  after that crash succeeding normally, watermark derivation from the
+  committed batch's `max_updated_at`), 98/98 total passing across the
+  workspace.
+
 ## netns — VPN network-namespace membership check (closes #24)
 **2026-08-12**
 
