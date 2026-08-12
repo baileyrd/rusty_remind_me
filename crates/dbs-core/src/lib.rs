@@ -34,6 +34,7 @@ pub use engine::commit_checkpoint;
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use export::{
     available_formats, get_exporter, ExportResult, ExportSource, Exporter, JsonExporter,
+    NdjsonExporter,
 };
 pub use export_profile::{
     axis_label, group_values, raw_value, resolve_export_profile, ExportProfile,
