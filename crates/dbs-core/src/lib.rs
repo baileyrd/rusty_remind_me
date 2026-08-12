@@ -7,6 +7,7 @@
 
 pub mod cancel;
 pub mod capabilities;
+pub mod config;
 pub mod connector;
 pub mod errors;
 pub mod hashing;
@@ -18,6 +19,9 @@ pub mod versioning;
 
 pub use cancel::CancelToken;
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
+pub use config::{
+    load_config, parse_env_file, Config, ConnectorOverride, NotifyOn, SourceConfig, VpnGuard,
+};
 pub use connector::{Connector, RunContext, CORE_API_VERSION};
 pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use hashing::{canonical_json, content_hash};

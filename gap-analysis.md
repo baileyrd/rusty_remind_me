@@ -67,6 +67,7 @@ not left as one oversized issue.
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Config loading (`dbs.toml` + `.env`, per-source blocks, inline-secret rejection) | fn | spec | both | `src/dbs/config.py` | — | no | M | New dependency: TOML parser — check rusty_json's scope first (name suggests JSON only) |
+| Export profile (`ExportProfile`/`ExportProfileOverride` — per-source export rules: which item kinds export, wiki grouping) | type | spec | both | `src/dbs/core/export_profile.py` | — | no | S | **Missed entirely in the original pass** — referenced by both `connector.py`'s `export_profile` class attribute and `config.py`'s `SourceConfig.export`, but never got its own row. Found while implementing config loading (#13); both connector.rs and config.rs currently omit the field pending this. |
 
 ## Crypto
 
