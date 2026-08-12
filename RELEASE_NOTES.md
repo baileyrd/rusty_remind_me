@@ -8,6 +8,44 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## SQLite Storage: sources, runs, cursor/state, locking (part of #36)
+**2026-08-12**
+
+- **Added:** `dbs-core::storage::sqlite_storage::SqliteStorage`, a concrete
+  `Storage` implementation over the connection/schema from #12, mirroring
+  `SqliteStorage` in `src/dbs/storage/sqlite.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`). This PR covers **schema
+  lifecycle, sources, runs (`begin_run`/`finish_run`/
+  `reap_interrupted_runs`/`recent_runs`), cursor/state
+  (`save_cursor`/`load_cursor`/run-count), and locking**
+  (`acquire_lock`/`release_lock`), plus `spawn`/`close`/`integrity_check`.
+- **Scoped intentionally, not an oversight:** issue #36 itself calls for
+  splitting the ~1100-line reference module across multiple PRs by trait
+  section. This PR's `SqliteStorage` implements every `Storage` trait
+  method (required for the type to compile as a concrete `impl Storage`),
+  but the items/upsert section
+  (`upsert_items`/`soft_delete_missing`/`live_external_ids`) and the
+  export/browse/stats/maintenance section return
+  `Err(DbsError::Storage("... not yet implemented (see issue #36)"))` for
+  now — the largest and most correctness-sensitive parts of the reference
+  (batch classification, revision writing, media archiving, FTS5 search)
+  land in follow-up PRs against the same issue.
+- **Differences from the reference, all deliberate:** no `transaction()`
+  context-manager combinator (per #11 — each method opens its own
+  `rusqlite` transaction where needed); `migrate()` here is a
+  redundant-but-idempotent second call since `open_connection` (#12)
+  already migrates on open; `close()` best-effort runs `PRAGMA optimize`
+  and otherwise relies on `Drop` rather than truly invalidating the value;
+  the `Storage` trait's `finish_run` doesn't expose `items_failed` (see
+  #11), so that column keeps its schema default until the items/upsert PR
+  wires it through.
+- 19 new tests against a real in-memory SQLite connection, covering
+  source upsert/get/list/delete, run begin/finish/recent/reap-interrupted
+  (including lock clearing on reap), cursor save/load (including the
+  watermark-only-advances rule), run-count increment, lock
+  acquire/release/contention, integrity_check, and `spawn`'s
+  memory-vs-file-backed behavior.
+
 ## Managed HTTP client (closes #22)
 **2026-08-12**
 

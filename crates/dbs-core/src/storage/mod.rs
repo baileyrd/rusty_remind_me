@@ -25,11 +25,13 @@
 //!   propagate unchecked, but Rust doesn't have unchecked exceptions.
 //!
 //! `sqlite`/`migrations` (issue #12) provide a concrete SQLite connection
-//! and schema, but not yet a full `Storage` implementation over them —
-//! that's the engine issues (#16/#17/#19/#20) building on top.
+//! and schema. `sqlite_storage` (issue #36) is the concrete `Storage`
+//! implementation over them — landing in multiple PRs by trait section;
+//! see that module's doc-comment for which sections are done.
 
 pub mod migrations;
 pub mod sqlite;
+pub mod sqlite_storage;
 
 use std::collections::HashMap;
 use std::path::Path;
