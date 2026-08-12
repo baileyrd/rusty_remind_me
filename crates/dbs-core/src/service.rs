@@ -41,6 +41,7 @@
 //! result instead.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -49,6 +50,8 @@ use crate::capabilities::Capabilities;
 use crate::config::{Config, SourceConfig, VpnGuard};
 use crate::crypto::{decrypt_file, is_encrypted, resolve_passphrase, DEFAULT_PASSPHRASE_ENV};
 use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
+use crate::export::{get_exporter, ExportResult, ExportSource};
+use crate::export_profile::{resolve_export_profile, ExportProfile};
 use crate::models::{
     Cursor, RestoreReport, RunResult, RunStatus, SourceStatus, VerifyIssue, VerifyReport,
 };
@@ -58,8 +61,8 @@ use crate::restore::{
     iter_export_rows, prepared_item_from_row, read_manifest, skipped_extras, verify_archive,
 };
 use crate::storage::migrations::SCHEMA_VERSION;
-use crate::storage::{BatchResult, ItemRow, PreparedItem, Storage};
-use crate::timeutil::parse_iso;
+use crate::storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, Storage};
+use crate::timeutil::{iso_z, parse_iso};
 
 /// Calls `storage.reap_interrupted_runs()` unless `already_reaped` is
 /// already `true`, then sets it — so repeated calls sharing the same
@@ -881,6 +884,158 @@ impl<'a> BackupService<'a> {
             issues,
         })
     }
+
+    /// Runs `query` through `format`'s [`Exporter`](crate::export::Exporter)
+    /// and atomically writes the result to `path` (write to a sibling
+    /// `.tmp` file, then rename — a crash mid-export never leaves a
+    /// half-written file at `path`). Mirrors the reference's
+    /// `BackupService.export`.
+    ///
+    /// Pulled forward from #70 (the CLI-facing `dbs export*` wiring):
+    /// [`crate::notes_export::export_notes`]/`export_wiki_dir` (#61)
+    /// cannot exist without *some* way to turn a query into a written
+    /// file, and every exporter issue (#51-#58) already lands
+    /// `Exporter`/`ExportQuery` — this method is the missing link
+    /// between them and `Storage`, not CLI argument parsing (still
+    /// #70's own scope).
+    pub fn export(
+        &self,
+        query: &ExportQuery,
+        format: &str,
+        path: &Path,
+    ) -> Result<ExportResult, DbsError> {
+        let exporter = get_exporter(format)?;
+        let source = self.build_export_source(query)?;
+
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    DbsError::Storage(format!("failed to create export directory: {e}"))
+                })?;
+            }
+        }
+        let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+        tmp_name.push(".tmp");
+        let tmp_path = path.with_file_name(tmp_name);
+
+        let mut result = {
+            let mut file = std::fs::File::create(&tmp_path).map_err(|e| {
+                DbsError::Storage(format!("failed to create export temp file: {e}"))
+            })?;
+            let result = exporter.write(&source, &mut file, query)?;
+            file.flush()
+                .map_err(|e| DbsError::Storage(format!("failed to flush export file: {e}")))?;
+            result
+        };
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| DbsError::Storage(format!("failed to finalize export file: {e}")))?;
+        result.path = Some(path.display().to_string());
+        Ok(result)
+    }
+
+    /// Eagerly collects `query`'s matching rows from storage into an
+    /// in-memory [`ExportSource`] — the `Exporter` trait's `items()`
+    /// etc. are infallible, so any storage error surfaces here instead,
+    /// before a single byte is written.
+    fn build_export_source(&self, query: &ExportQuery) -> Result<InMemoryExportSource, DbsError> {
+        let items: Vec<ItemRow> = self.storage.iter_items(query)?.collect();
+        let revisions: Vec<ItemRow> = if query.include_revisions {
+            self.storage.iter_revisions(query)?.collect()
+        } else {
+            Vec::new()
+        };
+        let media_blobs: Vec<ItemRow> = self.storage.iter_media_blobs(query)?.collect();
+        Ok(InMemoryExportSource {
+            items,
+            revisions,
+            media_blobs,
+            manifest: self.export_manifest_row(),
+            profiles: self.export_profiles(),
+        })
+    }
+
+    /// `tool`/`generated_at`/`db_schema_version`/`connector_schema_versions`
+    /// — the base manifest fields every zip exporter (obsidian/wiki/
+    /// archive) merges its own `query`/`counts` on top of. Mirrors the
+    /// reference's `BackupService._manifest`, minus `tool_version`/
+    /// `git_sha` (no build-metadata/VCS-introspection equivalent wired
+    /// up yet in this port).
+    fn export_manifest_row(&self) -> ItemRow {
+        let mut manifest = ItemRow::new();
+        manifest.insert(
+            "tool".to_string(),
+            serde_json::Value::String("rusty_dbs".to_string()),
+        );
+        manifest.insert(
+            "generated_at".to_string(),
+            serde_json::Value::String(iso_z(Utc::now())),
+        );
+        manifest.insert(
+            "db_schema_version".to_string(),
+            serde_json::Value::from(SCHEMA_VERSION),
+        );
+        let connector_schema_versions: serde_json::Map<String, serde_json::Value> = self
+            .registry
+            .all()
+            .iter()
+            .map(|rc| {
+                (
+                    rc.type_.clone(),
+                    serde_json::Value::from(rc.handshake.schema_version),
+                )
+            })
+            .collect();
+        manifest.insert(
+            "connector_schema_versions".to_string(),
+            serde_json::Value::Object(connector_schema_versions),
+        );
+        manifest
+    }
+
+    /// Connector default, then the source's `[sources.NAME.export]`
+    /// block, field by field. Mirrors the reference's
+    /// `BackupService._export_profiles`.
+    fn export_profiles(&self) -> HashMap<String, ExportProfile> {
+        let mut profiles = HashMap::new();
+        for (name, sc) in &self.config.sources {
+            let default = self
+                .registry
+                .get(&sc.type_)
+                .and_then(|rc| rc.handshake.export_profile.clone());
+            let profile =
+                resolve_export_profile(default.as_ref(), sc.export.as_ref()).unwrap_or_default();
+            profiles.insert(name.clone(), profile);
+        }
+        profiles
+    }
+}
+
+/// An in-memory [`ExportSource`] populated eagerly from [`Storage`] by
+/// [`BackupService::build_export_source`].
+struct InMemoryExportSource {
+    items: Vec<ItemRow>,
+    revisions: Vec<ItemRow>,
+    media_blobs: Vec<ItemRow>,
+    manifest: ItemRow,
+    profiles: HashMap<String, ExportProfile>,
+}
+
+impl ExportSource for InMemoryExportSource {
+    fn items(&self) -> Box<dyn Iterator<Item = ItemRow> + '_> {
+        Box::new(self.items.iter().cloned())
+    }
+    fn revisions(&self) -> Box<dyn Iterator<Item = ItemRow> + '_> {
+        Box::new(self.revisions.iter().cloned())
+    }
+    fn media_blobs(&self) -> Box<dyn Iterator<Item = ItemRow> + '_> {
+        Box::new(self.media_blobs.iter().cloned())
+    }
+    fn manifest(&self) -> ItemRow {
+        self.manifest.clone()
+    }
+    fn profiles(&self) -> HashMap<String, ExportProfile> {
+        self.profiles.clone()
+    }
 }
 
 #[cfg(test)]
@@ -1289,6 +1444,12 @@ mod tests {
         /// of returning normally — how verify tests exercise the
         /// "unparseable cursor" issue path.
         unparseable_cursor: Option<i64>,
+        /// Canned rows for `iter_items`/`iter_revisions`/
+        /// `iter_media_blobs` — export tests populate these directly
+        /// rather than modeling real query filtering.
+        export_items: Vec<ItemRow>,
+        export_revisions: Vec<ItemRow>,
+        export_media_blobs: Vec<ItemRow>,
     }
 
     impl Storage for FakeStorage {
@@ -1501,13 +1662,19 @@ mod tests {
             &'a self,
             _: &crate::storage::ExportQuery,
         ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
-            unimplemented!()
+            Ok(Box::new(self.export_items.iter().cloned()))
         }
         fn iter_revisions<'a>(
             &'a self,
             _: &crate::storage::ExportQuery,
         ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
-            unimplemented!()
+            Ok(Box::new(self.export_revisions.iter().cloned()))
+        }
+        fn iter_media_blobs<'a>(
+            &'a self,
+            _: &crate::storage::ExportQuery,
+        ) -> Result<Box<dyn Iterator<Item = ItemRow> + 'a>, DbsError> {
+            Ok(Box::new(self.export_media_blobs.iter().cloned()))
         }
         fn item_counts(&self, source_id: i64) -> Result<(u64, u64, u64), DbsError> {
             Ok(*self.counts_by_source.get(&source_id).unwrap_or(&(0, 0, 0)))
@@ -2191,5 +2358,104 @@ mod tests {
         let service = BackupService::new(&mut storage, &config, &registry, &runner);
         let report = service.verify(Some("missing")).unwrap();
         assert!(report.ok);
+    }
+
+    // -- export -------------------------------------------------------------
+
+    fn export_item_row(source: &str, external_id: &str, title: &str) -> ItemRow {
+        let mut row = ItemRow::new();
+        row.insert(
+            "source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        row.insert(
+            "external_id".to_string(),
+            serde_json::Value::String(external_id.to_string()),
+        );
+        row.insert(
+            "title".to_string(),
+            serde_json::Value::String(title.to_string()),
+        );
+        row
+    }
+
+    #[test]
+    fn export_writes_a_file_atomically_and_reports_its_path() {
+        let dir = restore_temp_dir("export-json");
+        let path = dir.join("export.json");
+
+        let mut storage = FakeStorage {
+            export_items: vec![export_item_row("raindrop", "e1", "hello")],
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let result = service
+            .export(&crate::storage::ExportQuery::default(), "json", &path)
+            .unwrap();
+        assert_eq!(result.item_count, 1);
+        assert_eq!(result.path.as_deref(), Some(path.to_str().unwrap()));
+        assert!(path.is_file());
+        // No leftover temp file once the rename completes.
+        assert!(!path.with_file_name("export.json.tmp").exists());
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"external_id\": \"e1\""));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_errors_on_an_unknown_format() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let dir = restore_temp_dir("export-bad-format");
+        let err = service
+            .export(
+                &crate::storage::ExportQuery::default(),
+                "bogus",
+                &dir.join("out.bin"),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_obsidian_includes_a_manifest_with_schema_version() {
+        let dir = restore_temp_dir("export-obsidian-manifest");
+        let path = dir.join("bundle.zip");
+
+        let mut storage = FakeStorage {
+            export_items: vec![export_item_row("raindrop", "e1", "hello")],
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        service
+            .export(&crate::storage::ExportQuery::default(), "obsidian", &path)
+            .unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut manifest_text = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("manifest.json").unwrap(),
+            &mut manifest_text,
+        )
+        .unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_text).unwrap();
+        assert_eq!(manifest["db_schema_version"], SCHEMA_VERSION);
+        assert_eq!(manifest["tool"], "rusty_dbs");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
