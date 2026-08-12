@@ -8,6 +8,51 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Plugin registry: subprocess discovery, contract validation, collision resolution (closes #45)
+**2026-08-12**
+
+- **Added:** `dbs-core::registry::ConnectorRegistry`, implementing
+  ADR-0001's subprocess + line-delimited JSON-IPC design
+  (`docs/adr/0001-dynamic-plugin-registry.md`, issue #5), matching the
+  *behavior* of `src/dbs/core/registry.py` in baileyrd/Daily-Backup-System
+  (pinned `@6cc6491`) — entry-point discovery with isolation, contract
+  validation, `CORE_API_VERSION` gating, and collision precedence
+  (explicit override > built-in shadow protection > deterministic
+  third-party sort) — over a different mechanism (spawn + handshake line,
+  not Python class introspection).
+- `ConnectorRegistry::discover` spawns each `ConnectorCandidate`, waits up
+  to a caller-supplied timeout for one JSON handshake line on its stdout
+  (via a worker thread + `mpsc::recv_timeout` — a blocking `read_line` has
+  no deadline of its own), validates the contract (type-name format,
+  `Capabilities::assert_coherent`, non-empty `item_kinds`, `secret_keys`
+  required when `requires_auth`, `core_api_version` compatibility via
+  `crate::versioning::is_api_compatible`), then resolves same-type
+  collisions. A candidate that fails to spawn, hangs past the timeout,
+  writes malformed JSON, or fails validation is recorded in the report's
+  `failures` and never crashes discovery of the others.
+- **Scoped intentionally:** this issue implements discovery given an
+  already-resolved list of candidate connector commands — enumerating
+  those candidates from a directory scan of `dbs-connector-*` binaries or
+  a `connectors.toml` manifest (the ADR's "replaces entry-point metadata"
+  step) is deferred to the CLI issue that needs it (`dbs sources`/`dbs
+  connectors`, #71), which already has to resolve a connectors
+  directory/PATH from config. Likewise, only the handshake half of the
+  protocol (ADR steps 1 and 4) is implemented here; the run/stream half
+  (writing a `RunContext`, reading `FetchEvent` lines back) is separate
+  follow-up work bridging a `RegisteredConnector` to the `Connector`
+  trait's `fetch` signature.
+- **New test-only subprocess fixture:** `src/bin/test_connector_fixture.rs`
+  (a `[[bin]]` target auto-discovered by Cargo, not part of the public
+  product) — a controllable fake connector process for exercising the
+  real handshake protocol end-to-end (valid, malformed JSON, incompatible
+  version, invalid type, no output, and a hang past the deadline), spawned
+  from a new integration test file (`tests/registry_integration.rs`) via
+  `env!("CARGO_BIN_EXE_test_connector_fixture")`.
+- 17 new tests: 10 unit tests for the pure validation/collision-resolution
+  logic, 7 integration tests spawning the real fixture binary (including
+  a genuine timeout-past-deadline case, asserting it completes well under
+  5s rather than actually blocking).
+
 ## SQLite Storage: export, browse, stats, maintenance (closes #36)
 **2026-08-12**
 
