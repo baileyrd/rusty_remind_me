@@ -37,18 +37,6 @@
 //!   the call is a self-referential-lifetime problem this port doesn't
 //!   take on; export result sets are bounded by what a single backup run
 //!   holds anyway. Revisit if a real streaming need surfaces.
-//! * **FTS5 full-text search is not ported.** `browse_items`'s reference
-//!   implementation tries an FTS5 `MATCH` query first, falling back to
-//!   `LIKE` only when SQLite lacks the FTS5 module or the query trips
-//!   `MATCH`'s parser; this port always uses the `LIKE` path (own gap:
-//!   FTS5 index creation/triggers/backfill live in the reference's
-//!   `_ensure_fts`, called from `migrate()` — not ported here or in
-//!   #12's `migrate`). Tracked as a new gap-analysis row, same treatment
-//!   as the real `ExportQuery` type (#11's module doc-comment).
-//! * `browse_items`' reference thumbnail derivation falls back to a
-//!   video-link heuristic (YouTube/Loom/Vimeo) when an item has no image
-//!   media; this port only returns the first image media's URL. Also a
-//!   new gap-analysis row.
 //! * `ItemRow` (`HashMap<String, Value>`) has no binary variant, so
 //!   `get_media_blob`/`iter_media_blobs` encode blob bytes as a JSON
 //!   array of byte values (`serde_json`'s default `Vec<u8>` encoding)
@@ -1221,8 +1209,14 @@ impl SqliteStorage {
         let sql = format!(
             "SELECT i.*, s.name AS source_name, s.type AS source_type, \
              (SELECT COUNT(*) FROM media m WHERE m.item_id = i.id) AS media_count, \
-             (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' \
-              ORDER BY m.id LIMIT 1) AS thumb_url \
+             COALESCE(\
+                 (SELECT m.url FROM media m WHERE m.item_id = i.id AND m.kind = 'image' \
+                  ORDER BY m.id LIMIT 1), \
+                 CASE WHEN json_extract(i.raw_json, '$.videoLink') LIKE '%youtu%' \
+                       OR json_extract(i.raw_json, '$.videoLink') LIKE '%loom.com%' \
+                       OR json_extract(i.raw_json, '$.videoLink') LIKE '%vimeo.com%' \
+                      THEN json_extract(i.raw_json, '$.videoLink') END\
+             ) AS thumb_url \
              FROM items i JOIN sources s ON s.id = i.source_id \
              WHERE {where_clause} ORDER BY i.item_created_at DESC, i.id DESC LIMIT ? OFFSET ?"
         );
@@ -1504,8 +1498,9 @@ fn row_to_media_blob(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
 }
 
 /// Lighter item shape for the paginated browse listing (no raw payload)
-/// — mirrors the reference's `_row_to_browse_item`, minus the video-link
-/// thumbnail fallback (see the module doc-comment).
+/// — mirrors the reference's `_row_to_browse_item`, including its
+/// video-link thumbnail fallback (see `thumb_url`'s `COALESCE` in
+/// `try_browse_items`, #48).
 fn row_to_browse_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
     let mut out = ItemRow::new();
     out.insert("id".to_string(), Value::from(row.get::<_, i64>("id")?));
@@ -2629,6 +2624,87 @@ mod tests {
             .browse_items(&ExportQuery::default(), Some("beta"), 10, 0)
             .unwrap();
         assert_eq!(new_term, 1);
+    }
+
+    fn browse_thumbnail_for_video_link(video_link: &str) -> Option<String> {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        item.raw_json = serde_json::json!({"videoLink": video_link}).to_string();
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+        let (rows, _) = storage
+            .browse_items(&ExportQuery::default(), None, 10, 0)
+            .unwrap();
+        rows[0]["thumbnail"].as_str().map(str::to_string)
+    }
+
+    #[test]
+    fn browse_items_thumbnail_falls_back_to_a_youtube_video_link() {
+        let link = "https://youtu.be/dQw4w9WgXcQ";
+        assert_eq!(
+            browse_thumbnail_for_video_link(link),
+            Some(link.to_string())
+        );
+    }
+
+    #[test]
+    fn browse_items_thumbnail_falls_back_to_a_loom_video_link() {
+        let link = "https://www.loom.com/share/abc123";
+        assert_eq!(
+            browse_thumbnail_for_video_link(link),
+            Some(link.to_string())
+        );
+    }
+
+    #[test]
+    fn browse_items_thumbnail_falls_back_to_a_vimeo_video_link() {
+        let link = "https://vimeo.com/123456789";
+        assert_eq!(
+            browse_thumbnail_for_video_link(link),
+            Some(link.to_string())
+        );
+    }
+
+    #[test]
+    fn browse_items_thumbnail_is_none_without_image_media_or_a_recognized_video_link() {
+        assert_eq!(
+            browse_thumbnail_for_video_link("https://example.com/not-a-video"),
+            None
+        );
+    }
+
+    #[test]
+    fn browse_items_thumbnail_prefers_image_media_over_a_video_link() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut item = prepared("e1", "h1");
+        item.raw_json = serde_json::json!({"videoLink": "https://youtu.be/x"}).to_string();
+        let media = MediaRef {
+            url: "https://example.com/cover.png".to_string(),
+            kind: "image".to_string(),
+            filename: None,
+            mime: None,
+            data: None,
+        };
+        item.media = vec![serde_json::to_value(&media).unwrap()];
+        storage
+            .upsert_items(source.id, run_id, &[item], false, 0)
+            .unwrap();
+        let (rows, _) = storage
+            .browse_items(&ExportQuery::default(), None, 10, 0)
+            .unwrap();
+        assert_eq!(
+            rows[0]["thumbnail"],
+            Value::from("https://example.com/cover.png")
+        );
     }
 
     #[test]
