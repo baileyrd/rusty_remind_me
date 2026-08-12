@@ -15,6 +15,7 @@ pub mod hashing;
 pub mod models;
 pub mod netns;
 pub mod secrets;
+pub mod service;
 pub mod storage;
 pub mod timeutil;
 pub mod versioning;
@@ -35,6 +36,7 @@ pub use models::{
 };
 pub use netns::{in_named_netns, named_netns_exists};
 pub use secrets::Secrets;
+pub use service::reap_once;
 pub use storage::sqlite::open_connection;
 pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
 pub use timeutil::{iso_z, parse_iso};
