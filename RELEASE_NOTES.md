@@ -8,6 +8,39 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## SQLite storage: FTS5 full-text index (closes #47)
+**2026-08-12**
+
+- **Added:** `SqliteStorage::ensure_fts`, porting the reference's
+  `_ensure_fts` from `src/dbs/storage/sqlite.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — an `items_fts` FTS5
+  virtual table over `items(title, body)`, kept in sync via
+  `AFTER INSERT`/`AFTER DELETE`/`AFTER UPDATE OF title, body` triggers,
+  with a one-time `INSERT INTO items_fts(items_fts) VALUES('rebuild')`
+  backfill the first time it's created on a pre-existing database.
+  `browse_items` now tries an FTS5 `MATCH` query first (all search
+  tokens quoted and ANDed, final token prefix-matched, matching the
+  reference's `_fts_match_query`), falling back to the `LIKE` path from
+  #36 when FTS5 is unavailable or a pathological query trips `MATCH`'s
+  parser — same attempt-list structure as the reference.
+- **Deliberately not a numbered migration:** matches the reference's own
+  reasoning — a SQLite build without the FTS5 module would fail a
+  migration permanently, whereas `ensure_fts` just returns `false` and
+  `browse_items` degrades to `LIKE`-only. Called from `SqliteStorage::
+  open()` and from the `Storage::migrate()` trait method, both already
+  idempotent call sites.
+- **No new dependency, despite first appearances:** `rusqlite` doesn't
+  gate FTS5 behind a Cargo feature at all (verified by reading
+  `libsqlite3-sys`'s `build.rs` directly, not assumed) — its `bundled`
+  build unconditionally compiles with `-DSQLITE_ENABLE_FTS5`, so the
+  existing `rusqlite = { features = ["bundled"] }` dependency already
+  covers this.
+- 5 new tests: FTS5 enabled on a fresh database, `_fts_match_query`'s
+  quoting/prefix-matching pure logic (including embedded-quote
+  escaping), case-insensitive + prefix search, all-tokens-required
+  (AND) semantics, and the sync trigger actually re-indexing after a
+  title change (old term stops matching, new term starts).
+
 ## BackupService: connector instantiation, VPN guard, run-mode selection, backup_all batching (closes #46)
 **2026-08-12**
 
