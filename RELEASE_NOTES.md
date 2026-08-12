@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Verify (closes #60)
+**2026-08-12**
+
+- **Added:** `BackupService::verify`, porting the reference's
+  `BackupService.verify` (`src/dbs/core/service.py`) — database
+  integrity via the already-existing `Storage::integrity_check`
+  (#36), plus per-source checks (defaulting to every configured
+  source when no name is given): an unparseable cursor, and any run
+  still `"running"` in the last 50 (an orphan left behind by a crash
+  the reaper hasn't caught yet). Returns a `VerifyReport` (`ok` plus a
+  `VerifyIssue` per finding — `source`/`kind`/`detail`), types that
+  already existed in `models.rs` from an earlier pass.
+- Archive-bundle checksum verification (this issue's other acceptance
+  criterion) was already landed in #59 as `restore::verify_archive` —
+  the reference's own CLI calls it directly rather than through
+  `BackupService`, so this port follows the same split rather than
+  adding a redundant wrapper.
+- `FakeStorage` (test-only, in `service.rs`) gained `integrity`/
+  `unparseable_cursor` fields so verify's failure paths are actually
+  exercisable, and `recent_runs` now includes each run's `id` (needed
+  for the orphan-run detail message).
+- 5 new tests: a clean database with no sources reports `ok`, a
+  corrupted database surfaces one `integrity` issue, an unparseable
+  cursor surfaces one `cursor` issue, a run stuck `"running"` surfaces
+  one `orphan_run` issue, and a name that matches no configured source
+  is silently skipped rather than erroring (matching the reference).
+
 ## Restore (closes #59)
 **2026-08-12**
 

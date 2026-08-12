@@ -49,7 +49,9 @@ use crate::capabilities::Capabilities;
 use crate::config::{Config, SourceConfig, VpnGuard};
 use crate::crypto::{decrypt_file, is_encrypted, resolve_passphrase, DEFAULT_PASSPHRASE_ENV};
 use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
-use crate::models::{Cursor, RestoreReport, RunResult, RunStatus, SourceStatus};
+use crate::models::{
+    Cursor, RestoreReport, RunResult, RunStatus, SourceStatus, VerifyIssue, VerifyReport,
+};
 use crate::netns::in_named_netns;
 use crate::registry::{ConnectorRegistry, RegisteredConnector};
 use crate::restore::{
@@ -827,6 +829,58 @@ impl<'a> BackupService<'a> {
             warnings,
         })
     }
+
+    /// Integrity checks on the database and per-source state. Mirrors
+    /// the reference's `BackupService.verify`.
+    ///
+    /// Archive-bundle checksum verification is a separate entry point
+    /// ([`crate::restore::verify_archive`], #59) — the reference's CLI
+    /// calls it directly for `dbs verify --archive` rather than through
+    /// this method, and this port follows the same split.
+    pub fn verify(&self, name: Option<&str>) -> Result<VerifyReport, DbsError> {
+        let mut issues: Vec<VerifyIssue> = Vec::new();
+
+        let integrity = self.storage.integrity_check()?;
+        if integrity != "ok" {
+            issues.push(VerifyIssue {
+                source: "(database)".to_string(),
+                kind: "integrity".to_string(),
+                detail: integrity,
+            });
+        }
+
+        let names: Vec<String> = match name {
+            Some(n) => vec![n.to_string()],
+            None => self.config.sources.keys().cloned().collect(),
+        };
+        for n in &names {
+            let Some(source) = self.storage.get_source(n)? else {
+                continue;
+            };
+            if let Err(e) = self.storage.load_cursor(source.id) {
+                issues.push(VerifyIssue {
+                    source: n.clone(),
+                    kind: "cursor".to_string(),
+                    detail: format!("unparseable cursor: {e}"),
+                });
+            }
+            for run in self.storage.recent_runs(Some(source.id), 50)? {
+                if run.get("status").and_then(|v| v.as_str()) == Some("running") {
+                    let run_id = run.get("id").and_then(|v| v.as_i64()).unwrap_or_default();
+                    issues.push(VerifyIssue {
+                        source: n.clone(),
+                        kind: "orphan_run".to_string(),
+                        detail: format!("run {run_id} stuck 'running'"),
+                    });
+                }
+            }
+        }
+
+        Ok(VerifyReport {
+            ok: issues.is_empty(),
+            issues,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1226,6 +1280,15 @@ mod tests {
         /// (not `unimplemented!()`) `upsert_items` the restore tests
         /// need to exercise created/updated/unchanged classification.
         items_by_source: HashMap<i64, HashMap<String, String>>,
+        /// `integrity_check`'s canned return value — defaults to `""`
+        /// (an unrealistic sentinel; verify tests set it explicitly to
+        /// `"ok"` or a failure string, since no test but verify's own
+        /// cares what this returns).
+        integrity: String,
+        /// When set, `load_cursor` for this source id errors instead
+        /// of returning normally — how verify tests exercise the
+        /// "unparseable cursor" issue path.
+        unparseable_cursor: Option<i64>,
     }
 
     impl Storage for FakeStorage {
@@ -1333,8 +1396,9 @@ mod tests {
             Ok(rows
                 .into_iter()
                 .take(limit as usize)
-                .map(|(_, r)| {
+                .map(|(id, r)| {
                     let mut row = ItemRow::new();
+                    row.insert("id".to_string(), serde_json::Value::from(*id));
                     row.insert(
                         "status".to_string(),
                         serde_json::Value::from(r.status.clone()),
@@ -1408,6 +1472,9 @@ mod tests {
             &self,
             source_id: i64,
         ) -> Result<(Option<Cursor>, Option<DateTime<Utc>>), DbsError> {
+            if self.unparseable_cursor == Some(source_id) {
+                return Err(DbsError::Storage("cursor is not valid JSON".to_string()));
+            }
             Ok(self
                 .cursors
                 .get(&source_id)
@@ -1464,7 +1531,7 @@ mod tests {
             unimplemented!()
         }
         fn integrity_check(&self) -> Result<String, DbsError> {
-            unimplemented!()
+            Ok(self.integrity.clone())
         }
     }
 
@@ -2028,5 +2095,101 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("no such file"));
+    }
+
+    // -- verify -----------------------------------------------------------
+
+    #[test]
+    fn verify_reports_ok_for_a_clean_database_with_no_sources() {
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.verify(None).unwrap();
+        assert!(report.ok);
+        assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn verify_flags_a_corrupted_database() {
+        let mut storage = FakeStorage {
+            integrity: "database disk image is malformed".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.verify(None).unwrap();
+        assert!(!report.ok);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].source, "(database)");
+        assert_eq!(report.issues[0].kind, "integrity");
+        assert_eq!(report.issues[0].detail, "database disk image is malformed");
+    }
+
+    #[test]
+    fn verify_flags_an_unparseable_cursor() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        storage
+            .upsert_source("a", "raindrop", "raindrop", "{}", 1)
+            .unwrap();
+        storage.unparseable_cursor = Some(1);
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.verify(Some("a")).unwrap();
+        assert!(!report.ok);
+        assert_eq!(report.issues[0].source, "a");
+        assert_eq!(report.issues[0].kind, "cursor");
+    }
+
+    #[test]
+    fn verify_flags_an_orphaned_running_run() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let source = storage
+            .upsert_source("a", "raindrop", "raindrop", "{}", 1)
+            .unwrap();
+        storage
+            .begin_run(source.id, "raindrop", "incremental", None)
+            .unwrap();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.verify(Some("a")).unwrap();
+        assert!(!report.ok);
+        assert_eq!(report.issues[0].source, "a");
+        assert_eq!(report.issues[0].kind, "orphan_run");
+        assert!(report.issues[0].detail.contains("stuck 'running'"));
+    }
+
+    #[test]
+    fn verify_skips_a_name_that_does_not_match_any_source() {
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.verify(Some("missing")).unwrap();
+        assert!(report.ok);
     }
 }
