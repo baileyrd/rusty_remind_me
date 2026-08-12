@@ -8,6 +8,43 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Export base: real ExportQuery (closes #50)
+**2026-08-12**
+
+- **Replaced the placeholder `ExportQuery`** in
+  `crates/dbs-core/src/storage/mod.rs` with the reference's real type
+  from `src/dbs/export/base.py` in baileyrd/Daily-Backup-System (pinned
+  `@6cc6491`): `sources: Option<Vec<String>>` (by source *name*, not the
+  placeholder's single internal `source_id`), `item_types:
+  Option<Vec<String>>` (was a single `item_kind`), `since`/`until`
+  (against `item_created_at`), the new `since_updated`/`until_updated`
+  pair (against `item_updated_at` — the connector-reported upstream edit
+  time), `include_deleted`, `include_raw`, `include_revisions`, and
+  `wiki_grouping`. Every field ANDs together, matching the reference's
+  explicit no-OR-semantics documentation.
+- **`Storage`'s SQLite implementation updated to match:**
+  `build_filter` now filters by `s.name IN (...)` (a join against
+  `sources`, not a bare `source_id` equality) and `i.item_kind IN
+  (...)` for multi-value filters, plus new `item_updated_at`
+  range clauses for `since_updated`/`until_updated`. `iter_items`/
+  `iter_revisions` now honor `include_raw` for real — previously always
+  included the raw payload regardless of the query (noted as a known
+  simplification in #11's original module doc-comment); `row_to_item`/
+  `row_to_revision` became `fn(bool) -> impl Fn(&Row) -> ...` so the
+  toggle threads through per-call rather than being baked into the row
+  mapper.
+- **Slightly exceeds this issue's own acceptance checklist, on purpose:**
+  the checklist named `sources`/`item_types`/the four date fields/
+  `include_raw`/`include_deleted`; `include_revisions` and
+  `wiki_grouping` are also part of the reference's real `ExportQuery`
+  dataclass and cost nothing extra to include now versus as a future
+  correction PR, so they're ported too (unused by storage — read only by
+  the archive/wiki exporters, not filed yet).
+- 5 new tests: multi-source-name filtering (including the "empty list
+  means every source" falsy-check parity with the reference), item-type
+  filtering, `since_updated`/`until_updated` range filtering, and
+  `include_raw` toggling for both `iter_items` and `iter_revisions`.
+
 ## Export profile: ExportProfile/ExportProfileOverride types (closes #49)
 **2026-08-12**
 

@@ -79,13 +79,19 @@ const TAG_FILTER: &str =
 fn build_filter(query: &ExportQuery) -> (String, Vec<SqlValue>) {
     let mut clauses = vec!["1=1".to_string()];
     let mut params: Vec<SqlValue> = Vec::new();
-    if let Some(source_id) = query.source_id {
-        clauses.push("i.source_id = ?".to_string());
-        params.push(SqlValue::Integer(source_id));
+    if let Some(sources) = &query.sources {
+        if !sources.is_empty() {
+            let placeholders = vec!["?"; sources.len()].join(",");
+            clauses.push(format!("s.name IN ({placeholders})"));
+            params.extend(sources.iter().cloned().map(SqlValue::Text));
+        }
     }
-    if let Some(kind) = &query.item_kind {
-        clauses.push("i.item_kind = ?".to_string());
-        params.push(SqlValue::Text(kind.clone()));
+    if let Some(item_types) = &query.item_types {
+        if !item_types.is_empty() {
+            let placeholders = vec!["?"; item_types.len()].join(",");
+            clauses.push(format!("i.item_kind IN ({placeholders})"));
+            params.extend(item_types.iter().cloned().map(SqlValue::Text));
+        }
     }
     if let Some(since) = query.since {
         clauses.push("i.item_created_at >= ?".to_string());
@@ -94,6 +100,14 @@ fn build_filter(query: &ExportQuery) -> (String, Vec<SqlValue>) {
     if let Some(until) = query.until {
         clauses.push("i.item_created_at <= ?".to_string());
         params.push(SqlValue::Text(iso_z(until)));
+    }
+    if let Some(since_updated) = query.since_updated {
+        clauses.push("i.item_updated_at >= ?".to_string());
+        params.push(SqlValue::Text(iso_z(since_updated)));
+    }
+    if let Some(until_updated) = query.until_updated {
+        clauses.push("i.item_updated_at <= ?".to_string());
+        params.push(SqlValue::Text(iso_z(until_updated)));
     }
     if !query.include_deleted {
         clauses.push("i.deleted = 0".to_string());
@@ -766,7 +780,10 @@ impl Storage for SqliteStorage {
             .prepare(&sql)
             .map_err(|e| storage_err("failed to prepare iter_items", e))?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(params), row_to_item)
+            .query_map(
+                rusqlite::params_from_iter(params),
+                row_to_item(query.include_raw),
+            )
             .map_err(|e| storage_err("failed to run iter_items", e))?;
         let items: Vec<ItemRow> = rows
             .collect::<Result<Vec<_>, _>>()
@@ -793,7 +810,10 @@ impl Storage for SqliteStorage {
             .prepare(&sql)
             .map_err(|e| storage_err("failed to prepare iter_revisions", e))?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(params), row_to_revision)
+            .query_map(
+                rusqlite::params_from_iter(params),
+                row_to_revision(query.include_raw),
+            )
             .map_err(|e| storage_err("failed to run iter_revisions", e))?;
         let items: Vec<ItemRow> = rows
             .collect::<Result<Vec<_>, _>>()
@@ -902,7 +922,7 @@ impl Storage for SqliteStorage {
                 "SELECT i.*, s.name AS source_name, s.type AS source_type \
                  FROM items i JOIN sources s ON s.id = i.source_id WHERE i.id=?1",
                 params![item_id],
-                row_to_item,
+                row_to_item(true),
             )
             .optional()
             .map_err(|e| storage_err("failed to read item", e))?;
@@ -1348,118 +1368,128 @@ fn opt_string(v: Option<String>) -> Value {
     }
 }
 
-/// Mirrors the reference's `_row_to_item` — always includes `raw` (this
-/// port's `ExportQuery` has no `include_raw` toggle; see #11).
-fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
-    let mut out = ItemRow::new();
-    out.insert(
-        "source".to_string(),
-        Value::from(row.get::<_, String>("source_name")?),
-    );
-    out.insert(
-        "type".to_string(),
-        Value::from(row.get::<_, String>("source_type")?),
-    );
-    out.insert(
-        "external_id".to_string(),
-        Value::from(row.get::<_, String>("external_id")?),
-    );
-    out.insert(
-        "item_kind".to_string(),
-        Value::from(row.get::<_, String>("item_kind")?),
-    );
-    out.insert("title".to_string(), opt_string(row.get("title")?));
-    out.insert("url".to_string(), opt_string(row.get("url")?));
-    out.insert("body".to_string(), opt_string(row.get("body")?));
-    let tags_json: String = row.get("tags_json")?;
-    out.insert(
-        "tags".to_string(),
-        serde_json::from_str(&tags_json).unwrap_or(Value::Array(Vec::new())),
-    );
-    out.insert(
-        "created_at".to_string(),
-        opt_string(row.get("item_created_at")?),
-    );
-    out.insert(
-        "updated_at".to_string(),
-        opt_string(row.get("item_updated_at")?),
-    );
-    out.insert(
-        "content_hash".to_string(),
-        Value::from(row.get::<_, String>("content_hash")?),
-    );
-    out.insert(
-        "revision".to_string(),
-        Value::from(row.get::<_, i64>("revision")?),
-    );
-    out.insert(
-        "first_seen_at".to_string(),
-        Value::from(row.get::<_, String>("first_seen_at")?),
-    );
-    out.insert(
-        "last_seen_at".to_string(),
-        Value::from(row.get::<_, String>("last_seen_at")?),
-    );
-    out.insert(
-        "last_changed_at".to_string(),
-        Value::from(row.get::<_, String>("last_changed_at")?),
-    );
-    out.insert(
-        "deleted".to_string(),
-        Value::from(row.get::<_, i64>("deleted")? != 0),
-    );
-    out.insert("deleted_at".to_string(), opt_string(row.get("deleted_at")?));
-    let raw_json: String = row.get("raw_json")?;
-    out.insert(
-        "raw".to_string(),
-        serde_json::from_str(&raw_json).unwrap_or(Value::Null),
-    );
-    Ok(out)
+/// Mirrors the reference's `_row_to_item` — `include_raw` matches
+/// `ExportQuery::include_raw` (an export run with `--no-raw` omits the
+/// `raw` payload; `get_item`, which has no query, always passes `true`).
+fn row_to_item(include_raw: bool) -> impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    move |row: &rusqlite::Row<'_>| {
+        let mut out = ItemRow::new();
+        out.insert(
+            "source".to_string(),
+            Value::from(row.get::<_, String>("source_name")?),
+        );
+        out.insert(
+            "type".to_string(),
+            Value::from(row.get::<_, String>("source_type")?),
+        );
+        out.insert(
+            "external_id".to_string(),
+            Value::from(row.get::<_, String>("external_id")?),
+        );
+        out.insert(
+            "item_kind".to_string(),
+            Value::from(row.get::<_, String>("item_kind")?),
+        );
+        out.insert("title".to_string(), opt_string(row.get("title")?));
+        out.insert("url".to_string(), opt_string(row.get("url")?));
+        out.insert("body".to_string(), opt_string(row.get("body")?));
+        let tags_json: String = row.get("tags_json")?;
+        out.insert(
+            "tags".to_string(),
+            serde_json::from_str(&tags_json).unwrap_or(Value::Array(Vec::new())),
+        );
+        out.insert(
+            "created_at".to_string(),
+            opt_string(row.get("item_created_at")?),
+        );
+        out.insert(
+            "updated_at".to_string(),
+            opt_string(row.get("item_updated_at")?),
+        );
+        out.insert(
+            "content_hash".to_string(),
+            Value::from(row.get::<_, String>("content_hash")?),
+        );
+        out.insert(
+            "revision".to_string(),
+            Value::from(row.get::<_, i64>("revision")?),
+        );
+        out.insert(
+            "first_seen_at".to_string(),
+            Value::from(row.get::<_, String>("first_seen_at")?),
+        );
+        out.insert(
+            "last_seen_at".to_string(),
+            Value::from(row.get::<_, String>("last_seen_at")?),
+        );
+        out.insert(
+            "last_changed_at".to_string(),
+            Value::from(row.get::<_, String>("last_changed_at")?),
+        );
+        out.insert(
+            "deleted".to_string(),
+            Value::from(row.get::<_, i64>("deleted")? != 0),
+        );
+        out.insert("deleted_at".to_string(), opt_string(row.get("deleted_at")?));
+        if include_raw {
+            let raw_json: String = row.get("raw_json")?;
+            out.insert(
+                "raw".to_string(),
+                serde_json::from_str(&raw_json).unwrap_or(Value::Null),
+            );
+        }
+        Ok(out)
+    }
 }
 
 /// Mirrors the reference's `_row_to_item` revision-row shape used by
 /// `iter_revisions` — a lighter projection than `row_to_item`.
-fn row_to_revision(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
-    let mut out = ItemRow::new();
-    out.insert(
-        "source".to_string(),
-        Value::from(row.get::<_, String>("source_name")?),
-    );
-    out.insert(
-        "type".to_string(),
-        Value::from(row.get::<_, String>("source_type")?),
-    );
-    out.insert(
-        "external_id".to_string(),
-        Value::from(row.get::<_, String>("external_id")?),
-    );
-    out.insert(
-        "item_kind".to_string(),
-        Value::from(row.get::<_, String>("item_kind")?),
-    );
-    out.insert(
-        "revision".to_string(),
-        Value::from(row.get::<_, i64>("revision")?),
-    );
-    out.insert(
-        "content_hash".to_string(),
-        Value::from(row.get::<_, String>("content_hash")?),
-    );
-    out.insert(
-        "change_kind".to_string(),
-        Value::from(row.get::<_, String>("change_kind")?),
-    );
-    out.insert(
-        "captured_at".to_string(),
-        Value::from(row.get::<_, String>("captured_at")?),
-    );
-    out.insert("title".to_string(), opt_string(row.get("title")?));
-    let raw_json: String = row.get("raw_json")?;
-    out.insert(
-        "raw".to_string(),
-        serde_json::from_str(&raw_json).unwrap_or(Value::Null),
-    );
-    Ok(out)
+/// `include_raw` matches `ExportQuery::include_raw`.
+fn row_to_revision(include_raw: bool) -> impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
+    move |row: &rusqlite::Row<'_>| {
+        let mut out = ItemRow::new();
+        out.insert(
+            "source".to_string(),
+            Value::from(row.get::<_, String>("source_name")?),
+        );
+        out.insert(
+            "type".to_string(),
+            Value::from(row.get::<_, String>("source_type")?),
+        );
+        out.insert(
+            "external_id".to_string(),
+            Value::from(row.get::<_, String>("external_id")?),
+        );
+        out.insert(
+            "item_kind".to_string(),
+            Value::from(row.get::<_, String>("item_kind")?),
+        );
+        out.insert(
+            "revision".to_string(),
+            Value::from(row.get::<_, i64>("revision")?),
+        );
+        out.insert(
+            "content_hash".to_string(),
+            Value::from(row.get::<_, String>("content_hash")?),
+        );
+        out.insert(
+            "change_kind".to_string(),
+            Value::from(row.get::<_, String>("change_kind")?),
+        );
+        out.insert(
+            "captured_at".to_string(),
+            Value::from(row.get::<_, String>("captured_at")?),
+        );
+        out.insert("title".to_string(), opt_string(row.get("title")?));
+        if include_raw {
+            let raw_json: String = row.get("raw_json")?;
+            out.insert(
+                "raw".to_string(),
+                serde_json::from_str(&raw_json).unwrap_or(Value::Null),
+            );
+        }
+        Ok(out)
+    }
 }
 
 /// Mirrors the reference's `iter_media_blobs` row shape. `data` is
@@ -2426,12 +2456,12 @@ mod tests {
         assert!(rows.iter().all(|r| r.contains_key("raw")));
 
         let scoped = ExportQuery {
-            source_id: Some(source.id),
+            sources: Some(vec![source.name.clone()]),
             ..Default::default()
         };
         assert_eq!(storage.iter_items(&scoped).unwrap().count(), 2);
         let none = ExportQuery {
-            source_id: Some(source.id + 1),
+            sources: Some(vec!["nonexistent".to_string()]),
             ..Default::default()
         };
         assert_eq!(storage.iter_items(&none).unwrap().count(), 0);
@@ -2454,6 +2484,133 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(storage.iter_items(&with_deleted).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn iter_items_filters_by_multiple_source_names() {
+        let mut storage = open();
+        let a = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_a = storage.begin_run(a.id, "p", "incremental", None).unwrap();
+        storage
+            .upsert_items(a.id, run_a, &[prepared("e1", "h1")], false, 0)
+            .unwrap();
+        let b = storage.upsert_source("b", "t", "p", "{}", 1).unwrap();
+        let run_b = storage.begin_run(b.id, "p", "incremental", None).unwrap();
+        storage
+            .upsert_items(b.id, run_b, &[prepared("e2", "h2")], false, 0)
+            .unwrap();
+        storage.upsert_source("c", "t", "p", "{}", 1).unwrap();
+
+        let both = ExportQuery {
+            sources: Some(vec!["a".to_string(), "b".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(storage.iter_items(&both).unwrap().count(), 2);
+
+        let just_a = ExportQuery {
+            sources: Some(vec!["a".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(storage.iter_items(&just_a).unwrap().count(), 1);
+
+        let none = ExportQuery {
+            sources: Some(vec![]),
+            ..Default::default()
+        };
+        assert_eq!(
+            storage.iter_items(&none).unwrap().count(),
+            2,
+            "an empty (not None) sources list means every source, same as the reference's falsy-list check"
+        );
+    }
+
+    #[test]
+    fn iter_items_filters_by_item_types() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut post = prepared("e1", "h1");
+        post.item_kind = "post".to_string();
+        let mut comment = prepared("e2", "h2");
+        comment.item_kind = "comment".to_string();
+        storage
+            .upsert_items(source.id, run_id, &[post, comment], false, 0)
+            .unwrap();
+
+        let posts_only = ExportQuery {
+            item_types: Some(vec!["post".to_string()]),
+            ..Default::default()
+        };
+        let rows: Vec<ItemRow> = storage.iter_items(&posts_only).unwrap().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["item_kind"], Value::from("post"));
+    }
+
+    #[test]
+    fn iter_items_filters_by_since_updated_and_until_updated() {
+        let mut storage = open();
+        let source = storage.upsert_source("a", "t", "p", "{}", 1).unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let mut early = prepared("e1", "h1");
+        early.item_updated_at = Some("2026-01-01T00:00:00Z".to_string());
+        let mut late = prepared("e2", "h2");
+        late.item_updated_at = Some("2026-06-01T00:00:00Z".to_string());
+        storage
+            .upsert_items(source.id, run_id, &[early, late], false, 0)
+            .unwrap();
+
+        let since = ExportQuery {
+            since_updated: parse_iso(Some("2026-03-01T00:00:00Z")),
+            ..Default::default()
+        };
+        let rows: Vec<ItemRow> = storage.iter_items(&since).unwrap().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["external_id"], Value::from("e2"));
+
+        let until = ExportQuery {
+            until_updated: parse_iso(Some("2026-03-01T00:00:00Z")),
+            ..Default::default()
+        };
+        let rows: Vec<ItemRow> = storage.iter_items(&until).unwrap().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["external_id"], Value::from("e1"));
+    }
+
+    #[test]
+    fn iter_items_respects_the_include_raw_toggle() {
+        let (storage, _, _) = seeded_storage();
+        let with_raw = ExportQuery::default();
+        assert!(with_raw.include_raw);
+        let rows: Vec<ItemRow> = storage.iter_items(&with_raw).unwrap().collect();
+        assert!(rows[0].contains_key("raw"));
+
+        let without_raw = ExportQuery {
+            include_raw: false,
+            ..Default::default()
+        };
+        let rows: Vec<ItemRow> = storage.iter_items(&without_raw).unwrap().collect();
+        assert!(!rows[0].contains_key("raw"));
+    }
+
+    #[test]
+    fn iter_revisions_respects_the_include_raw_toggle() {
+        let (storage, _, _) = seeded_storage();
+        let rows: Vec<ItemRow> = storage
+            .iter_revisions(&ExportQuery::default())
+            .unwrap()
+            .collect();
+        assert!(rows[0].contains_key("raw"));
+
+        let without_raw = ExportQuery {
+            include_raw: false,
+            ..Default::default()
+        };
+        let rows: Vec<ItemRow> = storage.iter_revisions(&without_raw).unwrap().collect();
+        assert!(!rows[0].contains_key("raw"));
     }
 
     #[test]
