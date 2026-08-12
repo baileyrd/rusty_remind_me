@@ -94,10 +94,17 @@ jobs:
       - name: cargo clippy --features pdf
         run: cargo clippy -p remind_me_core --features pdf --all-targets --locked -- -D warnings
 
-      # The AWS SDK is a large tree, so this is a build+clippy check rather
-      # than a second full test run — the plaintext gate that actually matters
-      # is a pure function of the environment and is covered unconditionally
-      # by the default-feature test run above.
+      # The AWS SDK is a large tree, but `put_object`'s request-construction
+      # logic (bucket/key, the custom-endpoint override, region, and the
+      # SDK-error-to-string mapping) is exercised here too, not just by
+      # clippy: none of it needs a network call or a live S3-compatible
+      # server, only a client-side `SdkError` and the pure `plan_put_object`
+      # helper. The plaintext gate that actually matters most is a pure
+      # function of the environment and is covered unconditionally by the
+      # default-feature test run above regardless of this feature.
+      - name: cargo test --features cloud-backup
+        run: cargo test -p remind_me_core --features cloud-backup --locked
+
       - name: cargo clippy --features cloud-backup
         run: cargo clippy -p remind_me_core --features cloud-backup --all-targets --locked -- -D warnings
 
