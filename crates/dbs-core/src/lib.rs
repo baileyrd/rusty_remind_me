@@ -6,9 +6,11 @@
 //! full capability inventory and round-1 scope decisions.
 
 pub mod capabilities;
+pub mod errors;
 pub mod models;
 
 pub use capabilities::{AuthCapture, Capabilities, ItemKind};
+pub use errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 pub use models::{
     BackupItem, Checkpoint, ConnectorInfo, Cursor, DoctorCheck, FetchEvent, MaintenanceReport,
     MediaRef, ProgressEvent, ProgressPhase, ReconcileMarker, RestoreReport, RunResult, RunStatus,
