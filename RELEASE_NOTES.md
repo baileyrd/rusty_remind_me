@@ -8,6 +8,65 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## BackupService: connector instantiation, VPN guard, run-mode selection, backup_all batching (closes #46)
+**2026-08-12**
+
+- **Added:** `dbs-core::service::BackupService`, mirroring
+  `src/dbs/core/service.py` in baileyrd/Daily-Backup-System (pinned
+  `@6cc6491`)'s `backup_source`/`backup_all`/`status`/`history` — the
+  rest of `BackupService` beyond #21's narrow reap-once slice. Covers:
+  connector instantiation via the plugin registry (#45), VPN guard checks
+  (`vpn_guard_skip`, using the existing `VpnGuard` enum and
+  `netns::in_named_netns`), run-mode selection (`choose_mode`, matching
+  the reference's force-full/force-reconcile/first-run/explicit-mode/
+  auto-reconcile-every-N-runs rules exactly), due-date scheduling helpers
+  (`next_due_at`/`is_due`, same slack-window table as the reference:
+  hourly→50min, daily→20h, weekly→6d), `backup_source`'s full run
+  bookkeeping (source registration, cursor/run-count load, lock
+  acquire/release, `begin_run`/`finish_run`), sequential `backup_all`
+  batching with `continue_on_error`, and `status`/`history` rendering
+  from storage.
+- **New seam, not in the reference — the `ConnectorRunner` trait.** The
+  reference's `backup_source` hands off to `self.engine.run_source(rc,
+  ctx, ...)`, which drives the connector's actual fetch loop. That
+  bridge (ADR-0001 steps 2-3: writing a `RunContext`, reading a
+  `FetchEvent` stream back) has no issue yet — #45 only implemented the
+  handshake half. Rather than block this issue's real scope (connector
+  instantiation, VPN guard, batching) on that follow-up landing first,
+  `ConnectorRunner` is the injected seam the reference's
+  constructor-injected `engine` plays: `BackupService` does every
+  preflight step for real and calls out to a `&dyn ConnectorRunner` for
+  the actual fetch. `UnimplementedRunner` is the production stand-in
+  until a real one exists (fails clearly, not silently); tests use a
+  scripted fake (`ScriptedRunner`).
+- **A deliberate improvement over the reference, stated plainly:** an
+  uncaught exception from the reference's `engine.run_source` skips
+  `finish_run` entirely, leaving that row `running` until the next reap
+  — a latent rough edge. `backup_source` here always calls `finish_run`
+  exactly once, translating a `ConnectorRunner` error into a `Failed`
+  result instead.
+- `ConnectorRegistry::from_resolved` (new, in `registry.rs`): builds a
+  registry directly from already-resolved connectors, bypassing spawn/
+  handshake — used by `BackupService`'s tests, and generally useful for
+  any caller that already has `RegisteredConnector` values from
+  elsewhere.
+- `RunResult::skipped`/`RunResult::failed` (new, in `models.rs`):
+  small constructors for the early-exit paths (disabled source, VPN
+  skip, dry-run) and `backup_all`'s `continue_on_error` isolation.
+  `RunStatus` now derives `Default` (`Failed`, via the repo's usual
+  `#[default]`-attribute pattern) so `ConnectorRunOutcome` can too.
+- 35 new tests: pure-function coverage for `choose_mode` (every branch:
+  force-full, incremental-incapable, force-reconcile-needs-enumeration,
+  first-run, explicit-mode-with-reconcile-downgrade, auto-every-N-runs
+  including the "0 means unset" rule) and `vpn_guard_skip`/`next_due_at`/
+  `is_due`; integration tests against a fuller in-memory `Storage` double
+  (`FakeStorage`) covering unknown source, disabled source, VPN skip,
+  unregistered connector type, dry-run, the happy path (source
+  registered, run finished, history recorded), a `ConnectorRunner` error
+  becoming a `Failed` result, source-locked detection, `backup_all`
+  batching/`continue_on_error` (both directions), and `status`/`history`
+  rendering before and after a run.
+
 ## Plugin registry: subprocess discovery, contract validation, collision resolution (closes #45)
 **2026-08-12**
 

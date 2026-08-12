@@ -127,6 +127,24 @@ impl ConnectorRegistry {
         Self::default()
     }
 
+    /// Builds a registry directly from already-resolved connectors,
+    /// bypassing spawn/handshake/collision-resolution — for tests (e.g.
+    /// `BackupService`'s, #46) and any caller that already has
+    /// [`RegisteredConnector`] values from another source. If two
+    /// entries share a `type`, the later one in `connectors` wins the
+    /// `by_type` lookup; every entry is always reachable by its own
+    /// `plugin_id` regardless.
+    pub fn from_resolved(connectors: impl IntoIterator<Item = RegisteredConnector>) -> Self {
+        let mut registry = Self::new();
+        for rc in connectors {
+            registry
+                .by_plugin_id
+                .insert(rc.plugin_id.clone(), rc.clone());
+            registry.by_type.insert(rc.type_.clone(), rc);
+        }
+        registry
+    }
+
     /// Spawns and handshakes with every candidate (each given up to
     /// `timeout` to write its handshake line), validates contracts, then
     /// resolves collisions. `override_map` maps `type -> plugin_id` to
@@ -572,5 +590,14 @@ mod tests {
         assert!(report.loaded.is_empty());
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].reason.contains("failed to spawn"));
+    }
+
+    #[test]
+    fn from_resolved_is_reachable_by_both_type_and_plugin_id() {
+        let entry = rc("rusty_dbs", "rusty_dbs:raindrop", true);
+        let registry = ConnectorRegistry::from_resolved([entry]);
+        assert!(registry.get("raindrop").is_some());
+        assert!(registry.get("rusty_dbs:raindrop").is_some());
+        assert_eq!(registry.all().len(), 1);
     }
 }
