@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-12 — thiserror bumped to 2.x workspace-wide, resolving the duplicate-major dependency (#280)
+
+### Fixed
+- **The root `Cargo.toml`'s `[workspace.dependencies]` pinned `thiserror = "1.0"`**, while `rmcp = "3.0.1"` (pulled in by `remind_me_remote` → `remind_me_cli`) requires `thiserror` 2.x, so `Cargo.lock` resolved and built both `thiserror v1.0.69` and `thiserror v2.0.19` for the `rusty-remind-me` binary — two independently-versioned copies of the same derive machinery, plus doubled compile time for that crate's dependency graph. Bumped the workspace pin to `thiserror = "2.0"` (resolving to 2.0.19, the version `rmcp 3.0.1` itself already pulls). The two `#[derive(thiserror::Error)]` enums in the workspace (`remind_me_core::pid::PidError`, `remind_me_core::backup::BackupError`) needed no source changes — both already used the `#[error(transparent)] ... #[from]` and implicit-`source`-field-name shapes that carry over unchanged from thiserror 1.x to 2.x, so the whole migration was a one-line version bump plus a `Cargo.lock` update. `cargo tree -i thiserror` still shows a `thiserror v1.0.69` entry, but it is unreachable from this workspace's own crates or from `rmcp` — it comes solely from `dirs` → `dirs-sys` → `redox_users`, a dependency gated to `cfg(target_os = "redox")` that never compiles on this workspace's actual build targets (confirmed: no `thiserror v1.0.69` compile step appears in a real `cargo build`). That entry is unrelated to #280 and pre-existed the fix.
+
+### Provenance
+
+Filed as #280; fixed by bumping the workspace pin and verifying with `cargo tree -i thiserror`, `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets`, and `cargo fmt --all --check`, all clean.
+
 ## 2026-08-11 — remind_me_core now has local test coverage for metrics/import_paths/api_keys (#284)
 
 ### Fixed
