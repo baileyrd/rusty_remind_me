@@ -202,7 +202,7 @@ fn add_memory_anchors_when_configured() {
     let content = format!("don't refactor {} yet", fixture.file.display());
     add(&conn, &content);
 
-    let candidates = stale_candidates(&conn, 20).unwrap();
+    let candidates = stale_candidates(&conn, 20).unwrap().candidates;
     // Nothing has changed yet, so nothing is stale -- but this proves the
     // anchor was recorded at all, since an unanchored memory could never
     // appear here regardless of file state.
@@ -255,7 +255,7 @@ fn modifying_the_file_surfaces_the_memory_as_modified() {
     // already; changing size makes the outcome timing-independent.
     std::fs::write(&fixture.file, "fn login() {}\nfn logout() {}\n").unwrap();
 
-    let candidates = stale_candidates(&conn, 20).unwrap();
+    let candidates = stale_candidates(&conn, 20).unwrap().candidates;
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].memory_id, memory_id);
     assert_eq!(candidates[0].stale_refs.len(), 1);
@@ -275,7 +275,7 @@ fn deleting_the_file_surfaces_the_memory_as_deleted() {
 
     std::fs::remove_file(&fixture.file).unwrap();
 
-    let candidates = stale_candidates(&conn, 20).unwrap();
+    let candidates = stale_candidates(&conn, 20).unwrap().candidates;
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].stale_refs[0].reason, StaleReason::Deleted);
 }
@@ -301,7 +301,7 @@ fn a_stale_memory_is_flagged_not_touched() {
 
     std::fs::remove_file(&fixture.file).unwrap();
 
-    let before = stale_candidates(&conn, 20).unwrap();
+    let before = stale_candidates(&conn, 20).unwrap().candidates;
     assert_eq!(before.len(), 1);
 
     // The core design decision: reporting a stale anchor must not supersede,
@@ -341,7 +341,7 @@ fn a_stale_memory_is_flagged_not_touched() {
 
     // Calling it again, unchanged, must report the same thing -- read-only
     // means idempotent by construction, not by luck.
-    let after = stale_candidates(&conn, 20).unwrap();
+    let after = stale_candidates(&conn, 20).unwrap().candidates;
     assert_eq!(before.len(), after.len());
 }
 
@@ -359,8 +359,33 @@ fn limit_bounds_candidates_not_paths_checked() {
     }
     std::fs::remove_file(&fixture.file).unwrap();
 
-    let capped = stale_candidates(&conn, 2).unwrap();
+    let capped = stale_candidates(&conn, 2).unwrap().candidates;
     assert_eq!(capped.len(), 2);
+}
+
+#[test]
+fn total_candidates_reports_the_full_backlog_behind_a_capped_page() {
+    // #283: total_candidates must be the real, uncapped count -- not just
+    // however many happened to fit under `limit` -- so a caller can tell the
+    // returned page is partial rather than the whole backlog.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("total_candidates");
+    fixture.set_env();
+    let _env = EnvGuard;
+
+    let db = db("total_candidates");
+    let conn = db.conn();
+    for i in 0..5 {
+        add(&conn, &format!("memo {i}: see {}", fixture.file.display()));
+    }
+    std::fs::remove_file(&fixture.file).unwrap();
+
+    let result = stale_candidates(&conn, 2).unwrap();
+    assert_eq!(result.candidates.len(), 2, "page stays capped at limit");
+    assert_eq!(
+        result.total_candidates, 5,
+        "total_candidates must count the whole backlog, not just the page"
+    );
 }
 
 #[test]
@@ -379,7 +404,7 @@ fn a_zero_limit_is_clamped_to_a_floor_of_one() {
     // would silently return no candidates even though a stale one exists,
     // which reads exactly like "nothing is stale" to anyone who doesn't
     // already know the limit was zero.
-    let candidates = stale_candidates(&conn, 0).unwrap();
+    let candidates = stale_candidates(&conn, 0).unwrap().candidates;
     assert_eq!(candidates.len(), 1);
 }
 
@@ -397,7 +422,7 @@ fn an_oversized_limit_is_clamped_to_a_ceiling_of_one_hundred() {
     }
     std::fs::remove_file(&fixture.file).unwrap();
 
-    let candidates = stale_candidates(&conn, 10_000).unwrap();
+    let candidates = stale_candidates(&conn, 10_000).unwrap().candidates;
     assert_eq!(candidates.len(), 100);
 }
 
@@ -435,7 +460,7 @@ fn a_hand_written_code_ref_outside_the_roots_is_never_stat_against() {
     )
     .unwrap();
 
-    let candidates = stale_candidates(&conn, 20).unwrap();
+    let candidates = stale_candidates(&conn, 20).unwrap().candidates;
     assert!(
         candidates.is_empty(),
         "a path outside the configured roots must never be stat'd, \
@@ -470,7 +495,7 @@ fn a_sensitive_memory_never_appears_in_stale_candidates() {
     .unwrap();
     std::fs::remove_file(&fixture.file).unwrap();
 
-    let candidates = stale_candidates(&conn, 20).unwrap();
+    let candidates = stale_candidates(&conn, 20).unwrap().candidates;
     assert!(
         candidates.is_empty(),
         "a sensitive memory's stale anchor must not surface through this ambient read: {candidates:?}"

@@ -892,6 +892,17 @@ pub struct PromotionCandidate {
     pub grouped_by: Option<String>,
 }
 
+/// Inclusive bounds and default on a `remind_me_promotion_candidates` limit.
+///
+/// Previously two unlinked JSON/Rust literals (issue #283): the MCP schema
+/// hardcoded `1`/`100` directly and `promotion::promotion_candidates` clamped
+/// with its own `1`/`100` literal, so the two could drift without either side
+/// noticing. Named here and referenced from both, matching
+/// `CONTRADICTION_LIMIT_MIN`/`MAX` and `RECALIBRATE_LIMIT_MIN`/`MAX`.
+pub const PROMOTION_LIMIT_MIN: usize = 1;
+pub const PROMOTION_LIMIT_MAX: usize = 100;
+pub const PROMOTION_LIMIT_DEFAULT: usize = 20;
+
 /// Accept a distillation of some sources into the rung above them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromoteInput {
@@ -2034,3 +2045,17 @@ impl Default for ListRemindersInput {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stale code-reference candidates (#260, limit constants added for #283)
+// ---------------------------------------------------------------------------
+
+/// Inclusive bounds and default on a `remind_me_stale_candidates` limit.
+///
+/// `code_refs::stale_candidates` lives outside this module (it owns its own
+/// `StaleCandidate`/`StaleRef` types), but its limit bound is named here
+/// anyway, matching where every other MCP-surface limit constant lives —
+/// `code_refs.rs` imports these rather than keeping a second copy.
+pub const STALE_CANDIDATES_LIMIT_MIN: usize = 1;
+pub const STALE_CANDIDATES_LIMIT_MAX: usize = 100;
+pub const STALE_CANDIDATES_LIMIT_DEFAULT: usize = 20;
