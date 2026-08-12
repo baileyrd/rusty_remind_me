@@ -6,15 +6,14 @@
 //! [`ExportQuery`](crate::storage::ExportQuery) filter object is shared
 //! by the CLI today and a future web tier.
 //!
-//! **First exporter issue, so the shared base types land here too.**
-//! `ExportResult`/`ExportSource`/`Exporter`/`get_exporter` are part of
-//! `export/base.py`, not `export/json.py` — #50 (the real `ExportQuery`)
-//! deliberately left them out as "picked up by the individual exporter
-//! issues." This issue (#51, the JSON exporter) is the first of those,
-//! so it's where the shared plumbing actually lands; every subsequent
-//! exporter issue (ndjson #53, csv #54, markdown #55, obsidian #56, wiki
-//! #57, archive #58) adds its own module plus one more arm to
-//! [`get_exporter`], same pattern as the reference's `EXPORTERS` dict.
+//! **First exporter issue (#51, JSON) landed the shared base types**
+//! (`ExportResult`/`ExportSource`/`Exporter`/`get_exporter`) that
+//! `export/base.py` defines and #50 (the real `ExportQuery`)
+//! deliberately deferred as "picked up by the individual exporter
+//! issues." Every subsequent exporter issue (ndjson #53, csv #54,
+//! markdown #55, obsidian #56, wiki #57, archive #58) adds its own
+//! module plus one more arm to [`get_exporter`], same pattern as the
+//! reference's `EXPORTERS` dict.
 //!
 //! Exporters stream from a storage iterator (so large datasets never
 //! load fully into memory); writing via a temp file + atomic replace so
@@ -24,6 +23,7 @@
 //! trait's.
 
 mod json;
+mod ndjson;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -34,6 +34,7 @@ use crate::errors::DbsError;
 use crate::storage::{ExportQuery, ItemRow};
 
 pub use json::JsonExporter;
+pub use ndjson::NdjsonExporter;
 
 /// Summary of a completed export.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -85,6 +86,7 @@ pub trait Exporter {
 pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
     match format {
         "json" => Ok(Box::new(JsonExporter)),
+        "ndjson" => Ok(Box::new(NdjsonExporter)),
         other => Err(DbsError::Config(format!(
             "unknown export format {other:?}. Available: {:?}",
             available_formats()
@@ -95,7 +97,7 @@ pub fn get_exporter(format: &str) -> Result<Box<dyn Exporter>, DbsError> {
 /// Every currently-registered format key, sorted — grows as each
 /// exporter issue above lands.
 pub fn available_formats() -> Vec<&'static str> {
-    vec!["json"]
+    vec!["json", "ndjson"]
 }
 
 #[cfg(test)]
@@ -117,7 +119,13 @@ mod tests {
     }
 
     #[test]
-    fn available_formats_lists_json() {
-        assert_eq!(available_formats(), vec!["json"]);
+    fn get_exporter_finds_ndjson() {
+        let exporter = get_exporter("ndjson").unwrap();
+        assert_eq!(exporter.format(), "ndjson");
+    }
+
+    #[test]
+    fn available_formats_lists_every_registered_format() {
+        assert_eq!(available_formats(), vec!["json", "ndjson"]);
     }
 }

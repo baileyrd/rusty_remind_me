@@ -8,6 +8,18 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## NDJSON exporter (closes #53)
+**2026-08-12**
+
+- **Added:** `NdjsonExporter`, porting `src/dbs/export/ndjson.py` in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`) — the canonical,
+  lossless, streaming export format: one JSON object per line, no
+  wrapping array. Registered as `"ndjson"` in `get_exporter`/
+  `available_formats` alongside the JSON exporter from #51.
+- 5 new tests: empty result set writes nothing, single item is one line,
+  multiple items are one line each in declaration order, and a metadata
+  sanity check (`format`/`media_type`/`file_ext`).
+
 ## JSON exporter (closes #51)
 **2026-08-12**
 
