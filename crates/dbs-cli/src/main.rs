@@ -37,13 +37,11 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
-use dbs_core::service::{
-    BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink, UnimplementedRunner,
-};
+use dbs_core::service::{BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink};
 use dbs_core::{
     load_config, parse_iso, write_scaffolding, BackupRunError, CancelToken, ConnectorRegistry,
     DbsError, ExportQuery, ItemRow, ProgressEvent, ProgressPhase, RunResult, RunStatus,
-    SqliteStorage, Storage, CURRENT_API_VERSION,
+    SqliteStorage, Storage, SubprocessRunner, CURRENT_API_VERSION,
 };
 
 const STUB_EXIT_CODE: i32 = 1;
@@ -827,18 +825,24 @@ fn install_stop_handler(renderer: Arc<ProgressRenderer>, all_sources: bool) -> C
 }
 
 /// Mirrors the reference's `backup` command. `--parallel`/`--only-due`
-/// (#65/#66) and the progress line + Ctrl+C handling (#67) are wired;
-/// see [`ProgressSink`]'s doc-comment for the one honest gap that
-/// remains (per-item progress needs the run/stream protocol).
+/// (#65/#66), the progress line + Ctrl+C handling (#67), and — as of
+/// issue #157 — the actual connector run/stream bridge
+/// ([`dbs_core::SubprocessRunner`]) are wired; see [`ProgressSink`]'s
+/// doc-comment for the one honest gap that remains (per-item progress
+/// needs a richer wire protocol than #157 added — only start/done are
+/// reported today).
 ///
-/// No connector-candidate discovery mechanism exists yet (scanning
-/// for installed connector subprocesses on disk — an implicit
-/// prerequisite of the connectors cluster, #85-100), so the registry
+/// No connector-candidate discovery mechanism exists yet (scanning for
+/// installed connector subprocesses on disk — a real gap surfaced
+/// while implementing #157, not yet its own issue), so the registry
 /// this constructs is always empty: every configured source's
 /// connector type is reported "not found" until that lands. That's
 /// accurate to the current state of the port, not a bug in this
 /// command — the "connector error surfaced to CLI output" acceptance
-/// scenario is exactly this path.
+/// scenario is exactly this path. Separately, none of the 14 built-in
+/// `dbs-connector-*` crates are real subprocess binaries yet (another
+/// #157-surfaced gap) — even with real discovery wired in, there would
+/// be nothing on disk for it to find.
 #[allow(clippy::too_many_arguments)]
 fn cmd_backup(
     config_path: &Path,
@@ -871,7 +875,7 @@ fn cmd_backup(
     }
 
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let mut service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let show_progress = if no_progress {
@@ -920,6 +924,7 @@ fn cmd_backup(
         dry_run,
         limit,
         reap: true,
+        cancel: Some(cancel),
         on_progress: Some(renderer.as_ref()),
     };
 
@@ -962,7 +967,7 @@ fn cmd_status(config_path: &Path, source: Option<String>, json_out: bool) -> i32
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let statuses = match service.status(source.as_deref()) {
@@ -1018,7 +1023,7 @@ fn cmd_history(config_path: &Path, source: Option<String>, limit: u32, json_out:
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let runs = match service.history(source.as_deref(), limit) {
@@ -1143,7 +1148,7 @@ fn cmd_items(
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     if let Some(id) = item_id {
@@ -1400,7 +1405,7 @@ fn cmd_stats(config_path: &Path, json_out: bool) -> i32 {
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let metrics = match service.metrics() {
@@ -1518,7 +1523,7 @@ fn cmd_export(
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let since_dt = match parse_date_arg(since.as_deref()) {
@@ -1641,7 +1646,7 @@ fn cmd_export_notes(
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let since_dt = match parse_date_arg(since.as_deref()) {
@@ -1701,7 +1706,7 @@ fn cmd_export_profiles(config_path: &Path, json_out: bool) -> i32 {
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let mut profiles: Vec<(String, dbs_core::ExportProfile)> =
@@ -1831,7 +1836,7 @@ fn cmd_export_wiki(
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let since_dt = match parse_date_arg(since.as_deref()) {
@@ -1947,7 +1952,7 @@ fn cmd_sources_list(config_path: &Path, json_out: bool) -> i32 {
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let rows = match service.list_sources() {
@@ -2026,7 +2031,7 @@ fn cmd_sources_add(config_path: &Path, name: String, type_: String, set: Vec<Str
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let mut options = std::collections::HashMap::new();
@@ -2061,7 +2066,7 @@ fn cmd_sources_check(config_path: &Path) -> i32 {
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let results = service.check_sources();
@@ -2096,7 +2101,7 @@ fn cmd_connectors_list(config_path: &Path, json_out: bool, verbose: bool) -> i32
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let infos = service.list_connectors();
@@ -2162,7 +2167,7 @@ fn cmd_connectors_describe(config_path: &Path, type_: String) -> i32 {
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let Some(rc) = service.registry.get(&type_) else {
@@ -2222,7 +2227,7 @@ fn cmd_doctor(config_path: &Path, json_out: bool) -> i32 {
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let secret_store = load_env_secret_store(config_path);
@@ -2431,7 +2436,7 @@ fn cmd_capture(config_path: &Path, target: &str, out: Option<PathBuf>) -> i32 {
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let (rc, spec) = match service.resolve_capture_target(target) {
@@ -2584,7 +2589,7 @@ fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchAr
         return report_config_error(&e);
     }
     let registry = ConnectorRegistry::from_resolved([]);
-    let runner = UnimplementedRunner;
+    let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
     let sources = if args.source.is_empty() {

@@ -8,6 +8,71 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-core`: connector run-stream bridge (closes #157)
+**2026-08-13**
+
+- **New `dbs-core::run_stream` module** — the Rust, subprocess-shaped
+  counterpart to the reference's in-process `Engine.run_source`
+  (`src/dbs/core/engine.py`). `registry.rs` (#45) only implemented
+  ADR-0001's handshake step; this implements the run/stream half (steps
+  2-3): [`WireRunContext`] is written as one JSON line to a connector
+  subprocess's stdin, [`WireLine`] (zero or more `FetchEvent`s, then
+  exactly one terminal [`WireOutcome`]) is read back from its stdout.
+  [`run_connector_subprocess`] drives that stream — buffering items,
+  flushing them at a batch cap or on a `Checkpoint`, collecting
+  `ReconcileMarker` scopes, and (on a clean finish) handing them to the
+  existing `engine::sweep_deletions` (#20) — matching the reference's
+  invariant that an exception mid-stream skips the trailing flush and
+  the sweep entirely, so a truncated run never soft-deletes from a
+  partial enumeration.
+- **A deliberate improvement over the reference:** cancellation. Python
+  can only stop *reading* a hung in-process generator; a connector
+  subprocess is a real OS process, so a background thread watches the
+  `CancelToken` and calls `Child::kill()` directly, actually
+  terminating a stuck connector instead of just abandoning interest in
+  it. (Checking cancellation inline between reads doesn't work — the
+  read blocks — so this needed its own thread, verified by a test that
+  cancels a fixture mid-hang and asserts the call returns promptly
+  instead of waiting out its sleep.)
+- **`SubprocessRunner`** is the production `ConnectorRunner`
+  (`dbs-core::service`, #46's seam) this module exists to supply —
+  replacing `UnimplementedRunner` at all 17 call sites in `dbs-cli`. It
+  resolves a connector's declared `secret_keys` from the process
+  environment (never more — "a subprocess literally cannot read a
+  secret it wasn't handed," per ADR-0001) and a source's
+  `store_media`/`max_media_mb`/download directory from `Config`.
+- **`ConnectorRunner`'s trait signature grew** to match what a real
+  implementation needs: `storage: &mut dyn Storage` (checkpoints commit
+  *during* the run, not after), `source_name`, `limit`, and `cancel`.
+  `BackupSourceOptions` gained a `cancel: Option<CancelToken>` field —
+  `backup_all` deliberately leaves it `None` per source ("in-flight
+  sources still finish and commit"), but plain `dbs backup NAME` now
+  wires the CLI's own Ctrl+C handler through it, fixing a real gap
+  where that handler was already installed but silently unused outside
+  `--all`.
+- **`Handshake` (#45) gained a `volatile_fields` field.** `engine::prepare`
+  (#17) has taken `volatile_fields` as a parameter since it was written,
+  but nothing populated it from a real handshake until this issue
+  actually needed to call `prepare()` with live data.
+- 7 new integration tests (`tests/run_stream_integration.rs`), spawning
+  the `test_connector_fixture` binary's new `run` scenarios against a
+  real in-memory `SqliteStorage`: a clean run's items/checkpoint/cursor
+  land correctly, the connector receives exactly the `WireRunContext`
+  fields the host sent (mode/limit/secrets/source name), a full
+  enumeration's reconcile marker sweeps the right items, a
+  connector-reported error is `Partial` only when something already
+  committed, a malformed line and a missing terminal line are both
+  contract violations, and cancellation kills a hung connector instead
+  of waiting for it.
+- **Two real, separate gaps surfaced while implementing this** (not
+  silently left for later): every `dbs backup`/`dbs backup --all` call
+  site in `dbs-cli` still constructs `ConnectorRegistry::from_resolved([])`
+  — an always-empty registry, so there's still no real connector to run
+  yet — and none of the 14 built-in `dbs-connector-*` crates are actual
+  subprocess binaries that speak this protocol (they're plain libraries
+  today, exercised only by their own in-process unit tests). Both need
+  their own follow-up issues.
+
 ## `dbs-connector-support`: TipTap rich-text→Markdown helper (closes #100)
 **2026-08-13**
 
