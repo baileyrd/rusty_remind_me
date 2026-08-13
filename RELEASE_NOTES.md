@@ -8,6 +8,36 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs update-ytdlp (closes #73)
+**2026-08-13**
+
+- **Implemented:** `dbs update-ytdlp [--dry-run]`, shelling out to
+  `python3 -m pip install --upgrade "yt-dlp[default]"` (falling back
+  to `python` if `python3` isn't on `PATH`) — matches the reference's
+  own command exactly, which likewise just shells out to pip rather
+  than doing anything more elaborate.
+- **No before/after version reporting**, unlike this issue's filed
+  acceptance checklist implied: the actual reference command (the
+  source of truth over the issue text where they disagree) doesn't
+  print yt-dlp's version before or after upgrading — it only echoes
+  the command it's about to run and, on success, a one-line "restart
+  `dbs serve`" reminder. `dbs doctor`'s `deps.yt-dlp` check (#72) is
+  where a yt-dlp version would surface, and this Rust binary's own
+  dependency graph doesn't include yt-dlp at all (only the yt-dlp-
+  dependent connectors/`dbs capture` shell out to it, per
+  gap-analysis.md's Decisions section item 3), so there's no "current
+  version" to report from inside `dbs` itself either way.
+- This binary has no `sys.executable` of its own (it isn't a Python
+  process) — `find_python` looks for `python3` then `python` on
+  `PATH` instead, erroring cleanly if neither is found.
+- 4 new `dbs-cli` integration tests: `--dry-run` never executes
+  anything, "no python on PATH" is a config error (tested via an
+  empty-directory `PATH` override), and the successful/failing
+  `pip install` branches — the latter two via a fake `python3` shell
+  script placed first on `PATH` rather than a real `pip install`
+  (slow, network-dependent, and would mutate the test runner's actual
+  Python environment).
+
 ## dbs doctor (closes #72)
 **2026-08-13**
 
