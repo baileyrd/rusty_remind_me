@@ -8,6 +8,40 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## CLI skeleton + dbs init (closes #63)
+**2026-08-12**
+
+- **Added:** a new `dbs-cli` binary crate producing the `dbs` binary —
+  the first CLI issue in the batch, porting the argument-parsing
+  skeleton of `src/dbs/cli.py`'s entry point in
+  baileyrd/Daily-Backup-System (pinned `@6cc6491`). `--config`/`-c`
+  (env `DBS_CONFIG`, default `dbs.toml`, global), `--help`, and
+  `--version` are wired for real; every subcommand name and the
+  `sources`/`connectors`/`research` sub-app nesting match the
+  reference's surface exactly, so every follow-up CLI issue only adds
+  flags and behavior to an existing stub, never new dispatch.
+- **`dbs init` fully implemented**, wired to #62's
+  `templates::write_scaffolding` plus a real database initialization
+  (opens the configured SQLite path and runs migrations) — matches
+  the reference's `init` command output and idempotency (an existing
+  config isn't clobbered without `--force`; `.env.example` never is).
+- **Added dependency:** `clap = "4"` (`dbs-cli`, `derive`+`env`
+  features) — the CLI-parsing crate named in this issue's own
+  acceptance criterion.
+- Every other subcommand is a stub: prints "not yet implemented" to
+  stderr and exits `1` (not one of the reference's real exit codes,
+  since a stub represents no real outcome). Exit codes otherwise
+  match the reference's documented cron-friendly convention (`0`
+  success, `2` partial, `3` failed, `4` config error, `5` no such
+  source) — `dbs init` already uses `4` for a config/database error.
+- 8 new integration tests (spawning the real compiled binary, same
+  pattern as `dbs-core`'s connector-fixture tests): `--help` lists
+  every subcommand, an unknown subcommand errors non-zero, `--version`
+  prints a version, `dbs init` on a fresh directory writes the
+  config/`.env.example`/database, a re-run doesn't clobber without
+  `--force`, `--force` does overwrite, and both a top-level and a
+  nested stub subcommand report "not yet implemented".
+
 ## templates: dbs init scaffolding writer (closes #62)
 **2026-08-12**
 
