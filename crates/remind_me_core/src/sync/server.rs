@@ -82,9 +82,7 @@ impl PeerServerConfig {
     /// of the full `sync_enabled()` gate (which also requires a hub URL,
     /// irrelevant to whether *this node* should accept inbound requests).
     pub fn from_env() -> Option<Self> {
-        let secret = std::env::var(super::SYNC_SECRET_ENV)
-            .ok()
-            .filter(|s| !s.is_empty())?;
+        let secret = Some(super::configured_sync_secret()).filter(|s| !s.is_empty())?;
         let bind = std::env::var(super::PEER_BIND_ENV)
             .ok()
             .map(|v| v.trim().to_string())
@@ -898,4 +896,52 @@ pub struct PeerServerStatus {
     pub start_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Env vars are process-global; serialize this module's env-touching
+    // tests so they don't race each other the way `cargo test` otherwise
+    // would.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_env() {
+        std::env::remove_var(super::super::SYNC_SECRET_ENV);
+        std::env::remove_var(super::super::PEER_BIND_ENV);
+        std::env::remove_var(super::super::PEER_PORT_ENV);
+    }
+
+    /// A stray literal `${user_config.sync_secret}` string in the secret var
+    /// -- what an MCP client's `env` config substitution would leave behind
+    /// if it were ever attempted and failed to resolve -- must not read as
+    /// "a secret is configured". Without routing through
+    /// `configured_sync_secret`'s placeholder guard, this node would bind a
+    /// peer server on `0.0.0.0` authenticated by a value baked into the
+    /// plugin's own public source -- anyone who has read `.mcp.json` would
+    /// already know the "secret". `from_env` must treat it as unconfigured
+    /// instead.
+    #[test]
+    fn unresolved_user_config_placeholder_does_not_start_a_peer_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var(super::super::SYNC_SECRET_ENV, "${user_config.sync_secret}");
+
+        assert!(PeerServerConfig::from_env().is_none());
+
+        clear_env();
+    }
+
+    #[test]
+    fn a_real_secret_still_starts_a_peer_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var(super::super::SYNC_SECRET_ENV, "s3cr3t");
+
+        assert!(PeerServerConfig::from_env().is_some());
+
+        clear_env();
+    }
 }

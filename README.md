@@ -92,6 +92,37 @@ down still lands in the local outbox; it just doesn't reach the hub until
 some running `rusty-remind-me server`/`api`/`remote` process — this plugin's
 or otherwise, against the same database — picks it up on its next cycle.
 
+**Why this isn't a `userConfig`-driven install prompt.** Claude Code plugins
+can declare `userConfig` fields that prompt the user for values when the
+plugin is enabled — the natural-looking way to turn "set three env vars
+yourself" into part of installing the plugin. Tried and abandoned: neither of
+Claude Code's two documented delivery paths for a configured `userConfig`
+value actually reaches this plugin's MCP server subprocess. Verified directly
+by wrapping the `rusty-remind-me` binary and logging its real spawn
+environment —
+
+- `${user_config.KEY}` substitution inside `.mcp.json`'s own `env` block
+  (what the plugin docs describe for "MCP and LSP server configs") does not
+  resolve for an `argv=["server"]` spawn; the literal, un-substituted
+  `${user_config.KEY}` string reaches the process instead. Worse than
+  useless: `sync_enabled()` sees three non-empty strings and turns sync *on*
+  against a garbage endpoint rather than leaving it off (this is what
+  `is_unresolved_placeholder` in `sync/mod.rs` now guards against).
+- `CLAUDE_PLUGIN_OPTION_<KEY>`, which Claude Code does export for a
+  configured `userConfig` option, reaches this plugin's `SessionStart` hook
+  invocation (`argv=["list", "--limit", "8"]`) but not the `argv=["server"]`
+  MCP server spawn in the same session — confirmed by tagging captured
+  environments with their argv and pid. The docs say these vars go to "hook
+  processes"; that turned out to be exact, not illustrative.
+
+Declaring `env` in `.mcp.json` is also not additive with today's ambient
+inheritance even where substitution *did* work: `pluginEnv` always wins in
+`{...process.env, ...pluginEnv}`, so wiring `userConfig` in would have
+silently broken the shell/`settings.json`-based setup described above for
+anyone already using it. Given neither delivery path works for the process
+that needs the values, ambient inheritance stays the only supported way to
+configure sync through this plugin.
+
 ---
 
 ## Automated Client Setup (Claude Desktop, Antigravity, Cursor, Codex)
