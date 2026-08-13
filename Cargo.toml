@@ -10,6 +10,7 @@ members = [
     "crates/dbs-connector-github",
     "crates/dbs-connector-pinboard",
     "crates/dbs-connector-readwise",
+    "crates/dbs-connector-mastodon",
 ]
 
 [workspace.package]

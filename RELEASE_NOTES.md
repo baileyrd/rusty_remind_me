@@ -8,6 +8,41 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `mastodon` connector (closes #89)
+**2026-08-13**
+
+- **New `dbs-connector-mastodon` crate** — backs up bookmarked and
+  favourited posts via the Mastodon v1 API, token auth
+  (`MASTODON_TOKEN`, `read:bookmarks read:favourites` scopes).
+  Mirrors `dbs.connectors.mastodon`: bookmark/favourite listings
+  paginate by internal marker ids exposed only through the `Link`
+  response header (not status ids), with no usable `since` filter, so
+  every run is a full enumeration (`supports_incremental=false`)
+  followed by one combined `ReconcileMarker` — withheld if either kind
+  is disabled, same rule as `github` (#86) and `readwise` (#88).
+  Pagination follows the `Link` header's `rel="next"` URL verbatim
+  (parsed by a small pure `next_link_from_header` helper, directly
+  unit-tested) rather than reconstructing it. Engagement counters and
+  the nested `account` object are declared volatile — both churn
+  constantly without the saved content changing; the author handle is
+  captured into `title` at map time so a real display-name/handle
+  change still hashes. Config carries the `instance` base URL
+  (multi-instance accounts = one source each), validated at fetch time
+  to be an `http(s)://` URL.
+- **Not wired up:** same boundary as `raindrop` (#85), `github` (#86),
+  `pinboard` (#87), and `readwise` (#88) — this struct isn't reachable
+  from a real `dbs backup` run yet; the plugin registry's run/stream
+  bridge doesn't exist.
+- 13 new `dbs-connector-mastodon` tests against a `mockito` fixture
+  server plus direct unit tests of `next_link_from_header`: missing-
+  managed-http/missing-token/invalid-instance errors, a full fetch
+  yielding both item kinds and a combined reconcile marker, a run with
+  one kind disabled withholding the marker, pagination following the
+  `Link` header across pages, a status with no id being skipped, a
+  status with no account having no title, both HTTP status
+  classifications (401 vs. other), and connector metadata matching the
+  reference.
+
 ## `readwise` connector (closes #88)
 **2026-08-13**
 
