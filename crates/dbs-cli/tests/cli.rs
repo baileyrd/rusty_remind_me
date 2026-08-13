@@ -151,9 +151,9 @@ fn init_force_overwrites_the_config() {
 
 #[test]
 fn a_stub_subcommand_reports_not_yet_implemented() {
-    // `backup` (#64) and `status`/`history` (#68) are no longer pure
-    // stubs — `items` still is.
-    let output = Command::new(dbs_bin()).arg("items").output().unwrap();
+    // `backup` (#64), `status`/`history` (#68), and `items`/`stats`
+    // (#69) are no longer pure stubs — `export` still is.
+    let output = Command::new(dbs_bin()).arg("export").output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("not yet implemented"));

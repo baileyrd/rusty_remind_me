@@ -41,8 +41,9 @@ use dbs_core::service::{
     BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink, UnimplementedRunner,
 };
 use dbs_core::{
-    load_config, write_scaffolding, BackupRunError, CancelToken, ConnectorRegistry, DbsError,
-    ProgressEvent, ProgressPhase, RunResult, RunStatus, SqliteStorage, Storage,
+    load_config, parse_iso, write_scaffolding, BackupRunError, CancelToken, ConnectorRegistry,
+    DbsError, ExportQuery, ItemRow, ProgressEvent, ProgressPhase, RunResult, RunStatus,
+    SqliteStorage, Storage,
 };
 
 const STUB_EXIT_CODE: i32 = 1;
@@ -130,10 +131,45 @@ enum Command {
         #[arg(long = "json")]
         json_out: bool,
     },
-    /// Browse backed-up items.
-    Items,
+    /// Browse backed-up items, or show one item's full detail by id.
+    Items {
+        /// Show one item's full detail (raw payload + media list)
+        /// instead of listing.
+        #[arg(value_name = "ID")]
+        item_id: Option<i64>,
+        /// Filter by source name (repeatable).
+        #[arg(long = "source")]
+        source: Vec<String>,
+        /// Filter by item kind (repeatable).
+        #[arg(long = "type")]
+        item_type: Vec<String>,
+        /// Full-text search over titles and bodies.
+        #[arg(long = "search", short = 'q')]
+        search: Option<String>,
+        /// Only items created on/after (YYYY-MM-DD or full ISO-8601).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only items created on/before.
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        include_deleted: bool,
+        /// Page size.
+        #[arg(long, short = 'n', default_value_t = 50)]
+        limit: u32,
+        /// Skip the first N matches (pagination).
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Emit JSON.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Aggregate item/source statistics.
-    Stats,
+    Stats {
+        /// Emit JSON.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Export items to a file in the given format.
     Export,
     /// Incrementally export one Markdown note per item into a directory.
@@ -238,6 +274,31 @@ fn main() {
             limit,
             json_out,
         } => cmd_history(&cli.config, source, limit, json_out),
+        Command::Items {
+            item_id,
+            source,
+            item_type,
+            search,
+            since,
+            until,
+            include_deleted,
+            limit,
+            offset,
+            json_out,
+        } => cmd_items(
+            &cli.config,
+            item_id,
+            source,
+            item_type,
+            search,
+            since,
+            until,
+            include_deleted,
+            limit,
+            offset,
+            json_out,
+        ),
+        Command::Stats { json_out } => cmd_stats(&cli.config, json_out),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -249,8 +310,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Backup { .. } => "backup",
         Command::Status { .. } => "status",
         Command::History { .. } => "history",
-        Command::Items => "items",
-        Command::Stats => "stats",
+        Command::Items { .. } => "items",
+        Command::Stats { .. } => "stats",
         Command::Export => "export",
         Command::ExportNotes => "export-notes",
         Command::ExportProfiles => "export-profiles",
@@ -658,6 +719,409 @@ fn cmd_history(config_path: &Path, source: Option<String>, limit: u32, json_out:
                 }
             }
         }
+    }
+    0
+}
+
+/// Parses a CLI date argument: full ISO-8601 first (via
+/// `dbs_core::parse_iso`), falling back to a bare `YYYY-MM-DD` date —
+/// mirrors the reference's `_parse_date`. `None`/empty input is `Ok(None)`;
+/// unparseable text is `Err` with a message ready to print.
+fn parse_date_arg(value: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    let Some(text) = value else { return Ok(None) };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if let Some(dt) = parse_iso(Some(text)) {
+        return Ok(Some(dt));
+    }
+    match chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        Ok(date) => Ok(Some(
+            date.and_hms_opt(0, 0, 0)
+                .expect("midnight is always a valid time")
+                .and_utc(),
+        )),
+        Err(e) => Err(format!("Invalid date {text:?}: {e}")),
+    }
+}
+
+/// Compact byte count, e.g. `"512 B"`, `"3.4 KiB"`, `"1.2 GiB"`. Mirrors
+/// the reference's `_human_bytes`.
+fn human_bytes(n: i64) -> String {
+    let mut value = n as f64;
+    for unit in ["B", "KiB", "MiB", "GiB"] {
+        if value < 1024.0 {
+            return if unit == "B" {
+                format!("{value:.0} B")
+            } else {
+                format!("{value:.1} {unit}")
+            };
+        }
+        value /= 1024.0;
+    }
+    format!("{value:.1} TiB")
+}
+
+/// Mirrors the reference's `items` command: browse/search/filter by
+/// default, or one item's full detail with `ID`.
+#[allow(clippy::too_many_arguments)]
+fn cmd_items(
+    config_path: &Path,
+    item_id: Option<i64>,
+    source: Vec<String>,
+    item_type: Vec<String>,
+    search: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    include_deleted: bool,
+    limit: u32,
+    offset: u32,
+    json_out: bool,
+) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    if let Some(id) = item_id {
+        let item = match service.get_item(id) {
+            Ok(item) => item,
+            Err(e) => return report_config_error(&e),
+        };
+        let Some(item) = item else {
+            eprintln!("no such item {id}");
+            return 1;
+        };
+        if json_out {
+            match serde_json::to_string_pretty(&item) {
+                Ok(s) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("failed to encode item as JSON: {e}");
+                    return CONFIG_ERROR_EXIT_CODE;
+                }
+            }
+        } else {
+            print_item_detail(&item);
+        }
+        return 0;
+    }
+
+    let since_dt = match parse_date_arg(since.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let until_dt = match parse_date_arg(until.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let query = ExportQuery {
+        sources: if source.is_empty() {
+            None
+        } else {
+            Some(source)
+        },
+        item_types: if item_type.is_empty() {
+            None
+        } else {
+            Some(item_type)
+        },
+        since: since_dt,
+        until: until_dt,
+        include_deleted,
+        ..Default::default()
+    };
+    let (rows, total) = match service.browse_items(&query, search.as_deref(), limit, offset) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+
+    if json_out {
+        let envelope = serde_json::json!({
+            "items": rows,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        });
+        match serde_json::to_string_pretty(&envelope) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode items as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+
+    if rows.is_empty() {
+        if total > 0 {
+            println!("No items at offset {offset} ({total} total matches).");
+        } else {
+            println!("No items matched.");
+        }
+        return 0;
+    }
+    for r in &rows {
+        let get_str = |key: &str| r.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        let get_i64 = |key: &str| r.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+        let get_bool = |key: &str| r.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut title = {
+            let t = get_str("title");
+            if !t.is_empty() {
+                t
+            } else {
+                let u = get_str("url");
+                if !u.is_empty() {
+                    u
+                } else {
+                    get_str("external_id")
+                }
+            }
+        }
+        .replace('\n', " ");
+        if title.chars().count() > 60 {
+            title = title.chars().take(59).collect::<String>() + "\u{2026}";
+        }
+        let created = get_str("created_at");
+        let created = if created.len() >= 10 {
+            &created[..10]
+        } else {
+            created
+        };
+        let mut line = format!(
+            "{:>7}  {:<20.20} {:<10.10} {created:<10}  {title}",
+            get_i64("id"),
+            get_str("source"),
+            get_str("item_kind"),
+        );
+        let media_count = get_i64("media_count");
+        if media_count > 0 {
+            line.push_str(&format!("  [{media_count} media]"));
+        }
+        if get_bool("deleted") {
+            line.push_str("  [deleted]");
+        }
+        println!("{line}");
+    }
+    let end = offset + rows.len() as u32;
+    let mut footer = format!("{}-{end} of {total}", offset + 1);
+    if u64::from(end) < total {
+        footer.push_str(&format!("  (next page: --offset {end})"));
+    }
+    println!("{footer}");
+    0
+}
+
+/// Mirrors the reference's `_print_item_detail`.
+fn print_item_detail(item: &ItemRow) {
+    let get_str = |key: &str| item.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    let title = {
+        let t = get_str("title");
+        if !t.is_empty() {
+            t
+        } else {
+            let u = get_str("url");
+            if !u.is_empty() {
+                u
+            } else {
+                get_str("external_id")
+            }
+        }
+    };
+    println!("{title}");
+    println!("  source:    {} ({})", get_str("source"), get_str("type"));
+    println!(
+        "  kind:      {}   external id: {}",
+        get_str("item_kind"),
+        get_str("external_id")
+    );
+    let url = get_str("url");
+    if !url.is_empty() {
+        println!("  url:       {url}");
+    }
+    if let Some(tags) = item.get("tags").and_then(|v| v.as_array()) {
+        if !tags.is_empty() {
+            let tags: Vec<&str> = tags.iter().filter_map(|v| v.as_str()).collect();
+            println!("  tags:      {}", tags.join(", "));
+        }
+    }
+    let created = get_str("created_at");
+    let updated = get_str("updated_at");
+    println!(
+        "  created:   {}   updated: {}   revision: {}",
+        if created.is_empty() { "-" } else { created },
+        if updated.is_empty() { "-" } else { updated },
+        item.get("revision").and_then(|v| v.as_i64()).unwrap_or(0),
+    );
+    if item
+        .get("deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let deleted_at = get_str("deleted_at");
+        println!(
+            "  deleted:   yes ({})",
+            if deleted_at.is_empty() {
+                "unknown when"
+            } else {
+                deleted_at
+            }
+        );
+    }
+    let body = get_str("body");
+    if !body.is_empty() {
+        let shown = if body.chars().count() > 500 {
+            format!(
+                "{}\u{2026} [{} chars total; --json for all]",
+                body.chars().take(500).collect::<String>(),
+                body.chars().count()
+            )
+        } else {
+            body.to_string()
+        };
+        println!("  body:      {}", shown.replace('\n', "\n             "));
+    }
+    if let Some(media) = item.get("media").and_then(|v| v.as_array()) {
+        if !media.is_empty() {
+            println!("  media ({}):", media.len());
+            for m in media {
+                let has_data = m.get("has_data").and_then(|v| v.as_bool()).unwrap_or(false);
+                let local_path = m.get("local_path").and_then(|v| v.as_str());
+                let state = if has_data {
+                    "archived".to_string()
+                } else {
+                    local_path.unwrap_or("not archived").to_string()
+                };
+                let byte_size = m.get("byte_size").and_then(|v| v.as_i64()).unwrap_or(0);
+                let size = if byte_size > 0 {
+                    format!(", {}", human_bytes(byte_size))
+                } else {
+                    String::new()
+                };
+                let name = m
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| m.get("url").and_then(|v| v.as_str()))
+                    .unwrap_or("?");
+                let mime = m.get("mime").and_then(|v| v.as_str()).unwrap_or("?");
+                println!(
+                    "    [{}] {name} ({mime}{size}) \u{2014} {state}",
+                    m.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+                );
+            }
+        }
+    }
+    println!("  raw:");
+    let raw = item.get("raw").cloned().unwrap_or(serde_json::Value::Null);
+    let pretty = serde_json::to_string_pretty(&raw).unwrap_or_else(|_| "null".to_string());
+    println!("    {}", pretty.replace('\n', "\n    "));
+}
+
+/// Mirrors the reference's `stats` command.
+fn cmd_stats(config_path: &Path, json_out: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let metrics = match service.metrics() {
+        Ok(m) => m,
+        Err(e) => return report_config_error(&e),
+    };
+
+    if json_out {
+        match serde_json::to_string_pretty(&metrics) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode stats as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+
+    let rows = metrics
+        .get("by_source_kind")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let live: i64 = rows
+        .iter()
+        .filter_map(|r| r.get("live").and_then(|v| v.as_i64()))
+        .sum();
+    let total: i64 = rows
+        .iter()
+        .filter_map(|r| r.get("total").and_then(|v| v.as_i64()))
+        .sum();
+    let revision_count = metrics
+        .get("revision_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let media_count = metrics
+        .get("media_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let media_bytes = metrics
+        .get("media_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    println!(
+        "Items:     {live} live, {} deleted ({total} total)",
+        total - live
+    );
+    println!("Revisions: {revision_count}");
+    println!(
+        "Media:     {media_count} archived blob(s), {}",
+        human_bytes(media_bytes)
+    );
+    if rows.is_empty() {
+        println!("\nNo items stored yet \u{2014} run `dbs backup` first.");
+        return 0;
+    }
+    println!();
+    println!(
+        "{:<24} {:<12} {:>8} {:>8} {:>8}",
+        "source", "kind", "live", "deleted", "total"
+    );
+    for r in &rows {
+        let get_str = |key: &str| r.get(key).and_then(|v| v.as_str()).unwrap_or("?");
+        let get_i64 = |key: &str| r.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+        println!(
+            "{:<24} {:<12} {:>8} {:>8} {:>8}",
+            get_str("source"),
+            get_str("kind"),
+            get_i64("live"),
+            get_i64("deleted"),
+            get_i64("total"),
+        );
     }
     0
 }
