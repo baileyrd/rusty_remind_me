@@ -517,6 +517,34 @@ impl Connector for PodcastConnector {
         }
     }
 
+    /// Reads `feeds` from this source's `[sources.NAME]` config
+    /// (ADR-0002) — unlike every other connector wired up so far, this
+    /// one has no separate "host" field at all; the feed URL list *is*
+    /// the entire input, so without this there is nothing to back up.
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = options.get("feeds") {
+            let feeds = v.as_array().ok_or_else(|| {
+                ConnectorError::Config(format!(
+                    "sources.<name>.feeds must be an array of strings, got {v}"
+                ))
+            })?;
+            self.config.feeds = feeds
+                .iter()
+                .map(|f| {
+                    f.as_str().map(str::to_string).ok_or_else(|| {
+                        ConnectorError::Config(format!(
+                            "sources.<name>.feeds entries must be strings, got {f}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        Ok(())
+    }
+
     fn fetch<'a>(
         &'a mut self,
         ctx: &'a RunContext,
@@ -668,6 +696,40 @@ mod tests {
         iter: Box<dyn Iterator<Item = Result<FetchEvent, ConnectorError>> + '_>,
     ) -> Vec<Result<FetchEvent, ConnectorError>> {
         iter.collect()
+    }
+
+    #[test]
+    fn configure_applies_a_feeds_array_from_options() {
+        let mut connector = PodcastConnector::new(PodcastConfig::default());
+        assert!(connector.config.feeds.is_empty());
+        let options = HashMap::from([(
+            "feeds".to_string(),
+            serde_json::json!(["https://example.com/a.xml", "https://example.com/b.xml"]),
+        )]);
+        connector.configure(&options).unwrap();
+        assert_eq!(
+            connector.config.feeds,
+            vec![
+                "https://example.com/a.xml".to_string(),
+                "https://example.com/b.xml".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn configure_rejects_a_non_array_feeds_value() {
+        let mut connector = PodcastConnector::new(PodcastConfig::default());
+        let options = HashMap::from([("feeds".to_string(), serde_json::json!("not-an-array"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_feeds_array_with_a_non_string_entry() {
+        let mut connector = PodcastConnector::new(PodcastConfig::default());
+        let options = HashMap::from([("feeds".to_string(), serde_json::json!([1, 2]))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 
     #[test]

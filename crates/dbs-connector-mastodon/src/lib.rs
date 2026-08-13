@@ -322,6 +322,27 @@ impl Connector for MastodonConnector {
         }
     }
 
+    /// Reads `instance` from this source's `[sources.NAME]` config
+    /// (ADR-0002) — there's no sensible default for it (unlike
+    /// raindrop/github/etc., which authenticate purely off a secret,
+    /// this connector needs to know *which* Mastodon instance to talk
+    /// to). Absence isn't an error here: `fetch` already rejects an
+    /// empty/non-URL `instance` with a clear `ConnectorError::Config`,
+    /// so this only needs to reject the wrong JSON *type* for a value
+    /// that is present.
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = options.get("instance") {
+            let instance = v.as_str().ok_or_else(|| {
+                ConnectorError::Config(format!("sources.<name>.instance must be a string, got {v}"))
+            })?;
+            self.config.instance = instance.to_string();
+        }
+        Ok(())
+    }
+
     fn fetch<'a>(
         &'a mut self,
         ctx: &'a RunContext,
@@ -482,6 +503,33 @@ mod tests {
         let result: Vec<_> = connector.fetch(&ctx).collect();
         assert_eq!(result.len(), 1);
         assert!(matches!(result[0], Err(ConnectorError::Config(_))));
+    }
+
+    #[test]
+    fn configure_applies_a_string_instance_from_options() {
+        let mut connector = MastodonConnector::new(MastodonConfig::default());
+        assert_eq!(connector.config.instance, "");
+        let options = HashMap::from([(
+            "instance".to_string(),
+            serde_json::json!("https://example.social"),
+        )]);
+        connector.configure(&options).unwrap();
+        assert_eq!(connector.config.instance, "https://example.social");
+    }
+
+    #[test]
+    fn configure_rejects_a_non_string_instance() {
+        let mut connector = MastodonConnector::new(MastodonConfig::default());
+        let options = HashMap::from([("instance".to_string(), serde_json::json!(42))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_with_no_instance_key_leaves_the_default_untouched() {
+        let mut connector = MastodonConnector::new(MastodonConfig::default());
+        connector.configure(&HashMap::new()).unwrap();
+        assert_eq!(connector.config.instance, "");
     }
 
     #[test]

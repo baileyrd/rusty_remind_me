@@ -8,6 +8,56 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-core`: per-source connector config over the subprocess wire (closes #166, implements ADR-0002)
+**2026-08-13**
+
+- **`WireRunContext` gains a `config: HashMap<String, serde_json::Value>`
+  field**, populated by `SubprocessRunner::run_connector` from
+  `SourceConfig::options` — the same `[sources.NAME]` TOML map already
+  serialized into `config_json` for `Storage::upsert_source`, now also
+  reaching the spawned connector. `SourceConfig::options` is
+  `HashMap<String, toml::Value>`; the conversion to JSON happens once,
+  host-side, in `dbs-core` (already depending on both `toml` and
+  `serde_json`) rather than pulling a `toml` dependency into all 14
+  connector crates just to name the wire field's type.
+- **`Connector` gains a default no-op `configure(&mut self, options:
+  &HashMap<String, serde_json::Value>) -> Result<(), ConnectorError>`**
+  method, mirroring `open`/`close`'s existing default-method shape.
+  `dbs_connector_support::run_connector_main` calls it right after a
+  real run's wire context arrives, before `open`/`fetch` — a failure
+  short-circuits into `WireOutcome::Error` the same way a failing
+  `open()` already does, no new wire vocabulary needed. 11 of the 14
+  built-in connectors need no code change at all; they inherit the
+  no-op default.
+- **`dbs-connector-mastodon`, `dbs-connector-podcast`, and
+  `dbs-connector-bluesky` implement `configure()`** to read `instance`,
+  `feeds`, and `identifier` respectively out of a source's config —
+  closing the specific gap #166 reported: with this, `mastodon` and
+  `podcast` can genuinely run against a real Mastodon instance / real
+  feed list from a real `dbs backup` invocation for the first time,
+  not just against a `DBS_..._TEST_BASE_URL`-pointed mock server in
+  their own test suites. `bluesky`'s `identifier` wasn't blocking a run
+  before (nothing validated it), but now authenticates as the right
+  account instead of an opaque empty string.
+- Each of those three connectors' `subprocess_binary_integration.rs`
+  gains a test proving the *production* path — wire `config`, not the
+  test-only `DBS_..._TEST_BASE_URL`/`DBS_PODCAST_TEST_FEED_URL` env var
+  overrides #164 introduced — actually reaches a real spawned binary
+  and takes effect, end to end through a real subprocess boundary.
+  `dbs-core`'s own `run_stream_integration.rs` adds a
+  `SubprocessRunner`-level test parsing a real `dbs.toml` and
+  confirming a `[sources.NAME]` TOML key reaches the connector as JSON.
+  Every existing `WireRunContext { .. }` test construction (raindrop's
+  plus all 13 from #164) picked up the new field — the mechanical
+  migration cost ADR-0002 flagged up front.
+- Two of the three-connector subprocess-integration test files needed
+  a small unrelated fix while adding a second env-var-touching test to
+  each: `DBS_MASTODON_TEST_BASE_URL`/`DBS_PODCAST_TEST_FEED_URL`/
+  `DBS_BLUESKY_TEST_BASE_URL` are process-global, and Rust runs
+  `#[test]` functions in parallel by default — a shared `static
+  ENV_LOCK: Mutex<()>` now serializes the two tests in each file that
+  touch the same variable.
+
 ## 13 connectors: real dbs-connector-* subprocess binaries (closes #164)
 **2026-08-13**
 

@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use dbs_core::{
-    run_connector_subprocess, CancelToken, Capabilities, Cursor, Handshake, RegisteredConnector,
-    SqliteStorage, Storage, WireRunContext, CURRENT_API_VERSION,
+    load_config, run_connector_subprocess, CancelToken, Capabilities, ConnectorRunner, Cursor,
+    Handshake, RegisteredConnector, SqliteStorage, Storage, SubprocessRunner, WireRunContext,
+    CURRENT_API_VERSION,
 };
 
 fn fixture_path() -> PathBuf {
@@ -69,6 +70,7 @@ fn wire_ctx(source_id: i64, run_id: i64, mode: &str) -> WireRunContext {
         store_media: false,
         max_media_bytes: 0,
         download_dir: None,
+        config: HashMap::new(),
     }
 }
 
@@ -102,6 +104,10 @@ fn the_wire_context_the_connector_receives_matches_what_the_host_sent() {
     let mut ctx = wire_ctx(source_id, run_id, "full");
     ctx.limit = Some(50);
     ctx.secrets.insert("TOKEN".to_string(), "shh".to_string());
+    // ADR-0002: a source's per-source config crosses the wire the same
+    // way everything else here does — round-tripped through a real
+    // subprocess, not just constructed and inspected in-process.
+    ctx.config = HashMap::from([("instance".to_string(), serde_json::json!("https://x.test"))]);
 
     run_connector_subprocess(&mut storage, &rc, ctx, 0.5, None).unwrap();
 
@@ -118,6 +124,82 @@ fn the_wire_context_the_connector_receives_matches_what_the_host_sent() {
     assert_eq!(echoed["limit"], 50);
     assert_eq!(echoed["secrets"]["TOKEN"], "shh");
     assert_eq!(echoed["source_name"], "fixture-source");
+    assert_eq!(echoed["config"]["instance"], "https://x.test");
+}
+
+/// ADR-0002, end to end from the *host* side: a real `dbs.toml`'s
+/// `[sources.NAME]` block's non-reserved keys (parsed by `load_config`
+/// into `SourceConfig::options`, `HashMap<String, toml::Value>`) reach
+/// the spawned connector's wire context as `HashMap<String,
+/// serde_json::Value>` — the conversion `SubprocessRunner::run_connector`
+/// performs — without `SubprocessRunner`/`ConnectorRunner` (the actual
+/// production call path `dbs-cli` uses, not `run_connector_subprocess`
+/// called directly like every other test in this file) needing to know
+/// or care that TOML and JSON are different type systems.
+#[test]
+fn subprocess_runner_forwards_a_sources_toml_options_as_wire_config() {
+    let dir = std::env::temp_dir().join(format!(
+        "dbs-core-run-stream-config-passthrough-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("dbs.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[dbs]
+database = "dbs.sqlite3"
+export_dir = "exports"
+download_root = "downloads"
+
+[sources.fixture-source]
+type = "fixture"
+enabled = true
+instance = "https://from-toml.test"
+"#,
+    )
+    .unwrap();
+    let cfg = load_config(&config_path).unwrap();
+    assert_eq!(
+        cfg.sources["fixture-source"].options["instance"].as_str(),
+        Some("https://from-toml.test")
+    );
+
+    let (mut storage, source_id) = open_storage_with_source();
+    let run_id = storage
+        .begin_run(source_id, "rusty_dbs:fixture", "incremental", None)
+        .unwrap();
+    let rc = connector(&["run", "ok", "1"], Capabilities::default());
+    let runner = SubprocessRunner::new(&cfg);
+
+    let outcome = runner
+        .run_connector(
+            &mut storage,
+            &rc,
+            run_id,
+            source_id,
+            "fixture-source",
+            "incremental",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+
+    let query = dbs_core::ExportQuery {
+        sources: Some(vec!["fixture-source".to_string()]),
+        ..Default::default()
+    };
+    let (rows, _total) = storage.browse_items(&query, None, 10, 0).unwrap();
+    let item_id = rows[0]["id"].as_i64().unwrap();
+    let detail = storage.get_item(item_id).unwrap().unwrap();
+    let echoed = &detail["raw"]["_wire_ctx"];
+    assert_eq!(echoed["config"]["instance"], "https://from-toml.test");
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

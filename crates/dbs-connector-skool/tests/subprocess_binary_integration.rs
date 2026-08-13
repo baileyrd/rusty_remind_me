@@ -129,6 +129,7 @@ fn a_real_run_with_fully_valid_input_relays_the_issue_99_config_error_through_th
         store_media: false,
         max_media_bytes: 0,
         download_dir: Some(downloads),
+        config: HashMap::new(),
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();

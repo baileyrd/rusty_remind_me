@@ -21,12 +21,20 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use dbs_core::{
     run_connector_subprocess, ConnectorCandidate, ConnectorRegistry, Cursor, SqliteStorage,
     Storage, WireRunContext,
 };
+
+/// `DBS_BLUESKY_TEST_BASE_URL` is process-global, but two tests in this
+/// file now set/clear it (`main.rs`'s doc comment's "no other test in
+/// this binary" claim held only while there was exactly one). Rust runs
+/// `#[test]` functions in parallel by default, so both tests take this
+/// lock for their full duration to serialize access instead.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_dbs-connector-bluesky"))
@@ -74,6 +82,7 @@ fn like_record(uri: &str, subject_uri: &str, created_at: &str) -> serde_json::Va
 
 #[test]
 fn a_real_run_against_a_mock_api_commits_items_through_the_full_subprocess_boundary() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let mut server = mockito::Server::new();
     let _m_session = server
         .mock(
@@ -161,6 +170,7 @@ fn a_real_run_against_a_mock_api_commits_items_through_the_full_subprocess_bound
         store_media: false,
         max_media_bytes: 0,
         download_dir: None,
+        config: HashMap::new(),
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
@@ -171,4 +181,87 @@ fn a_real_run_against_a_mock_api_commits_items_through_the_full_subprocess_bound
     let live = storage.live_external_ids(source.id, None).unwrap();
     assert!(live.contains("at://did:plc:abc123/app.bsky.feed.like/1"));
     assert!(live.contains("at://did:plc:abc123/app.bsky.feed.like/2"));
+}
+
+/// ADR-0002: proves the *real* per-source config path — `WireRunContext.config`
+/// → `Connector::configure` → `self.config.identifier` — works end to end.
+/// Unlike `mastodon`/`podcast`, an empty `identifier` doesn't make a run
+/// fail today (see this file's module doc comment), so this can't be
+/// proven by a run succeeding or failing — instead it asserts the mock
+/// `createSession` endpoint actually received the `identifier` the wire
+/// config carried, not `BlueskyConfig::default()`'s empty string.
+#[test]
+fn a_real_run_sends_the_wire_configs_identifier_in_create_session() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let mut server = mockito::Server::new();
+    let _m_session = server
+        .mock(
+            "POST",
+            mockito::Matcher::Regex(r"^/xrpc/com.atproto.server.createSession".to_string()),
+        )
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "identifier": "alice.bsky.social",
+        })))
+        .with_status(200)
+        .with_body(session_body())
+        .create();
+    let _m_records = server
+        .mock("GET", "/xrpc/com.atproto.repo.listRecords")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(serde_json::json!({"records": []}).to_string())
+        .create();
+
+    std::env::set_var("DBS_BLUESKY_TEST_BASE_URL", server.url());
+
+    let mut registry = ConnectorRegistry::new();
+    {
+        let report = registry.discover(&[candidate()], &HashMap::new(), Duration::from_secs(5));
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+    }
+    let rc = registry.get("bluesky").unwrap().clone();
+
+    let mut storage = SqliteStorage::open(":memory:").unwrap();
+    storage.migrate().unwrap();
+    let source = storage
+        .upsert_source("my-bluesky", "bluesky", &rc.plugin_id, "{}", 1)
+        .unwrap();
+    let run_id = storage
+        .begin_run(source.id, &rc.plugin_id, "full", None)
+        .unwrap();
+
+    let wire_ctx = WireRunContext {
+        source_id: source.id,
+        source_name: "my-bluesky".to_string(),
+        cursor: Some(Cursor {
+            value: serde_json::json!(null),
+        }),
+        since: None,
+        secrets: HashMap::from([(
+            "BLUESKY_APP_PASSWORD".to_string(),
+            "app-password".to_string(),
+        )]),
+        run_id,
+        mode: "full".to_string(),
+        full_refresh: true,
+        limit: None,
+        store_media: false,
+        max_media_bytes: 0,
+        download_dir: None,
+        config: HashMap::from([(
+            "identifier".to_string(),
+            serde_json::json!("alice.bsky.social"),
+        )]),
+    };
+
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+    std::env::remove_var("DBS_BLUESKY_TEST_BASE_URL");
+
+    // The point of the test is `_m_session`'s body match above: if
+    // `configure()` hadn't applied the wire config's `identifier`, the
+    // request would have carried `""` instead and mockito would have
+    // returned its default 501 for the unmatched request, surfacing as
+    // an error here instead of a clean, empty (zero-item) run.
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(outcome.items_seen, 0);
 }

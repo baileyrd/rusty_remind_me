@@ -52,8 +52,8 @@
 //! connector's declared `secret_keys` from the process environment (the
 //! *only* values that cross the boundary — "a subprocess literally
 //! cannot read a secret it wasn't handed on stdin," per ADR-0001) and a
-//! source's `store_media`/`max_media_mb`/download directory from
-//! [`crate::config::Config`].
+//! source's `store_media`/`max_media_mb`/download directory/`options`
+//! (per-source connector config, ADR-0002) from [`crate::config::Config`].
 //!
 //! **Out of scope, left for follow-up work:** this module drives
 //! whatever [`crate::registry::RegisteredConnector::command`] already
@@ -104,6 +104,14 @@ pub struct WireRunContext {
     pub store_media: bool,
     pub max_media_bytes: u64,
     pub download_dir: Option<PathBuf>,
+    /// This source's `options` map (every `[sources.NAME]` TOML key not
+    /// reserved by `crate::config::SourceConfig`) — the same map already
+    /// serialized into `config_json` for `Storage::upsert_source`, now
+    /// also reaching the connector via `Connector::configure` (ADR-0002).
+    /// `#[serde(default)]` so a handshake-only spawn or an older wire
+    /// line missing this field still deserializes.
+    #[serde(default)]
+    pub config: HashMap<String, serde_json::Value>,
 }
 
 /// How a connector subprocess reports the way its run ended — the
@@ -534,6 +542,25 @@ impl ConnectorRunner for SubprocessRunner<'_> {
         let store_media = sc.is_some_and(|s| s.store_media);
         let max_media_bytes = sc.map(|s| s.max_media_mb as u64 * 1024 * 1024).unwrap_or(0);
         let download_dir = Some(self.config.download_dir_for(source_name));
+        // `SourceConfig::options` is `HashMap<String, toml::Value>` — converted
+        // key-by-key here (the one place `dbs-core` needs both `toml` and
+        // `serde_json` in scope) so `WireRunContext` and `Connector::configure`
+        // stay in plain JSON terms, the same vocabulary every other wire field
+        // already uses, without pulling a `toml` dependency into all 14
+        // connector crates just to name this field's type.
+        let config: HashMap<String, serde_json::Value> = sc
+            .map(|s| {
+                s.options
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let wire_ctx = WireRunContext {
             source_id,
@@ -548,6 +575,7 @@ impl ConnectorRunner for SubprocessRunner<'_> {
             store_media,
             max_media_bytes,
             download_dir,
+            config,
         };
 
         run_connector_subprocess(

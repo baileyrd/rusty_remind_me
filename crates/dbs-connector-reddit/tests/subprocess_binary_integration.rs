@@ -124,6 +124,7 @@ fn a_real_run_with_a_fully_valid_session_dir_still_relays_the_issue_99_config_er
         store_media: false,
         max_media_bytes: 0,
         download_dir: None,
+        config: HashMap::new(),
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
