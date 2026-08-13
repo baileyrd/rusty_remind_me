@@ -322,8 +322,17 @@ enum Command {
         #[arg(long)]
         no_schedule: bool,
     },
-    /// Headless browser-session capture for connectors that need one.
-    Capture,
+    /// Capture a login session on this machine, for import into a
+    /// headless server.
+    Capture {
+        /// Connector type or configured source name to capture a login for.
+        target: String,
+        /// Where to write the captured artifact. Defaults to
+        /// ./<target>-cookies.txt / -storage_state.json / -session.zip
+        /// depending on the capture kind.
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+    },
     /// Print the installed version.
     Version,
     /// Manage configured sources.
@@ -521,6 +530,7 @@ fn main() {
             schedule,
             no_schedule: _,
         } => cmd_serve(host, port, allow_setup && !no_setup, token, schedule),
+        Command::Capture { target, out } => cmd_capture(&cli.config, &target, out),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -546,7 +556,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Maintain => "maintain",
         Command::Schedule { .. } => "schedule",
         Command::Serve { .. } => "serve",
-        Command::Capture => "capture",
+        Command::Capture { .. } => "capture",
         Command::Version => "version",
         Command::Sources(_) => "sources",
         Command::Connectors(_) => "connectors",
@@ -2262,6 +2272,55 @@ fn cmd_serve(
     if token.is_some() {
         eprintln!("  (token auth would be required)");
     }
+    CONFIG_ERROR_EXIT_CODE
+}
+
+/// Mirrors the reference's `capture` command's target resolution and
+/// default-output-path selection. Opening a real browser and driving an
+/// interactive login is out of scope for this issue — see
+/// gap-analysis.md's Connectors cluster rows — so once the target and
+/// capture kind resolve, this reports plainly instead of pretending to
+/// capture anything.
+fn cmd_capture(config_path: &Path, target: &str, out: Option<PathBuf>) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let (rc, spec) = match service.resolve_capture_target(target) {
+        Ok(v) => v,
+        Err(e) => return report_config_error(&e),
+    };
+
+    let default_out = match spec.kind.as_str() {
+        "browser_session" => format!("./{target}-session.zip"),
+        "browser_cookies" => format!("./{target}-cookies.txt"),
+        "browser_storage_state" => format!("./{target}-storage_state.json"),
+        other => {
+            eprintln!("Unsupported capture kind: {other:?}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let out_path = out.unwrap_or_else(|| PathBuf::from(default_out));
+
+    eprintln!(
+        "dbs capture: interactive browser capture isn't implemented in this port yet (see \
+         gap-analysis.md's Connectors cluster rows) \u{2014} resolved {target:?} to connector \
+         {:?} ({} capture); would write to {}",
+        rc.type_,
+        spec.kind,
+        out_path.display()
+    );
     CONFIG_ERROR_EXIT_CODE
 }
 

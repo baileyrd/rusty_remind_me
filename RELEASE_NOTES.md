@@ -8,6 +8,45 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs capture (closes #76)
+**2026-08-13**
+
+- **Implemented:** `dbs capture TARGET [--out/-o PATH]` target
+  resolution, matching the reference's `capture` command: resolve
+  `TARGET` as a connector type directly, falling back to a configured
+  source name whose connector type is then looked up; error if neither
+  resolves, or if the resolved connector declares no `auth_capture`
+  spec (nothing to interactively capture, e.g. a connector
+  authenticated purely by an API token). Added the new
+  `BackupService::resolve_capture_target` method in `dbs-core` for
+  this, plus the `auth_capture: Option<AuthCapture>` field it needed on
+  `Handshake` (mirroring how `export_profile` was added earlier for
+  that issue's needs) — a connector-handshake gap this issue surfaced
+  along the way.
+- Also implemented: the default output path per capture kind
+  (`./<target>-session.zip` / `-cookies.txt` / `-storage_state.json`,
+  matching the reference exactly), overridable with `--out`.
+- **Deliberately scoped, per this repo's connector architecture:**
+  connectors here are external subprocesses discovered over a
+  spawn/handshake protocol that doesn't exist yet (ADR-0001 step 1,
+  gap-analysis.md's Connectors cluster, #85-100) — there's no
+  Playwright-Python helper to drive, and no display in this sandboxed
+  environment to test one against even if there were. So once the
+  target and capture kind resolve, `dbs capture` reports what it
+  *would* capture (resolved connector, capture kind, destination path)
+  instead of attempting real browser automation, and exits `4` (same
+  code used for `sources check`/`doctor`/`serve`'s own "not available"
+  states). The CLI's connector registry is always empty today, so this
+  is observable end-to-end only via the resolution-failure paths —
+  same limitation `dbs sources`/`dbs connectors` (#71) already
+  documented.
+- 6 new `dbs-core` unit tests for `resolve_capture_target` (connector
+  type found directly, source-name fallback, neither resolves, source's
+  connector type unregistered, connector with no `auth_capture`) plus 4
+  new `dbs-cli` integration tests (unknown target, source-name fallback
+  reporting its unregistered connector type, `--out` flag parsing,
+  missing target as a usage error).
+
 ## dbs serve flag wiring (closes #75)
 **2026-08-13**
 
