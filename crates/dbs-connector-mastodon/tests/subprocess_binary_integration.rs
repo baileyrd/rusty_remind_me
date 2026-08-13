@@ -38,10 +38,7 @@ fn the_real_binarys_handshake_is_valid_and_matches_the_connector() {
     assert_eq!(report.loaded.len(), 1);
     let rc = &report.loaded[0];
     assert_eq!(rc.type_, "mastodon");
-    assert_eq!(
-        rc.handshake.secret_keys,
-        vec!["MASTODON_TOKEN".to_string()]
-    );
+    assert_eq!(rc.handshake.secret_keys, vec!["MASTODON_TOKEN".to_string()]);
     assert!(rc.handshake.item_kinds.contains(&"bookmark".to_string()));
     assert!(rc.handshake.item_kinds.contains(&"favourite".to_string()));
     assert!(rc.handshake.capabilities.supports_full_enumeration);
@@ -66,10 +63,8 @@ fn status_json(id: &str, acct: &str, content: &str, created_at: &str) -> serde_j
 #[test]
 fn a_real_run_against_a_mock_instance_commits_items_through_the_full_subprocess_boundary() {
     let mut server = mockito::Server::new();
-    let bookmarks =
-        serde_json::json!([status_json("1", "alice", "hello", "2024-06-01T00:00:00Z")]);
-    let favourites =
-        serde_json::json!([status_json("2", "bob", "world", "2024-06-02T00:00:00Z")]);
+    let bookmarks = serde_json::json!([status_json("1", "alice", "hello", "2024-06-01T00:00:00Z")]);
+    let favourites = serde_json::json!([status_json("2", "bob", "world", "2024-06-02T00:00:00Z")]);
     let _m_bookmarks = server
         .mock(
             "GET",

@@ -8,6 +8,54 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## 13 connectors: real dbs-connector-* subprocess binaries (closes #164)
+**2026-08-13**
+
+- Every remaining connector crate — `dbs-connector-bluesky`, `-github`,
+  `-mastodon`, `-pinboard`, `-pocketcasts`, `-podcast`, `-readwise`,
+  `-reddit`, `-skool`, `-spotify`, `-udemy`, `-vimeo`, `-youtube` — gets
+  a `src/main.rs` mirroring `dbs-connector-raindrop`'s (#161): construct
+  the connector with its default config, apply a test-only env-var
+  override so integration tests can redirect it at a local mock instead
+  of the real service, then hand it to
+  `dbs_connector_support::run_connector_main`. All 14 built-in
+  connectors are now real, independently spawnable binaries, not just
+  `raindrop`.
+- **10 plain REST+HTTP connectors** (bluesky, github, mastodon,
+  pinboard, pocketcasts, podcast, readwise, spotify, udemy, vimeo) each
+  get a `tests/subprocess_binary_integration.rs` proving the full
+  ADR-0001 protocol against a real compiled binary: a handshake-validity
+  check, plus a real run against a `mockito`-served fixture (or, for
+  `podcast`, a served RSS feed — it has no fixed API host, so its
+  redirect target is the feed URL list itself) landing real items in a
+  real `SqliteStorage`. `mastodon` and `bluesky` redirect via a plain
+  `Config` field (`instance`/`service`) rather than a `with_base_url`
+  builder; `spotify` needs two redirects (OAuth token exchange +
+  REST API); `udemy`/`vimeo` also have an off-by-default
+  `download_videos` → `yt-dlp` path already covered by their own unit
+  tests, left unwired here since it's unreachable from default config.
+- **`dbs-connector-youtube`** has no HTTP layer at all — every fetch
+  shells out to `yt-dlp`. Its test redirects via `with_yt_dlp_bin` to a
+  fake script instead of a mock server, same two-test shape otherwise.
+- **`dbs-connector-reddit` and `dbs-connector-skool`** are Playwright-
+  session connectors permanently blocked pending issue #99 — `fetch()`
+  unconditionally returns a `ConnectorError::Config` today, by design,
+  regardless of input. Their integration tests prove the *subprocess
+  boundary* correctly relays that error end to end (a real, fully-valid
+  session directory still produces the expected error), rather than
+  asserting real items land in storage — there's nothing to fetch until
+  #99 lands.
+- Known follow-up gap surfaced by this work, not solved here: several
+  connectors (`bluesky`'s `identifier`, `mastodon`'s `instance`,
+  `podcast`'s `feeds`) have config fields that are genuine per-source
+  business data, not test infrastructure — today nothing passes a
+  source's real config into a spawned connector process beyond secrets,
+  so a real `dbs backup` run of these needs that plumbing before it can
+  do real work. `mastodon`/`podcast` even hard-fail immediately without
+  it (empty `instance`/no `feeds`); `bluesky`'s empty `identifier`
+  happens not to block a real Bluesky login. This is a distinct gap from
+  #99's browser-session blocker and deserves its own future issue.
+
 ## `dbs-cli`: real connector-candidate discovery (closes #160)
 **2026-08-13**
 

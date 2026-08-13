@@ -42,7 +42,13 @@ fn the_real_binarys_handshake_is_valid_and_matches_the_connector() {
     assert!(rc.handshake.capabilities.supports_full_enumeration);
 }
 
-fn post_json(hash: &str, description: &str, href: &str, time: &str, tags: &str) -> serde_json::Value {
+fn post_json(
+    hash: &str,
+    description: &str,
+    href: &str,
+    time: &str,
+    tags: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "hash": hash,
         "description": description,
@@ -69,8 +75,20 @@ fn a_real_run_against_a_mock_api_commits_items_through_the_full_subprocess_bound
         .with_body(r#"{"update_time": "2024-06-01T00:00:00Z"}"#)
         .create();
     let posts = serde_json::json!([
-        post_json("1", "First", "https://example.com/1", "2024-06-01T00:00:00Z", "a b"),
-        post_json("2", "Second", "https://example.com/2", "2024-05-01T00:00:00Z", "c"),
+        post_json(
+            "1",
+            "First",
+            "https://example.com/1",
+            "2024-06-01T00:00:00Z",
+            "a b"
+        ),
+        post_json(
+            "2",
+            "Second",
+            "https://example.com/2",
+            "2024-05-01T00:00:00Z",
+            "c"
+        ),
     ]);
     let _m_all = server
         .mock("GET", mockito::Matcher::Regex(r"^/posts/all.*".to_string()))

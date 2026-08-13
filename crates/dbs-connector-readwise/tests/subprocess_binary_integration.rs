@@ -37,10 +37,7 @@ fn the_real_binarys_handshake_is_valid_and_matches_the_connector() {
     assert_eq!(report.loaded.len(), 1);
     let rc = &report.loaded[0];
     assert_eq!(rc.type_, "readwise");
-    assert_eq!(
-        rc.handshake.secret_keys,
-        vec!["READWISE_TOKEN".to_string()]
-    );
+    assert_eq!(rc.handshake.secret_keys, vec!["READWISE_TOKEN".to_string()]);
     assert!(rc.handshake.item_kinds.contains(&"book".to_string()));
     assert!(rc.handshake.item_kinds.contains(&"highlight".to_string()));
     assert!(rc.handshake.capabilities.supports_full_enumeration);
@@ -132,10 +129,7 @@ fn a_real_run_against_a_mock_api_commits_items_through_the_full_subprocess_bound
             value: serde_json::json!(null),
         }),
         since: None,
-        secrets: HashMap::from([(
-            "READWISE_TOKEN".to_string(),
-            "secret-token".to_string(),
-        )]),
+        secrets: HashMap::from([("READWISE_TOKEN".to_string(), "secret-token".to_string())]),
         run_id,
         mode: "full".to_string(),
         full_refresh: true,
