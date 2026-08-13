@@ -8,6 +8,45 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-cli`: real connector-candidate discovery (closes #160)
+**2026-08-13**
+
+- **`dbs-cli` no longer always constructs an empty registry.** Every
+  one of the 17 call sites that used to hardcode
+  `ConnectorRegistry::from_resolved([])` now calls a new `build_registry`
+  helper: `dbs_core::scan_connector_candidates` scans `PATH` (plus an
+  optional `[dbs] connectors_dir` config override, new `Config` field)
+  for `dbs-connector-*` binaries, `dbs_core::override_map_from_config`
+  converts `Config.connectors`'s per-type overrides into the shape
+  `ConnectorRegistry::discover` (#45) expects, and any candidate that
+  fails to load is reported as a warning rather than silently dropped.
+- **Deliberately does *not* default to scanning this binary's own
+  directory** (`std::env::current_exe()`'s parent) even though that
+  would make a `cargo build --workspace` dev setup "just work" — in a
+  Cargo workspace that directory holds every other crate's binary too,
+  which would make discovery depend on incidental build layout instead
+  of a real, portable install convention. `PATH` (optionally plus an
+  explicit `connectors_dir`) is that convention, and it has a welcome
+  side effect: every existing `dbs-cli` integration test that relies on
+  "connector not found" behavior (many of them use `raindrop` as a
+  stand-in type name, now a real, discoverable connector as of #161)
+  keeps working unchanged, since this sandboxed test environment's
+  `PATH` never has any `dbs-connector-*` binaries on it.
+- 4 new integration tests (`dbs-cli/tests/connector_discovery.rs`)
+  exercise the "actually found" path for real: `dbs-connector-raindrop`
+  becomes a dev-dependency of `dbs-cli` purely so its binary gets built
+  alongside the test suite, then `connectors_dir` points at a copy of
+  it and `dbs connectors describe`/`list`/`sources check` are asserted
+  to actually find and handshake with it — plus one test confirming
+  the pre-#160 "nothing configured, nothing found" behavior still holds.
+- With #161 and this issue both done, `dbs backup <name>` can now
+  genuinely discover *and* run a real connector end to end for the
+  first time in this port — the last missing piece was always either
+  "no candidate to discover" or "nothing to run once discovered," and
+  both are now closed for at least one real connector (`raindrop`).
+  Wiring up the remaining 13 built-in connectors as real binaries
+  (#161's own follow-up) is what extends this to the rest.
+
 ## `dbs-connector-support`/`dbs-connector-raindrop`: real subprocess binary (closes #161)
 **2026-08-13**
 

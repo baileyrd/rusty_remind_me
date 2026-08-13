@@ -482,6 +482,7 @@ mod tests {
             parallel: 1,
             sources: HashMap::new(),
             connectors: HashMap::new(),
+            connectors_dir: None,
             base_dir: std::path::PathBuf::new(),
             source_path: None,
         }

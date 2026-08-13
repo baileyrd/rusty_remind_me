@@ -15,19 +15,16 @@
 //! data, not on Rust/Python types, so nothing about moving to IPC
 //! changes that logic.
 //!
-//! **Scope note:** this issue implements the handshake protocol,
+//! **Scope note:** issue #45 implemented the handshake protocol,
 //! contract validation, version gating, and collision resolution given
 //! an already-resolved list of candidate connector commands
-//! ([`ConnectorCandidate`]). Enumerating candidates from a directory
-//! scan of `dbs-connector-*` binaries or a `connectors.toml` manifest —
-//! the ADR's "replaces entry-point metadata" step — is deferred to the
-//! CLI issue that needs it (`dbs sources`/`dbs connectors`), which
-//! already has to resolve a connectors directory/PATH from config.
-//! Likewise, this issue only implements the handshake half of the
-//! protocol (steps 1 and 4 in the ADR); the run/stream half (steps 2-3 —
-//! writing a `RunContext` and reading `FetchEvent` lines back) is a
-//! separate concern for whichever issue bridges a [`RegisteredConnector`]
-//! to the `Connector` trait's `fetch` signature.
+//! ([`ConnectorCandidate`]) — the run/stream half (steps 2-3) is
+//! `crate::run_stream`, issue #157. [`scan_connector_candidates`] and
+//! [`override_map_from_config`] (issue #160) supply the piece #45
+//! deferred: enumerating those candidates for real, from a `PATH`/
+//! configured-directory scan of `dbs-connector-*` binaries, instead of
+//! a caller building the list by hand — the ADR's "replaces
+//! entry-point metadata" step.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -61,6 +58,98 @@ pub struct ConnectorCandidate {
     pub is_builtin: bool,
     pub command: PathBuf,
     pub args: Vec<String>,
+}
+
+/// Filename prefix every `dbs-connector-<type>` binary follows —
+/// [`scan_connector_candidates`]'s directory scan matches candidates by
+/// this prefix alone. The *type* itself is never read from the
+/// filename; it's self-declared in the handshake (protocol step 1),
+/// same as the reference's entry-point name carries no meaning beyond
+/// "try loading this."
+pub const CONNECTOR_BINARY_PREFIX: &str = "dbs-connector-";
+
+/// Scans `dirs` in order for files matching the `dbs-connector-*`
+/// naming convention, building one [`ConnectorCandidate`] per unique
+/// match — earlier directories win over later ones for the same
+/// filename, mirroring `PATH` search-order semantics. An unreadable or
+/// missing directory is skipped silently: most `PATH` entries won't
+/// have any `dbs-connector-*` binaries in them at all, and that's the
+/// ordinary case, not an error.
+///
+/// **Scope note:** everything found this way is reported
+/// `is_builtin: true, dist_name: "rusty_dbs"` — a plain directory/`PATH`
+/// scan has no manifest to distinguish a genuinely built-in connector
+/// from a third-party one dropped in the same location. That
+/// distinction needs the `connectors.toml` manifest ADR-0001 names as
+/// an alternative discovery mechanism, not built here.
+pub fn scan_connector_candidates(dirs: &[PathBuf]) -> Vec<ConnectorCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let stem = file_name.strip_suffix(".exe").unwrap_or(file_name);
+            if !stem.starts_with(CONNECTOR_BINARY_PREFIX) || !is_executable_file(&path) {
+                continue;
+            }
+            if !seen.insert(stem.to_string()) {
+                continue;
+            }
+            candidates.push(ConnectorCandidate {
+                dist_name: "rusty_dbs".to_string(),
+                is_builtin: true,
+                command: path,
+                args: Vec::new(),
+            });
+        }
+    }
+    candidates
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let is_file = std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false);
+    is_file
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+}
+
+/// Converts [`crate::config::Config`]'s per-type connector overrides
+/// into [`ConnectorRegistry::discover`]'s `override_map` shape:
+/// `type -> plugin_id` for an explicit provider choice, plus the
+/// special `"<type>:allow_override"` = `"true"` key for a type that
+/// opts into third-party shadowing of a built-in.
+pub fn override_map_from_config(
+    connectors: &HashMap<String, crate::config::ConnectorOverride>,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (type_, over) in connectors {
+        if let Some(plugin) = &over.plugin {
+            map.insert(type_.clone(), plugin.clone());
+        }
+        if over.allow_override {
+            map.insert(format!("{type_}:allow_override"), "true".to_string());
+        }
+    }
+    map
 }
 
 /// The JSON line a connector subprocess writes on startup, self-describing
@@ -653,5 +742,95 @@ mod tests {
         assert!(registry.get("raindrop").is_some());
         assert!(registry.get("rusty_dbs:raindrop").is_some());
         assert_eq!(registry.all().len(), 1);
+    }
+
+    fn scan_temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-core-registry-scan-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_executable(dir: &std::path::Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_connector_candidates_finds_only_executables_matching_the_prefix() {
+        let dir = scan_temp_dir("basic");
+        write_executable(&dir, "dbs-connector-raindrop");
+        std::fs::write(dir.join("dbs-connector-not-executable"), b"nope").unwrap();
+        std::fs::write(dir.join("some-other-tool"), b"irrelevant").unwrap();
+
+        let candidates = scan_connector_candidates(&[dir]);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0]
+            .command
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("dbs-connector-raindrop"));
+        assert!(candidates[0].is_builtin);
+        assert_eq!(candidates[0].dist_name, "rusty_dbs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_connector_candidates_prefers_earlier_directories_for_the_same_name() {
+        let dir_a = scan_temp_dir("first");
+        let dir_b = scan_temp_dir("second");
+        let winner = write_executable(&dir_a, "dbs-connector-dup");
+        write_executable(&dir_b, "dbs-connector-dup");
+
+        let candidates = scan_connector_candidates(&[dir_a, dir_b]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].command, winner);
+    }
+
+    #[test]
+    fn scan_connector_candidates_skips_a_missing_directory_without_erroring() {
+        let candidates = scan_connector_candidates(&[PathBuf::from("/this/does/not/exist/at/all")]);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn override_map_from_config_encodes_plugin_and_allow_override() {
+        let mut connectors = HashMap::new();
+        connectors.insert(
+            "raindrop".to_string(),
+            crate::config::ConnectorOverride {
+                plugin: Some("third_party:raindrop".to_string()),
+                allow_override: true,
+            },
+        );
+        connectors.insert(
+            "github".to_string(),
+            crate::config::ConnectorOverride {
+                plugin: None,
+                allow_override: false,
+            },
+        );
+
+        let map = override_map_from_config(&connectors);
+        assert_eq!(
+            map.get("raindrop"),
+            Some(&"third_party:raindrop".to_string())
+        );
+        assert_eq!(
+            map.get("raindrop:allow_override"),
+            Some(&"true".to_string())
+        );
+        assert!(!map.contains_key("github"));
+        assert!(!map.contains_key("github:allow_override"));
     }
 }

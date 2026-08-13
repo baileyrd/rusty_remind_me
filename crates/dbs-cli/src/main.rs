@@ -39,9 +39,10 @@ use clap::{Parser, Subcommand};
 
 use dbs_core::service::{BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink};
 use dbs_core::{
-    load_config, parse_iso, write_scaffolding, BackupRunError, CancelToken, ConnectorRegistry,
-    DbsError, ExportQuery, ItemRow, ProgressEvent, ProgressPhase, RunResult, RunStatus,
-    SqliteStorage, Storage, SubprocessRunner, CURRENT_API_VERSION,
+    load_config, override_map_from_config, parse_iso, scan_connector_candidates, write_scaffolding,
+    BackupRunError, CancelToken, Config, ConnectorRegistry, DbsError, ExportQuery, ItemRow,
+    ProgressEvent, ProgressPhase, RunResult, RunStatus, SqliteStorage, Storage, SubprocessRunner,
+    CURRENT_API_VERSION, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 
 const STUB_EXIT_CODE: i32 = 1;
@@ -734,6 +735,41 @@ fn report_config_error(e: &DbsError) -> i32 {
     CONFIG_ERROR_EXIT_CODE
 }
 
+/// Directories to scan for `dbs-connector-*` binaries (issue #160):
+/// every `PATH` entry, plus `[dbs] connectors_dir` if configured.
+/// Deliberately does *not* default to this binary's own directory
+/// (`std::env::current_exe()`'s parent) — in a `cargo`-built workspace
+/// that directory holds every other crate's binary too, which would
+/// make discovery depend on incidental build layout rather than a
+/// real, portable install convention. `PATH` is that convention.
+fn connector_search_dirs(cfg: &Config) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = cfg.connectors_dir_path().into_iter().collect();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path_var));
+    }
+    dirs
+}
+
+/// Builds a real [`ConnectorRegistry`] (issue #160): scans
+/// [`connector_search_dirs`] for `dbs-connector-*` binaries, handshakes
+/// with each one found, and applies `cfg.connectors`' per-type
+/// overrides. A candidate that fails to load is reported as a warning
+/// (never silently dropped) but never blocks discovery of the others —
+/// same guarantee `ConnectorRegistry::discover` itself makes.
+fn build_registry(cfg: &Config) -> ConnectorRegistry {
+    let mut registry = ConnectorRegistry::new();
+    let candidates = scan_connector_candidates(&connector_search_dirs(cfg));
+    let override_map = override_map_from_config(&cfg.connectors);
+    let report = registry.discover(&candidates, &override_map, DEFAULT_HANDSHAKE_TIMEOUT);
+    for failure in &report.failures {
+        eprintln!(
+            "warning: connector candidate {:?} failed to load: {}",
+            failure.dist_name, failure.reason
+        );
+    }
+    registry
+}
+
 /// A transient live status line for `dbs backup`, written to *stderr* so
 /// it never pollutes the results table on stdout. Mirrors the
 /// reference's `_ProgressRenderer` — minus its spinner and item-count
@@ -874,7 +910,7 @@ fn cmd_backup(
         return report_config_error(&e);
     }
 
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let mut service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -966,7 +1002,7 @@ fn cmd_status(config_path: &Path, source: Option<String>, json_out: bool) -> i32
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1022,7 +1058,7 @@ fn cmd_history(config_path: &Path, source: Option<String>, limit: u32, json_out:
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1147,7 +1183,7 @@ fn cmd_items(
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1404,7 +1440,7 @@ fn cmd_stats(config_path: &Path, json_out: bool) -> i32 {
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1522,7 +1558,7 @@ fn cmd_export(
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1645,7 +1681,7 @@ fn cmd_export_notes(
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1705,7 +1741,7 @@ fn cmd_export_profiles(config_path: &Path, json_out: bool) -> i32 {
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1835,7 +1871,7 @@ fn cmd_export_wiki(
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -1951,7 +1987,7 @@ fn cmd_sources_list(config_path: &Path, json_out: bool) -> i32 {
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -2030,7 +2066,7 @@ fn cmd_sources_add(config_path: &Path, name: String, type_: String, set: Vec<Str
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -2065,7 +2101,7 @@ fn cmd_sources_check(config_path: &Path) -> i32 {
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -2100,7 +2136,7 @@ fn cmd_connectors_list(config_path: &Path, json_out: bool, verbose: bool) -> i32
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -2166,7 +2202,7 @@ fn cmd_connectors_describe(config_path: &Path, type_: String) -> i32 {
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -2226,7 +2262,7 @@ fn cmd_doctor(config_path: &Path, json_out: bool) -> i32 {
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -2435,7 +2471,7 @@ fn cmd_capture(config_path: &Path, target: &str, out: Option<PathBuf>) -> i32 {
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
@@ -2588,7 +2624,7 @@ fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchAr
     if let Err(e) = storage.migrate() {
         return report_config_error(&e);
     }
-    let registry = ConnectorRegistry::from_resolved([]);
+    let registry = build_registry(&cfg);
     let runner = SubprocessRunner::new(&cfg);
     let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
