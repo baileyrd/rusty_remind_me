@@ -8,6 +8,39 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## In-UI setup: dependency install + browser-auth capture jobs (closes #83)
+**2026-08-13**
+
+- **New `Handshake` fields:** `pip_requirements: Vec<String>` and
+  `needs_playwright_browser: bool` (mirroring how `auth_capture` was
+  added for #76) — what a connector declares it needs installed.
+- **Implemented, fully real:** `dbs-web::setup`'s dependency-install
+  path — `install_commands`/`playwright_install_commands` derive
+  `pip install`/`playwright install chromium` steps (via whichever of
+  `python3`/`python` is on `PATH`), and `run_commands` actually
+  executes them, streaming each line. `run_install_job` wires that
+  through the #80 job manager as a real, trackable background job.
+- **Reuses `dbs-web::jobs::JobManager`** rather than porting the
+  reference's second, structurally-identical `SetupManager` — a setup
+  job's log line is just `{"line": ...}` on the same generic
+  `Value`-typed event stream the backup job manager already has.
+- **Pure helpers ported directly** (no gap): `validate_netscape_cookies`,
+  `validate_storage_state`, `to_netscape_cookies`,
+  `extract_session_zip` (zip-slip guarded, using the `zip` crate
+  already in the workspace).
+- **Deliberately scoped:** `run_capture_job` fails cleanly rather than
+  driving a real browser — same gap `dbs capture` (#76) already
+  documented: real browser automation needs the shared Playwright
+  launch helper subprocess issue #99 hasn't built yet. No `/api`
+  routes wire any of this into `dbs serve` yet either — there's no
+  filed issue for the general `/api/status`/`/api/sources`/etc. read
+  surface these actions would sit alongside in the real UI.
+- 18 new `dbs-web` tests: `run_commands`' three outcomes (success,
+  first-failure-stops-the-rest, launch failure), `install_commands`'
+  derivation, both job kinds run end-to-end through a real
+  `JobManager`, and the pure validation/formatting/zip-extraction
+  helpers (including a zip-slip rejection test).
+
 ## envfile.py (scoped secrets writer) (closes #82)
 **2026-08-13**
 
