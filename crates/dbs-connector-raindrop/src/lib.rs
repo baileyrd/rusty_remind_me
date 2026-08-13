@@ -421,9 +421,9 @@ fn capitalize(s: &str) -> String {
 fn classify_http_error(e: dbs_core::HttpError) -> ConnectorError {
     match e {
         dbs_core::HttpError::Exhausted(inner) => inner,
-        dbs_core::HttpError::Status(err) => match err.status().map(|s| s.as_u16()) {
-            Some(401) | Some(403) => ConnectorError::Auth(err.to_string()),
-            _ => ConnectorError::Transient(err.to_string()),
+        dbs_core::HttpError::Status { error, .. } => match error.status().map(|s| s.as_u16()) {
+            Some(401) | Some(403) => ConnectorError::Auth(error.to_string()),
+            _ => ConnectorError::Transient(error.to_string()),
         },
     }
 }

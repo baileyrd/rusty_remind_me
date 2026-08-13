@@ -58,15 +58,23 @@ pub enum HttpError {
     /// reference's `response.raise_for_status()` — not wrapped in a
     /// `ConnectorError`. A connector's own `fetch()` must catch and
     /// reclassify this if a given status should be treated as
-    /// config/auth/transient instead of aborting the run.
-    Status(reqwest::Error),
+    /// config/auth/transient instead of aborting the run. `headers`
+    /// are the response's own (captured before `reqwest` consumes the
+    /// response converting it to an error) — some APIs distinguish two
+    /// different failure modes under the same status code via a header
+    /// (e.g. GitHub's 403 rate-limit-exhausted vs. 403
+    /// token-lacks-access, told apart by `X-RateLimit-Remaining`).
+    Status {
+        error: reqwest::Error,
+        headers: reqwest::header::HeaderMap,
+    },
 }
 
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Exhausted(e) => write!(f, "{e}"),
-            Self::Status(e) => write!(f, "{e}"),
+            Self::Status { error, .. } => write!(f, "{error}"),
         }
     }
 }
@@ -188,7 +196,11 @@ impl ManagedHttpClient {
             }
 
             if status.is_client_error() || status.is_server_error() {
-                return Err(HttpError::Status(response.error_for_status().unwrap_err()));
+                let headers = response.headers().clone();
+                return Err(HttpError::Status {
+                    error: response.error_for_status().unwrap_err(),
+                    headers,
+                });
             }
             return Ok(response);
         }
@@ -379,7 +391,7 @@ mod tests {
         let err = client
             .get(&format!("{}/missing", server.url()))
             .unwrap_err();
-        assert!(matches!(err, HttpError::Status(_)));
+        assert!(matches!(err, HttpError::Status { .. }));
         // No retry, so no backoff sleep happened.
         assert!(sleeps.lock().unwrap().is_empty());
         mock.assert();

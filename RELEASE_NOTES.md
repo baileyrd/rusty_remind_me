@@ -8,6 +8,42 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `github` connector (closes #86)
+**2026-08-13**
+
+- **New `dbs-connector-github` crate** — backs up starred repositories
+  and gists via GitHub's REST API v3, token auth (`GITHUB_TOKEN`).
+  Mirrors `dbs.connectors.github`: stars have no server-side `since`
+  filter, so incremental mode pages `sort=created&direction=desc`
+  (with the `application/vnd.github.star+json` media type, which adds
+  `starred_at`) and early-stops past a stored watermark minus an
+  overlap — `raindrop`'s exact fast path. Gists DO have a real delta
+  filter (`GET /gists?since=ISO` against `updated_at`), so their
+  incremental mode is a genuine server-side query. A full/reconcile run
+  yields one combined `ReconcileMarker` across both kinds — withheld
+  entirely if either kind is disabled in config, so a deliberately
+  partial enumeration never offers the skipped kind's stored items up
+  for deletion sweeping.
+- **Extends `HttpError::Status` with the response's headers** —
+  `raindrop`'s connector only ever needed the status code to
+  reclassify a non-retryable response, but GitHub's 403 means two
+  different things (rate-limit-exhausted vs. token-lacks-access) told
+  apart only by the `X-RateLimit-Remaining` response header, which
+  `ManagedHttpClient` was discarding before converting a bad status
+  into an error. `Status` is now `{ error, headers }`; `raindrop`'s
+  connector updated to match the new shape (no behavior change there).
+- **Not wired up:** same boundary as `raindrop` (#85) — this struct
+  isn't reachable from a real `dbs backup` run yet; the plugin
+  registry's run/stream bridge doesn't exist.
+- 10 new `dbs-connector-github` tests against a `mockito` fixture
+  server: missing-managed-http/missing-token errors, a full fetch
+  yielding both item kinds and a combined reconcile marker, a
+  reconcile run with one kind disabled withholding the marker,
+  incremental stars early-stopping past the watermark, incremental
+  gists actually sending the stored watermark as `?since=`, all three
+  HTTP status classifications (401, 403+rate-limit-exhausted,
+  403+no-header), and connector metadata matching the reference.
+
 ## `raindrop` connector (closes #85)
 **2026-08-13**
 
