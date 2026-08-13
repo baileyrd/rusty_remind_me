@@ -291,6 +291,11 @@ impl Default for BackupSourceOptions {
 /// deterministic substitute).
 #[derive(Debug, Clone)]
 pub struct BackupAllOptions {
+    /// Skip a source whose `schedule` cadence hasn't elapsed since its
+    /// last run (see [`crate::service::BackupService`]'s private
+    /// `is_due`/`next_due_at`, ported from the reference's
+    /// `_is_due`/`_next_due_at`).
+    pub only_due: bool,
     pub continue_on_error: bool,
     pub force_full: bool,
     pub force_reconcile: bool,
@@ -301,6 +306,7 @@ pub struct BackupAllOptions {
 impl Default for BackupAllOptions {
     fn default() -> Self {
         Self {
+            only_due: false,
             continue_on_error: true,
             force_full: false,
             force_reconcile: false,
@@ -477,6 +483,29 @@ impl<'a> BackupService<'a> {
         })
     }
 
+    /// Mirrors the reference's `_is_due`: `true` if `name`'s `schedule`
+    /// cadence has elapsed since its last run (or it has never run at
+    /// all — a never-run source is always due).
+    fn source_is_due(&self, name: &str, now: DateTime<Utc>) -> Result<bool, DbsError> {
+        let last_started = match self.storage.get_source(name)? {
+            Some(src) => self
+                .storage
+                .recent_runs(Some(src.id), 1)?
+                .first()
+                .and_then(|r| r.get("started_at"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| parse_iso(Some(s))),
+            None => None,
+        };
+        let schedule = self
+            .config
+            .sources
+            .get(name)
+            .and_then(|sc| sc.schedule.clone())
+            .unwrap_or_else(|| "daily".to_string());
+        Ok(is_due(last_started, &schedule, now))
+    }
+
     /// Backs up every enabled source sequentially (see
     /// [`BackupAllOptions`] for what's deferred to other issues).
     /// Reaps once, up front — a per-source reap mid-batch would flip a
@@ -492,6 +521,17 @@ impl<'a> BackupService<'a> {
             .map(|(n, _)| n.clone())
             .collect();
         names.sort();
+
+        if opts.only_due {
+            let now = Utc::now();
+            let mut due = Vec::with_capacity(names.len());
+            for name in names {
+                if self.source_is_due(&name, now)? {
+                    due.push(name);
+                }
+            }
+            names = due;
+        }
 
         let per_source = BackupSourceOptions {
             mode: "auto".to_string(),
@@ -1992,6 +2032,49 @@ mod tests {
             err,
             DbsError::Load(crate::errors::ConnectorLoadError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn backup_all_only_due_includes_every_never_run_source() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "raindrop"));
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let opts = BackupAllOptions {
+            only_due: true,
+            ..BackupAllOptions::default()
+        };
+        let results = service.backup_all(&opts).unwrap();
+        let mut names: Vec<&str> = results.iter().map(|r| r.source.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn backup_all_only_due_with_no_enabled_sources_returns_empty() {
+        let mut sources = HashMap::new();
+        let mut disabled = test_source_config("a", "raindrop");
+        disabled.enabled = false;
+        sources.insert("a".to_string(), disabled);
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let opts = BackupAllOptions {
+            only_due: true,
+            ..BackupAllOptions::default()
+        };
+        let results = service.backup_all(&opts).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]

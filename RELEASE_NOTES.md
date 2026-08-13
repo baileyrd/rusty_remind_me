@@ -8,6 +8,31 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs backup --all --only-due: scheduling gate (closes #65)
+**2026-08-13**
+
+- **Implemented:** `dbs backup --all --only-due`, filtering the
+  `--all` source list down to sources that are actually due, mirroring
+  `cli.py`'s `_is_due` check. Added `BackupAllOptions.only_due: bool`
+  (default `false`, i.e. `--all` alone still runs every enabled
+  source) and a new `BackupService::source_is_due` method: looks up
+  the source's most recent run via `Storage::recent_runs`, falls back
+  to "never run" (always due) when there is none, and compares against
+  the source's configured `schedule` (default `"daily"`) via the
+  existing `is_due` free function.
+- `--only-due` is wired as a new CLI flag on `dbs backup`; `cmd_backup`
+  now shares its config/storage/service setup between the
+  single-source and `--all` paths.
+- 2 new service-level unit tests (never-run sources are always due;
+  an empty/all-disabled source list returns no results) plus 5 new
+  CLI integration tests in `crates/dbs-cli/tests/backup_all.rs`, using
+  a real `SqliteStorage` seeded with genuine `Utc::now()`-based run
+  timestamps to exercise the "recently run source is skipped" case —
+  `is_due` compares against the real wall clock, so a fake/fixed
+  timestamp can't cover that scenario.
+- `--parallel N` worker-pool batching (#66) and the progress line/
+  Ctrl+C handling (#67) remain out of scope for this issue.
+
 ## dbs backup: single-source run (closes #64)
 **2026-08-13**
 

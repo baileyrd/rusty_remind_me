@@ -1,8 +1,6 @@
 //! Integration tests for `dbs backup`'s single-source path (issue #64).
-//!
-//! `--all` is out of scope for this issue (a later follow-up, #65-#67)
-//! and is only checked here to confirm it still reports as a stub
-//! rather than silently doing the wrong thing.
+//! `--all`/`--only-due` batching has its own tests in `backup_all.rs`
+//! (issue #65).
 //!
 //! **On "a successful run":** no connector-candidate discovery
 //! mechanism exists yet (an implicit connectors-cluster prerequisite,
@@ -128,26 +126,6 @@ fn no_source_and_no_all_flag_is_a_usage_error() {
     assert_eq!(output.status.code(), Some(4));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("Specify a SOURCE name or --all"));
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn backup_all_is_still_a_stub() {
-    let dir = temp_dir("all-stub");
-    let config_path = write_config(&dir, "");
-
-    let output = Command::new(dbs_bin())
-        .current_dir(&dir)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("backup")
-        .arg("--all")
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("not yet implemented"));
 
     std::fs::remove_dir_all(&dir).ok();
 }

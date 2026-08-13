@@ -34,7 +34,9 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
-use dbs_core::service::{BackupService, BackupSourceOptions, UnimplementedRunner};
+use dbs_core::service::{
+    BackupAllOptions, BackupService, BackupSourceOptions, UnimplementedRunner,
+};
 use dbs_core::{
     load_config, write_scaffolding, BackupRunError, ConnectorRegistry, DbsError, RunResult,
     RunStatus, SqliteStorage, Storage,
@@ -80,6 +82,9 @@ enum Command {
         /// Back up every enabled source.
         #[arg(long = "all")]
         all_sources: bool,
+        /// With --all: skip a source whose schedule cadence hasn't elapsed.
+        #[arg(long)]
+        only_due: bool,
         /// Full refetch, ignore cursor.
         #[arg(long)]
         force_full: bool,
@@ -178,6 +183,7 @@ fn main() {
         Command::Backup {
             source,
             all_sources,
+            only_due,
             force_full,
             reconcile,
             dry_run,
@@ -186,6 +192,7 @@ fn main() {
             &cli.config,
             source,
             all_sources,
+            only_due,
             force_full,
             reconcile,
             dry_run,
@@ -293,18 +300,16 @@ fn cmd_backup(
     config_path: &Path,
     source: Option<String>,
     all_sources: bool,
+    only_due: bool,
     force_full: bool,
     reconcile: bool,
     dry_run: bool,
     limit: Option<u32>,
 ) -> i32 {
-    if all_sources {
-        return cmd_stub("backup --all");
-    }
-    let Some(name) = source else {
+    if !all_sources && source.is_none() {
         eprintln!("Specify a SOURCE name or --all.");
         return CONFIG_ERROR_EXIT_CODE;
-    };
+    }
 
     let cfg = match load_config(config_path) {
         Ok(cfg) => cfg,
@@ -322,6 +327,28 @@ fn cmd_backup(
     let runner = UnimplementedRunner;
     let mut service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
+    if all_sources {
+        let opts = BackupAllOptions {
+            only_due,
+            continue_on_error: true,
+            force_full,
+            force_reconcile: reconcile,
+            dry_run,
+            limit,
+        };
+        return match service.backup_all(&opts) {
+            Ok(results) => {
+                println!("Backup results:");
+                for result in &results {
+                    print_run(result);
+                }
+                exit_code(&results)
+            }
+            Err(e) => report_config_error(&e),
+        };
+    }
+
+    let name = source.expect("checked above: source is Some when not --all");
     let opts = BackupSourceOptions {
         mode: "auto".to_string(),
         force_full,

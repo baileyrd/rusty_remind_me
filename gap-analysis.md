@@ -107,7 +107,7 @@ not left as one oversized issue.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | CLI skeleton + `dbs init` | fn | spec | both | `cli.py` | — | no | M | Done (#63) — new `dbs-cli` binary crate; added the `clap` dependency named in this row |
 | `dbs backup` — single-source run | fn | spec | both | `cli.py` | — | no | M | Done (#64) — every source currently reports "connector not found" since no on-disk connector-candidate discovery exists yet (implicit connectors-cluster prerequisite) |
-| `dbs backup --all --only-due` scheduling gate | fn | spec | both | `cli.py` | — | no | S | |
+| `dbs backup --all --only-due` scheduling gate | fn | spec | both | `cli.py` | — | no | S | Done (#65) |
 | `dbs backup --parallel N` worker pool | fn | spec | both | `cli.py` | — | no | L | Needs an async-runtime/threading decision — split further at filing |
 | `dbs backup` progress line + Ctrl+C handling | fn | spec | both | `cli.py` | — | no | S | |
 | `dbs status` / `dbs history` | fn | spec | both | `cli.py` | — | no | S | |
