@@ -75,13 +75,14 @@ fn the_real_binarys_handshake_is_valid_and_matches_the_connector() {
         ]
     );
     assert!(!rc.handshake.item_kinds.is_empty());
-    let kind_names: Vec<&str> = rc
-        .handshake
-        .item_kinds
-        .iter()
-        .map(|k| k.name.as_str())
-        .collect();
-    assert_eq!(kind_names, vec!["community", "course", "lesson"]);
+    assert_eq!(
+        rc.handshake.item_kinds,
+        vec![
+            "community".to_string(),
+            "course".to_string(),
+            "lesson".to_string(),
+        ]
+    );
     assert!(rc.handshake.needs_playwright_browser);
 }
 
