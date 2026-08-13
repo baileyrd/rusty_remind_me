@@ -19,8 +19,8 @@ Key Architectural Tenets:
    removed. See the "Rusty Mill ecosystem dependencies" comment in the
    workspace `Cargo.toml` for the full account, and re-adopt one only at the
    point it gains a real call site.)
-3. **Data Parity with `remind-me`**: Identical SQLite Version 27 schema and JSON tool signatures for drop-in interoperability. The schema is generated from the reference rather than transcribed (§5); the version here is the one `remind_me` itself reports, and a mismatch is what makes a database silently unreadable to it.
-4. **Thread Safety & Async Execution**: Thread-safe database access using `Arc<Database>` wrapped in `Mutex<rusqlite::Connection>`, safe for multi-threaded `tokio::spawn` task execution.
+3. **Data Parity with `remind-me`**: Identical SQLite Version 29 schema and JSON tool signatures for drop-in interoperability. The schema is generated from the reference rather than transcribed (§5); the version here is the one `remind_me` itself reports, and a mismatch is what makes a database silently unreadable to it.
+4. **Thread Safety**: Thread-safe database access using `Arc<Database>` wrapped in `parking_lot::Mutex<rusqlite::Connection>`, safe for concurrent access from plain OS threads — the scheduler, folder watcher, sync worker and promotion nudge are each `std::thread::Builder::spawn` loops, not `tokio` tasks; `remind_me_remote` is the one crate in this workspace that runs on `tokio` (§2).
 
 ---
 
@@ -34,14 +34,21 @@ graph TD
     MCP --> CORE[remind_me_core engine]
     API --> CORE
     REMOTE --> MCP
-    HUB[remind_me_hub binary: rusty-remind-me-hub] --> CORE
+    REMOTE --> CORE
+    HUB[remind_me_hub binary: rusty-remind-me-hub]
     CORE --> RUSQLITE[rusqlite / SQLite]
     HUB -.->|optional postgres-store feature| POSTGRES[Postgres]
 ```
 
 `remind_me_hub` is its own binary (`rusty-remind-me-hub`), not reached
-through the `remind_me_cli` dispatch — it is the central sync point nodes
-push to and pull from, not a mode of the client CLI.
+through the `remind_me_cli` dispatch and not a build dependency of
+`remind_me_core` or vice versa — it is the central sync point nodes push to
+and pull from over HTTP, sharing a wire protocol with `remind_me_core::sync`
+rather than a crate dependency. The one Cargo edge between them runs the
+other direction and only in tests: `remind_me_core`'s `dev-dependencies` path
+to `remind_me_hub` (SQLite-only, `default-features = false`) lets
+`tests/support`'s `MockHub` exercise real `remind_me_hub` request handling
+without a spawned process.
 
 ### Crate Roles
 - **`remind_me_core`**: The domain core containing:
@@ -60,10 +67,12 @@ push to and pull from, not a mode of the client CLI.
     framework, not even `tokio` (matches this workspace's tenet 2: the
     project's aspirational `rusty_http` dependency was never real; see
     above).
-  - Routes span far beyond the original four (`/health`, `/stats`,
-    `/api/v1/memories`, `/api/v1/search`); `crates/remind_me_api/tests/`
-    (bulk ops, dashboard, entities, import/export, reminders, versions, ...)
-    is the current, authoritative route inventory — this document does not
+  - Routes span far beyond `/health`; `crates/remind_me_api/src/routes.rs`'s
+    `ROUTES` table (`/api/memories`, `/api/memories/search`,
+    `/api/memories/bulk/*`, `/api/entity*`, `/api/wiki*`, `/api/import`,
+    `/api/export`, `/api/stats`, `/api/vitality`, `/api/versions`,
+    `/api/analytics/trend`, `/metrics`, `/manifest.json`, `/`) is the
+    current, authoritative route inventory — this document does not
     duplicate it for the same reason §5 stopped duplicating the schema DDL.
 - **`remind_me_cli`**: The unified CLI binary executable (`rusty-remind-me`) handling command line flags and subcommand dispatch (`server`, `api`, `remote`, `configure`, `add`, `search`, `get`, `entity`, `wiki-write`, `wiki-read`, `wiki-import`, `stats`).
 - **`remind_me_remote`**: The Streamable HTTP MCP connector, on `tokio` + `axum` + `rmcp` (the one place this workspace takes on that async stack — every other crate stays synchronous, a deliberate boundary; see `crates/remind_me_remote/src/lib.rs`'s module doc):
@@ -103,8 +112,7 @@ Search Input (MemorySearchInput query, category, limit, min_vitality)
   ├──► Execute SQLite FTS5 Match Query (bm25 ranking)
   ├──► Filter Dormant Memories (vitality < 0.05 or min_vitality threshold)
   │
-  ├──► Execute Reciprocal Rank Fusion (rank_rrf)
-  │      └─► Combined Score = (w_keyword / (60 + kw_rank)) + (w_vitality / (60 + vit_rank))
+  ├──► Execute Reciprocal Rank Fusion (rank_rrf) over five signals (§4B)
   │
   ├──► Trim by Token Budget (trim_by_token_budget)
   │
@@ -127,22 +135,32 @@ Key Parameters:
 - **Dormancy Floor**: Memories with $\text{Vitality} < 0.05$ are flagged dormant and excluded from standard search results.
 
 ### B. Reciprocal Rank Fusion (RRF)
-Search candidates across keyword and vitality rank lists are fused using RRF:
+Search candidates are fused across **five** signals — keyword/FTS, semantic,
+recency, vitality, and IDF (BM25-based) — not just keyword and vitality:
 
 $$\text{RRF Score}(m) = \sum_{s \in \text{Signals}} \frac{w_s}{K + \text{Rank}_s(m)}$$
 
-Where $K = 60$ is the smoothing constant.
+Where $K = 60$ (`RRF_K_DEFAULT`) by default, overridable via
+`REMIND_ME_RRF_K`; each signal's weight is independently overridable too
+(`REMIND_ME_RRF_W_KEYWORD`/`_SEMANTIC`/`_RECENCY`/`_VITALITY`/`_IDF`). `rank_rrf`
+(`crates/remind_me_core/src/retrieval.rs`) also supports a `Score` fusion mode
+(min-max normalized) alongside the rank-based one shown here, selected via
+`REMIND_ME_RRF_FUSION` — that file is the source of truth for the exact
+per-signal weighting and mode selection, not reproduced further here for the
+same reason §5 stopped reproducing the schema DDL.
 
 ---
 
-## 5. Database Schema Specification (Version 27)
+## 5. Database Schema Specification (Version 29)
 
 The schema is **generated, not hand-written**: `crates/remind_me_core/src/db/`
 holds `schema_tables.sql`, `schema_indexes.sql` and `schema_triggers.sql`,
-dumped verbatim from a `remind_me` database at `_SCHEMA_VERSION = 27` and
+dumped verbatim from a `remind_me` database at `_SCHEMA_VERSION = 29` and
 regenerated by `scripts/regenerate_schema.py`. Those files are the
 specification; `db/migrations.rs` reconciles any database it opens against
-them and stamps `PRAGMA user_version = 27`.
+them and stamps `PRAGMA user_version = 29` (`SCHEMA_VERSION` in
+`db/migrations.rs` — check that constant directly rather than trusting this
+number to stay current; it has already drifted once).
 
 This section used to reproduce the `CREATE TABLE` statements inline. It no
 longer does, and the reason is the same one behind the generated schema
@@ -185,7 +203,14 @@ that renders the page.
 
 ## 6. Concurrency & Thread Safety Model
 
-To allow safe multi-threaded async execution across `tokio::spawn` worker tasks without lock contention or data races:
-- The `Database` struct wraps `rusqlite::Connection` in `std::sync::Mutex<Connection>`.
+To allow safe concurrent access from the plain OS threads this workspace
+actually uses — CLI subcommand processes, the MCP stdio loop, and the
+scheduler/watcher/sync-worker/promotion-nudge background threads (each a
+`std::thread::Builder::spawn` loop, not a `tokio` task; see §1 tenet 4)
+— without lock contention or data races:
+- The `Database` struct wraps `rusqlite::Connection` in
+  `parking_lot::Mutex<Connection>`, not `std::sync::Mutex` — `parking_lot`'s
+  `lock()` returns the guard directly rather than a `LockResult`, since this
+  codebase has no use for poisoning semantics.
 - Calling `db.conn()` returns a `MutexGuard<'_, Connection>`, which derefs to `&rusqlite::Connection`.
-- Automatic SQLite WAL (Write-Ahead Logging) journal mode (`PRAGMA journal_mode=WAL`) and busy timeouts (`PRAGMA busy_timeout=5000`) enable high-concurrency readers and sequential writers.
+- Automatic SQLite WAL (Write-Ahead Logging) journal mode (`PRAGMA journal_mode=WAL`) and busy timeouts (`PRAGMA busy_timeout=30000`) enable high-concurrency readers and sequential writers.
