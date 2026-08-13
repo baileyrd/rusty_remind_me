@@ -8,6 +8,7 @@ description = "Spotify connector for rusty_dbs, mirroring dbs.connectors.spotify
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+dbs-connector-support = { path = "../dbs-connector-support" }
 dbs-core = { path = "../dbs-core" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_json = "1"
