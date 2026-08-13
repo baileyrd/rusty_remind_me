@@ -8,6 +8,43 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Job manager (background jobs + SSE progress) (closes #80)
+**2026-08-13**
+
+- **New dependencies:** `futures-util`, `tokio-stream` (both narrowly-
+  scoped async-ecosystem utility crates; `tokio-stream` for
+  `UnboundedReceiverStream`, `futures-util` for `Stream`/`StreamExt`).
+- **Implemented:** `dbs-web::jobs` — a domain-agnostic background-job
+  manager mirroring `dbs.web.jobs.JobManager`'s shape: `start` runs a
+  caller-supplied closure on a blocking thread (one job at a time;
+  a second `start` while one's running is refused), tracks
+  running/done/error transitions, buffers up to 1000 progress events
+  per job for replay, evicts finished jobs beyond the newest 20, and
+  supports cooperative cancellation via a `CancelToken`. `GET /:id`
+  (JSON snapshot) and `GET /:id/stream` (its progress as Server-Sent
+  Events, buffered events replayed first then live, ending when the
+  job finishes) are exposed as a reusable `sse_router`.
+- **Deliberately scoped:** not wired into `dbs serve` yet — a real
+  `/api/backup` route needs the auth gate (#81) first, since starting a
+  backup is a mutating action and this skeleton has no auth. This
+  issue's own acceptance criteria anticipate that: its tests exercise
+  the manager, including the SSE endpoint end-to-end over HTTP, with a
+  *fake* job.
+- **Not ported:** the reference's VPN-subprocess routing
+  (`_run_vpn_source`/`_run_all_mixed`/`_finish_vpn_source` —
+  `requires_vpn` sources re-executing themselves as
+  `<vpn_exec> dbs backup <name>` subprocesses). `BackupService` already
+  made a different, earlier, deliberate choice: it refuses a
+  `requires_vpn` source run outside the right network namespace instead
+  of relaunching itself through a wrapper. A second, contradictory
+  subprocess-relaunch path that only the web tier had wasn't this
+  issue's call to make.
+- 16 new `dbs-web` tests: lifecycle transitions (running→done,
+  running→error with its message, cancellation, `JobAlreadyRunning`,
+  history eviction), plus HTTP-level tests of both routes against a
+  fake job (snapshot JSON, SSE events streamed and the connection
+  closing when the job finishes, both 404 on an unknown job id).
+
 ## Web app skeleton + static SPA serving (closes #79)
 **2026-08-13**
 

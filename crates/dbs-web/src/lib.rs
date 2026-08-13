@@ -1,11 +1,12 @@
 //! Web app skeleton for `dbs serve` (issue #79), mirroring the shape of
 //! the reference's `dbs.web.app.create_app` — minus everything that
-//! hangs off of it (job manager, auth gate, in-UI setup, API routes),
-//! which are separate, later issues (#80-83). Today this crate only
-//! serves the static single-page app: `GET /` renders `index.html` with
-//! its `{{v}}` cache-bust placeholder substituted (mirroring the
-//! reference's `index()` route), and `GET /static/<name>` serves the
-//! SPA's other assets.
+//! hangs off of it (auth gate, in-UI setup, API routes), which are
+//! separate, later issues (#81/#83). The [`jobs`] module (issue #80)
+//! adds the background-job manager + SSE primitive those issues build
+//! on. Today this crate root only serves the static single-page app:
+//! `GET /` renders `index.html` with its `{{v}}` cache-bust placeholder
+//! substituted (mirroring the reference's `index()` route), and
+//! `GET /static/<name>` serves the SPA's other assets.
 //!
 //! The static assets themselves (`static/index.html`, `static/app.js`,
 //! `static/style.css`) are an unmodified copy of the reference's
@@ -39,6 +40,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub mod jobs;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
