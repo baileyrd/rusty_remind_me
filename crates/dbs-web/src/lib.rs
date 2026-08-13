@@ -117,7 +117,22 @@ async fn static_asset(AxumPath(name): AxumPath<String>) -> Response {
 /// Binds `host:port` and serves the app skeleton until the process
 /// stops (Ctrl+C, or a signal) — mirrors the reference's blocking
 /// `uvicorn.run`. Returns only on a bind/accept error.
+///
+/// `host` is resolved through [`std::net::ToSocketAddrs`], which for a
+/// bare hostname defers to the OS resolver — on a host where that
+/// resolver prefers IPv6, binding the literal string `"localhost"` can
+/// land on `[::1]` instead of `127.0.0.1`, silently refusing IPv4
+/// callers (observed as CI-only flakiness that a local run's resolver
+/// order didn't reproduce). `""`/`"localhost"` are normalized to the
+/// literal `127.0.0.1` here so the bind address is deterministic
+/// regardless of resolver configuration; any other host (an explicit
+/// IP, or a real non-loopback name) passes through unchanged.
 pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
+    let host = if host.is_empty() || host == "localhost" {
+        "127.0.0.1"
+    } else {
+        host
+    };
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     axum::serve(listener, router()).await
 }
