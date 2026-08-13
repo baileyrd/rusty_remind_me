@@ -296,7 +296,32 @@ enum Command {
         interval: String,
     },
     /// Run the optional local web UI.
-    Serve,
+    Serve {
+        /// Bind address.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on.
+        #[arg(long, short = 'p', default_value_t = 8000)]
+        port: u16,
+        /// In-UI setup actions (install connector deps, browser login
+        /// capture). On by default for local use; pass --no-setup to
+        /// disable.
+        #[arg(long, default_value_t = true, conflicts_with = "no_setup")]
+        allow_setup: bool,
+        /// Disable in-UI setup actions.
+        #[arg(long)]
+        no_setup: bool,
+        /// Require this bearer token on every API call. Mandatory when
+        /// binding to a non-localhost address.
+        #[arg(long)]
+        token: Option<String>,
+        /// Run backups automatically while the server is up.
+        #[arg(long, conflicts_with = "no_schedule")]
+        schedule: bool,
+        /// Explicitly disable automatic backups (the default).
+        #[arg(long)]
+        no_schedule: bool,
+    },
     /// Headless browser-session capture for connectors that need one.
     Capture,
     /// Print the installed version.
@@ -487,6 +512,15 @@ fn main() {
         Command::Doctor { json_out } => cmd_doctor(&cli.config, json_out),
         Command::UpdateYtdlp { dry_run } => cmd_update_ytdlp(dry_run),
         Command::Schedule { interval } => cmd_schedule(&cli.config, &interval),
+        Command::Serve {
+            host,
+            port,
+            allow_setup,
+            no_setup,
+            token,
+            schedule,
+            no_schedule: _,
+        } => cmd_serve(host, port, allow_setup && !no_setup, token, schedule),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -511,7 +545,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::UpdateYtdlp { .. } => "update-ytdlp",
         Command::Maintain => "maintain",
         Command::Schedule { .. } => "schedule",
-        Command::Serve => "serve",
+        Command::Serve { .. } => "serve",
         Command::Capture => "capture",
         Command::Version => "version",
         Command::Sources(_) => "sources",
@@ -2186,6 +2220,51 @@ fn cmd_schedule(config_path: &Path, interval: &str) -> i32 {
     0
 }
 
+/// `true` for a host that only ever accepts connections from this
+/// machine. Mirrors the reference's `is_local` check exactly,
+/// including its treatment of an empty host string as local.
+fn is_local_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "")
+}
+
+/// Mirrors the reference's `serve` command's flag parsing and its
+/// security-relevant validation (an unauthenticated API must not bind
+/// off-localhost). Starting the actual server is out of scope for
+/// this issue — see gap-analysis.md's Web tier rows (app skeleton,
+/// job manager, auth) — so once flags validate, this reports that
+/// plainly instead of pretending to listen for real.
+fn cmd_serve(
+    host: String,
+    port: u16,
+    allow_setup: bool,
+    token: Option<String>,
+    schedule: bool,
+) -> i32 {
+    if !is_local_host(&host) && token.is_none() {
+        eprintln!(
+            "Refusing to bind to {host} without --token: the API is otherwise unauthenticated \
+             (it can read your backups and write secrets).\nBind to 127.0.0.1 (the default), or \
+             pass --token <secret>."
+        );
+        return CONFIG_ERROR_EXIT_CODE;
+    }
+
+    eprintln!(
+        "dbs serve: the web UI isn't implemented in this port yet (see gap-analysis.md's Web \
+         tier rows) \u{2014} flags validated for http://{host}:{port}"
+    );
+    if schedule {
+        eprintln!("  (would run the scheduler: due sources back up automatically while serving)");
+    }
+    if !allow_setup {
+        eprintln!("  (setup actions would be disabled)");
+    }
+    if token.is_some() {
+        eprintln!("  (token auth would be required)");
+    }
+    CONFIG_ERROR_EXIT_CODE
+}
+
 fn run_status_str(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Success => "success",
@@ -2399,5 +2478,24 @@ mod schedule_tests {
         let out = render_schedule(Path::new(r"C:\Users\me\dbs.toml"), "daily", true);
         assert!(!out.contains("crontab"), "{out}");
         assert!(!out.contains("systemd"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod serve_tests {
+    use super::*;
+
+    #[test]
+    fn is_local_host_accepts_loopback_names_and_the_empty_string() {
+        for host in ["127.0.0.1", "localhost", "::1", ""] {
+            assert!(is_local_host(host), "{host:?} should be local");
+        }
+    }
+
+    #[test]
+    fn is_local_host_rejects_everything_else() {
+        for host in ["0.0.0.0", "192.168.1.5", "example.com", "10.0.0.1"] {
+            assert!(!is_local_host(host), "{host:?} should not be local");
+        }
     }
 }
