@@ -1,0 +1,14 @@
+{
+  "name": "rusty-remind-me",
+  "displayName": "Rusty Remind Me",
+  "version": "0.1.0",
+  "description": "Persistent long-term memory for Claude Code: MCP tools for search/recall plus a SessionStart hook that surfaces recent memories automatically.",
+  "author": {
+    "name": "rusty_remind_me contributors"
+  },
+  "repository": "https://github.com/baileyrd/rusty_remind_me",
+  "license": "MIT",
+  "keywords": ["memory", "mcp", "recall", "knowledge-graph", "reminders"],
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json"
+}

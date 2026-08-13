@@ -49,6 +49,19 @@ rusty_remind_me/
 
 ---
 
+## Claude Code Plugin
+
+`rusty_remind_me` also ships as a [Claude Code plugin](https://code.claude.com/docs/en/plugins) — `.claude-plugin/plugin.json` at the repo root, bundling:
+
+- **`.mcp.json`** — the same stdio MCP server (`rusty-remind-me server`) described above, registered automatically instead of via the `configure` command or a manual client config edit.
+- **`hooks/hooks.json`** — a `SessionStart` hook (`hooks/scripts/session-start.sh`) that runs `rusty-remind-me list --limit 8` directly (no MCP round-trip, no model decision required) and injects the most recently written memories as context at the start of every session.
+
+This is a different connection than the MCP tools: the MCP server is called only when the model decides to; the hook runs unconditionally at the lifecycle point the harness fires it, by invoking the plain CLI binary as a subprocess. The hook degrades safely — if `rusty-remind-me` isn't on `PATH` yet, or the store is empty, it emits `{"continue": true}` (optionally with a one-line `systemMessage` nudge to build the binary) rather than failing the session.
+
+To use it, `rusty-remind-me` must be on `PATH` (`cargo build --release -p rusty-remind-me` then add `target/release` to `PATH`, or `cargo install --path crates/remind_me_cli`), then add this repo as a plugin source in Claude Code.
+
+---
+
 ## Automated Client Setup (Claude Desktop, Antigravity, Cursor, Codex)
 
 You can automatically configure all installed AI client applications (Claude Desktop, Antigravity, Cursor, Codex / Generic MCP) to use `rusty_remind_me` as their memory backend:
