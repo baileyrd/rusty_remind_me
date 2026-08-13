@@ -215,6 +215,20 @@ impl Database {
             .path
             .as_ref()
             .ok_or_else(|| "in-memory database has no file to reopen".to_string())?;
+        Self::open_secondary_at(path)
+    }
+
+    /// The same connection [`Database::open_secondary`] opens (WAL mode plus
+    /// the `busy_timeout` `schema::initialize_schema` sets), for a caller that
+    /// only has a path and not an existing `Database`/`Arc` to call it
+    /// through — namely a background thread that reopens its own connection
+    /// on every retry, the same shape [`crate::scheduler::start_scheduler`]/
+    /// [`crate::watcher::start_watcher`] already use for *their* threads.
+    /// Those two use a bare `Connection::open` with no pragma setup, which is
+    /// fine for their short, local-only writes; [`crate::sync::SyncWorker`]'s
+    /// writes can share a transaction with a network round-trip, so it keeps
+    /// needing the pragmas a plain `Connection::open` would silently skip.
+    pub fn open_secondary_at<P: AsRef<Path>>(path: P) -> std::result::Result<Connection, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         schema::initialize_schema(&conn).map_err(|e| e.to_string())?;
         Ok(conn)

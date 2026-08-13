@@ -43,8 +43,8 @@ pub use record::{upsert_record, ApplyOutcome, SyncApplyError, SyncRecord};
 pub use server::{serve_once, PeerServer, PeerServerConfig, PeerServerStatus, SyncPeer};
 pub use status::{sync_repair, sync_status};
 pub use worker::{
-    disabled_status as sync_worker_disabled_status, superseded as sync_error_superseded,
-    SyncWorker, SyncWorkerStatus, HUB_REMOTE_ID,
+    disabled_status as sync_worker_disabled_status, live_status_against as sync_live_status,
+    superseded as sync_error_superseded, SyncWorker, SyncWorkerStatus, HUB_REMOTE_ID,
 };
 
 /// This node's identity in sync records. Empty (the default) means "no

@@ -574,6 +574,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // candidate queries are pull-only without this, so a backlog can grow
         // indefinitely with nothing ever mentioning it (#208).
         let nudge = remind_me_core::promotion::start_nudge_for(&db.conn());
+        // Conditional like the watcher/nudge: `None` unless node id, hub URL
+        // and secret are all configured. A background loop like the three
+        // above, not something `McpServer` owns (#316's plugin work needed
+        // this to keep syncing memories written through the CLI or a sibling
+        // `rusty-remind-me api` process, not only ones written over MCP) --
+        // started here alongside it instead, and stopped in the same join
+        // block below.
+        let mut sync = remind_me_core::sync::SyncWorker::from_env(db_path.clone());
         let server = McpServer::new(db);
         let result = server.run_stdio_loop();
         // All joined before the database goes out of scope, so an in-flight
@@ -587,6 +595,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(nudge) = nudge {
             nudge.stop();
+        }
+        if let Some(sync) = sync.as_mut() {
+            sync.stop();
         }
         result?;
     } else {
@@ -657,10 +668,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let scheduler = remind_me_core::scheduler::start_scheduler_for(&db.conn());
+                // A long-lived daemon like "server", so it can carry the sync
+                // worker just as well -- see the comment on "server"'s own
+                // `SyncWorker::from_env` call for why this no longer lives
+                // inside `McpServer` specifically.
+                let mut sync = remind_me_core::sync::SyncWorker::from_env(db_path.clone());
                 let api_server = ApiServer::new(db);
                 let result = api_server.run(&addr);
                 if let Some(scheduler) = scheduler {
                     scheduler.stop();
+                }
+                if let Some(sync) = sync.as_mut() {
+                    sync.stop();
                 }
                 if let Some(path) = &pid_path {
                     remind_me_core::pid::remove_pid_file(path);
@@ -678,8 +697,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // (REMIND_ME_REMOTE_HOST/_PORT/_TOKEN), matching how "api"
                 // above takes its port from argv while "server" takes its
                 // config from the environment.
+                //
+                // Also long-lived like "server"/"api", so it gets the same
+                // sync worker treatment -- this is still an MCP server, just
+                // over Streamable HTTP instead of stdio, and previously got a
+                // SyncWorker implicitly through `McpServer::new` the same way
+                // "server" did. Stopped after `run_blocking` returns, same as
+                // the others; `run_blocking` blocks for the connector's whole
+                // life, so there is nothing to interleave it with.
+                let mut sync = remind_me_core::sync::SyncWorker::from_env(db_path.clone());
                 let server = McpServer::new(db);
-                remind_me_remote::run_blocking(server)?;
+                let result = remind_me_remote::run_blocking(server);
+                if let Some(sync) = sync.as_mut() {
+                    sync.stop();
+                }
+                result?;
             }
             "search" => {
                 let search_args = match parse_search_args(&args[2..]) {

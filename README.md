@@ -81,15 +81,16 @@ nowhere here that would hardcode a shared secret into a file that ships with
 the plugin.
 
 What that inheritance does *not* change is which surface actually carries
-sync: per the note above, the background sync thread only runs inside the
-MCP server process, and the plugin's MCP server is the only one of its three
-surfaces that's an MCP server — the `SessionStart` hook and both slash
-commands invoke the plain CLI as one-shot subprocesses that exit
-immediately, same as `add`/`search` always have, sync thread or not. A
+sync: per the note below, the background sync thread is a long-lived
+process's own background service (like the reminder scheduler or folder
+watcher), not something the MCP connection specifically owns — the plugin's
+bundled `rusty-remind-me server` runs one, but the `SessionStart` hook and
+both slash commands still invoke the plain CLI as one-shot subprocesses that
+exit immediately, same as `add`/`search` always have, sync thread or not. A
 memory added via `/rusty-remind-me:remember` while the MCP connection is
 down still lands in the local outbox; it just doesn't reach the hub until
-some running `rusty-remind-me server` process — this plugin's or otherwise,
-against the same database — picks it up on its next cycle.
+some running `rusty-remind-me server`/`api`/`remote` process — this plugin's
+or otherwise, against the same database — picks it up on its next cycle.
 
 ---
 
@@ -175,16 +176,22 @@ also discovered directly (a static list, or Tailscale's local API) for
 peer-to-peer push. Sync stays off until `REMIND_ME_NODE_ID`,
 `REMIND_ME_HUB_URL`, and `REMIND_ME_SYNC_SECRET` are all set.
 
-**The background sync thread only exists inside the MCP server process.**
+**The background sync thread needs a long-lived process to run in.**
 `SyncWorker::from_env` — the loop that actually pushes/pulls on
-`REMIND_ME_SYNC_INTERVAL` — is constructed exactly once in this codebase,
-inside `McpServer::new` (`crates/remind_me_mcp/src/lib.rs`). Neither the
-one-shot CLI subcommands (`add`, `search`, `list`, ...) nor the REST API
-daemon (`remind_me_api`) start one. A write from any of those still lands in
-the shared SQLite outbox — it isn't lost — but nothing pushes it to the hub
-until a process that *is* running the MCP server picks it up on its next
-cycle. Concretely: `rusty-remind-me server` (or `rusty-remind-me mcp`) has to
-be up for sync to actually move data, running `add`/`search` alone does not.
+`REMIND_ME_SYNC_INTERVAL` — is a background service like the reminder
+scheduler or folder watcher (`crates/remind_me_core/src/sync/worker.rs`), not
+something any single binary owns. `rusty-remind-me server`, `api`, and
+`remote` each start one alongside their own work
+(`crates/remind_me_cli/src/main.rs`); the one-shot CLI subcommands (`add`,
+`search`, `list`, ...) don't, since they exit before a cycle could ever run.
+A write from one of those one-shot commands still lands in the shared SQLite
+outbox — it isn't lost — but nothing pushes it to the hub until a process
+that *is* running a sync worker picks it up on its next cycle. Concretely:
+one of `rusty-remind-me server`/`api`/`remote` has to be running somewhere
+for sync to actually move data. Status is process-global, not tied to
+whichever instance started the worker:
+`remind_me_server_status` reports on whatever sync worker is live in *that*
+process, the same way it already reports on the folder watcher.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |

@@ -41,13 +41,14 @@ fn a_stuck_hub_never_blocks_an_ordinary_database_read() {
         std::env::temp_dir().join(format!("rrm_sync_worker_lock_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let db = Arc::new(Database::open(dir.join("memory.db")).unwrap());
+    let db_path = dir.join("memory.db");
+    let db = Arc::new(Database::open(&db_path).unwrap());
 
     std::env::set_var(NODE_ID_ENV, "lock-test-node");
     std::env::set_var(HUB_URL_ENV, format!("http://{hub_addr}"));
     std::env::set_var(SYNC_SECRET_ENV, "lock-test-secret");
 
-    let mut worker = SyncWorker::from_env(Arc::clone(&db)).expect("sync enabled by env");
+    let mut worker = SyncWorker::from_env(db_path.clone()).expect("sync enabled by env");
 
     // Give the freshly spawned cycle time to reach the hub and block on it.
     std::thread::sleep(Duration::from_millis(300));
