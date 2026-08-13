@@ -8,6 +8,39 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs backup: single-source run (closes #64)
+**2026-08-13**
+
+- **Implemented:** `dbs backup <source>`, wired to
+  `BackupService::backup_source`. Prints "Backup results:" followed by
+  one line per run (`_print_run`'s format, colors dropped — no color
+  dependency added for this issue): status/mode/created/updated/
+  unchanged/deleted/undeleted/failed counts, fetched total, and a
+  compact duration (`0.8s`/`2m45s`), plus any error/warning lines
+  underneath. Exit codes match the reference: `0` success/partial-free,
+  `2` source locked, `3` (via the shared `_exit_code` port) any
+  `failed` result, `5` unknown source, `4` everything else
+  (config/database/connector errors, or no `SOURCE`/`--all` given).
+- `--all` is explicitly **out of scope** here (gap-analysis.md splits
+  it into #65 `--only-due`, #66 `--parallel`, #67 the progress line/
+  Ctrl+C handling) — it still stubs out ("not yet implemented") rather
+  than half-working.
+- **Known limitation, not a bug:** no connector-candidate discovery
+  mechanism exists yet (scanning for installed connector subprocesses
+  on disk — an implicit prerequisite of the connectors cluster,
+  #85-100), so the registry `dbs backup` constructs is always empty
+  today. Every configured source's connector type is therefore
+  reported "not found" until that lands — this is what the acceptance
+  checklist's "connector error surfaced to CLI output" scenario tests.
+- 5 new integration tests: an unknown source name (exit 5), an
+  unregistered connector type surfacing as a config error (exit 4), a
+  disabled source completing successfully end-to-end (exit 0, printed
+  result) — the honest stand-in for "a successful run" given no real
+  connector exists to succeed against yet, since `backup_source`
+  returns `Ok(RunResult)` for a disabled source before any registry
+  lookup happens — no `SOURCE`/`--all` (exit 4, usage message), and
+  `--all` still reporting as a stub.
+
 ## CLI skeleton + dbs init (closes #63)
 **2026-08-12**
 
