@@ -512,6 +512,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-connector-readwise"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbs-core",
+ "mockito",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "dbs-connector-support"
 version = "0.1.0"
 

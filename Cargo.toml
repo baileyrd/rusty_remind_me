@@ -9,6 +9,7 @@ members = [
     "crates/dbs-connector-raindrop",
     "crates/dbs-connector-github",
     "crates/dbs-connector-pinboard",
+    "crates/dbs-connector-readwise",
 ]
 
 [workspace.package]
