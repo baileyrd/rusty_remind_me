@@ -21,11 +21,17 @@
 //! no Rust equivalent, so browser-automation connectors here instead
 //! shell out to a separate Python/Playwright script — this module is the
 //! generic launcher half of that split.
+//!
+//! `tiptap` (issue #100) is a direct, node-for-node port of
+//! `connectors/_tiptap.py` — TipTap/ProseMirror rich-text JSON to
+//! Markdown, used by `skool` lesson descriptions.
 
 pub mod python_launch;
+pub mod tiptap;
 pub mod watchdog;
 
 pub use python_launch::{
     find_python, run_python_script, run_python_script_using, PythonLaunchError,
 };
+pub use tiptap::tiptap_markdown;
 pub use watchdog::{run_with_watchdog, WatchdogError, WatchdogTimeout};

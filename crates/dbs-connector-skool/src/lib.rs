@@ -29,11 +29,9 @@
 //! reconstructing a Mux HLS URL, matching a URL's host against an
 //! allow-list, classifying a permanent-vs-transient video error,
 //! parsing memberships/courses/lessons out of a `__NEXT_DATA__` blob,
-//! and the community/course/lesson → `BackupItem` mapping. TipTap
-//! rich-text → Markdown rendering (the `desc` field's real body) is
-//! its own separate unit of work (gap-analysis.md's Connectors
-//! cluster, issue #100) — a lesson's `body` here is the raw `desc`
-//! string, unrendered, until #100 lands.
+//! and the community/course/lesson → `BackupItem` mapping. A lesson's
+//! `desc` field is rendered to markdown via
+//! `dbs_connector_support::tiptap_markdown` (issue #100) for `body`.
 //!
 //! Deliberately **not** ported for the same reason as the rest of
 //! acquisition: resource-file downloads, the `yt-dlp`-driven video
@@ -52,6 +50,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
+use dbs_connector_support::tiptap_markdown;
 use dbs_core::parse_iso;
 use dbs_core::{
     AuthCapture, BackupItem, Capabilities, Connector, ConnectorError, FetchEvent, ItemKind,
@@ -849,13 +848,10 @@ fn lesson_item(raw: &Value) -> Option<BackupItem> {
     .filter(|s| !s.is_empty())
     .map(str::to_string)
     .collect();
-    // TipTap rich-text -> Markdown rendering is issue #100; the raw
-    // `desc` string rides along unrendered until then.
     let body = raw
         .get("desc")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .map(tiptap_markdown)
+        .filter(|s| !s.is_empty());
     let mut item = BackupItem::new(lesson_id, "lesson", raw.clone()).ok()?;
     item.title = raw
         .get("title")

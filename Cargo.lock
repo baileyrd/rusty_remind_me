@@ -583,6 +583,7 @@ name = "dbs-connector-skool"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dbs-connector-support",
  "dbs-core",
  "serde_json",
  "url",
@@ -602,6 +603,9 @@ dependencies = [
 [[package]]
 name = "dbs-connector-support"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "dbs-connector-udemy"

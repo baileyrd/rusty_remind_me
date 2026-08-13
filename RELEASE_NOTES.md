@@ -8,6 +8,37 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-support`: TipTap rich-text→Markdown helper (closes #100)
+**2026-08-13**
+
+- **New `tiptap` module in `dbs-connector-support`**, a node-for-node
+  port of `connectors/_tiptap.py`'s `tiptap_markdown`: converts
+  TipTap/ProseMirror rich-text JSON (`"[v2]{...}"`-prefixed, as Skool
+  stores lesson descriptions) to GitHub-flavored markdown —
+  paragraphs, headings (levels 1-6), code blocks (with language),
+  blockquotes, bullet/ordered lists (including nesting), horizontal
+  rules, images, hard breaks, and inline marks (bold/italic/code/
+  strike/link, with `]` escaped in link text so it doesn't close the
+  markdown link early). Unknown node types render their children
+  rather than dropping content; anything that isn't a non-empty
+  string, or that fails to decode as JSON, passes through unchanged —
+  a lesson body must never fail a backup over a rendering quirk, and
+  the verbatim payload always survives separately in the item's `raw`.
+- **Wired into `skool`'s `lesson_item`:** a lesson's `body` now renders
+  through `tiptap_markdown` instead of carrying the raw `desc` string
+  unrendered, closing out the note `skool` (#97) left pointing at this
+  issue. `reddit`/`skool` acquisition itself is still blocked on #99
+  (no browser session to read `desc` from in the first place) — this
+  only fixes how an already-fetched `desc` value renders.
+- 7 new tests, ported directly from the reference's
+  `tests/connectors/test_tiptap.py` fixtures: paragraphs/headings/
+  marks, link-text bracket escaping, lists/code-blocks/quotes,
+  images/hard-breaks/nested lists, unknown-node passthrough,
+  passthrough-and-garbage (plain text, undecodable `[v2]` payload,
+  bare JSON doc without the prefix, `None`/empty/non-dict-list
+  inputs), and a bare block-array payload without the usual
+  `{"type": "doc", ...}` wrapper.
+
 ## `dbs-connector-support`: shared Playwright launch helper (closes #99)
 **2026-08-13**
 
