@@ -8,6 +8,49 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs research subcommands (closes #77)
+**2026-08-13**
+
+- **Implemented:** `dbs research youtube TOPIC` and `dbs research
+  youtube-backup TOPIC` flag surfaces, matching the reference's
+  option-for-option (`--query/-q`, `--per-query-count`, `--count`,
+  `--months`, `--question`, `--infographic[-orientation]`, `--out/-o`,
+  `--notebook-name`, `--auth-state` for `youtube`; `--source/-s`,
+  `--list/-l`, plus the shared options for `youtube-backup`), and the
+  reference's default output path (`./<slug>.md`, same slugify rules:
+  lowercase, non-alphanumeric runs collapse to `-`, trimmed, falls back
+  to `"research"`).
+- **`youtube-backup`'s video selection is real, not a stub:** added
+  `BackupService::select_youtube_backup_videos`, mirroring the
+  reference's `research/from_backup.py::videos_from_rows` — queries
+  already-backed-up items (kind `video`), keeps only rows from
+  `youtube`-type sources with a parseable id, applies the `--list`
+  filter against `raw.list_label`, dedups the same video saved under
+  multiple lists, and truncates to `--count`. The CLI surfaces the
+  reference's own "No backed-up YouTube videos matched (...)" error,
+  including its source/list scope text, when nothing matches.
+- **Deliberately scoped:** the actual NotebookLM synthesis — a live
+  YouTube search (`youtube`) or feeding selected videos into a
+  NotebookLM notebook (both commands) — depends on a research
+  subsystem that doesn't exist in this port yet (gap-analysis.md's
+  Research subsystem row isn't its own filed issue yet) and the
+  NotebookLM integration strategy (gap-analysis.md's Decisions section
+  item 4: shell out to `nlm`/`notebooklm-mcp`). So once flags parse
+  (and, for `youtube-backup`, videos are selected), both commands
+  report what they *would* do instead of pretending to run a real
+  pipeline, and exit `4` — the same pattern as `capture`/`serve`.
+- Removed the now-obsolete "nested stub subcommand" test in `cli.rs` —
+  `sources`/`connectors` (#71) and now `research` (#77) are no longer
+  pure stubs, so there's no remaining nested-subcommand enum left to
+  cover with that test; `verify`'s bare-stub test still covers
+  `cmd_stub` itself.
+- 6 new `dbs-core` unit tests for `select_youtube_backup_videos`
+  (youtube-type-only filtering, cross-list dedup, list-label filter,
+  limit truncation, source-name restriction, no-match) plus 7 new
+  `dbs-cli` integration tests (both commands' pipeline-stub reporting
+  and default/custom out path, `youtube-backup`'s no-match error and
+  its source/list scope text, missing-topic usage errors).
+
 ## dbs capture (closes #76)
 **2026-08-13**
 
