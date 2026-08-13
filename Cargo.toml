@@ -5,6 +5,7 @@ members = [
     "crates/dbs-connector-support",
     "crates/dbs-cli",
     "crates/dbs-web",
+    "crates/dbs-research",
 ]
 
 [workspace.package]

@@ -8,6 +8,61 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Research pipeline: YouTube search → NotebookLM synthesis → report (closes #84)
+**2026-08-13**
+
+- **New `dbs-research` crate** — kept separate from `dbs-core` (same
+  reasoning as the reference: this pipeline has nothing to do with the
+  `Connector`/`Storage`/engine machinery, it's a one-shot ad-hoc
+  command, not a backup source).
+- **Fully real:** `youtube_search` — shells out to the `yt-dlp` binary
+  (`--dump-json` against a `ytsearchN:"query"` pseudo-URL, one JSON
+  object per line) rather than the reference's in-process
+  `yt_dlp.YoutubeDL` (Decision 3), with the same dedup-by-id,
+  recency-filter, and engagement-ranking logic ported directly.
+  `report::render_report` is a direct, fully real port (pure Markdown
+  formatting). `pipeline::run_pipeline`/`run_pipeline_for_videos`
+  orchestrate both, plus the NotebookLM indexing/Q&A loop, with the
+  same per-video-failure-vs-fatal-auth-failure distinction as the
+  reference.
+- **The NotebookLM half sits behind a `NotebookLmClient` trait** —
+  `create_notebook`/`add_source`/`ask`/`generate_infographic`, mirroring
+  the reference's swappable `client_module` test seam exactly (which is
+  how the pipeline's tests run against zero real network/auth: a
+  scripted fake client). The concrete adapter that actually shells out
+  to `nlm`/`notebooklm-mcp` (gap-analysis.md's Decision 4 — a
+  *different* tool than the reference's in-process `notebooklm-py`,
+  chosen specifically because Rust can't import a Python library)
+  isn't implemented yet: writing it correctly needs that external
+  tool's actual CLI/MCP surface confirmed against a real install,
+  which this port can't verify in this environment. `UnimplementedClient`
+  is the documented stand-in (same shape as
+  `dbs_core::service::UnimplementedRunner`) until that's done.
+- Async note: the reference's `notebooklm-py` client is async-only,
+  making `pipeline.py` the repo's first `asyncio` use; this port's
+  `NotebookLmClient` trait is plain synchronous method calls instead
+  (a subprocess/MCP call is no more "async" in Rust than any other
+  blocking I/O), so there's no async boundary to bridge here at all.
+- **Risk called out in the issue, addressed:** the auth-vs-per-video-
+  failure distinction is exercised by tests, not just the happy path —
+  an `Auth` error from `add_source` aborts the whole run as a distinct
+  `ResearchError::Auth` (not tracked as a per-video failure), and
+  separately from `create_notebook`, against a scripted fake client.
+- **Not yet wired up:** `dbs-cli`'s `dbs research` subcommands (#77)
+  still report their own "not yet implemented" — wiring them to call
+  into this crate is a natural follow-up, though it wouldn't change
+  user-visible behavior yet (`UnimplementedClient` means every real
+  run still fails at the NotebookLM step).
+- 23 new `dbs-research` tests across all 5 modules: engagement/outcome
+  math, yt-dlp NDJSON parsing + dedup across queries (via a fake
+  `yt-dlp` script), recency filtering (drops old, keeps
+  missing/unparseable dates), ranking/truncation, report rendering
+  (default vs. custom question section titles, empty-video-list),
+  auth-state resolution, `UnimplementedClient`'s uniform failure, and
+  the pipeline's full lifecycle against a scripted fake NotebookLM
+  client (success, per-video failure, all-videos-fail abort, auth
+  failure from two different call sites, infographic opt-in).
+
 ## In-UI setup: dependency install + browser-auth capture jobs (closes #83)
 **2026-08-13**
 
