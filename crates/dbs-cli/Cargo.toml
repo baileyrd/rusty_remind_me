@@ -18,3 +18,9 @@ dbs-core = { path = "../dbs-core" }
 dbs-web = { path = "../dbs-web" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+# Test-only: gives integration tests a real dbs-connector-<type> binary
+# (CARGO_BIN_EXE_dbs-connector-raindrop) to exercise issue #160's real
+# discovery against, instead of only ever finding nothing.
+dbs-connector-raindrop = { path = "../dbs-connector-raindrop" }

@@ -141,6 +141,10 @@ pub struct Config {
     pub parallel: u32,
     pub sources: HashMap<String, SourceConfig>,
     pub connectors: HashMap<String, ConnectorOverride>,
+    /// Extra directory to scan for `dbs-connector-*` binaries (issue
+    /// #160), on top of `PATH` — `None` means `PATH` only. Relative
+    /// paths resolve against `base_dir`, same as `database`/`export_dir`.
+    pub connectors_dir: Option<PathBuf>,
     pub base_dir: PathBuf,
     pub source_path: Option<PathBuf>,
 }
@@ -165,6 +169,14 @@ impl Config {
 
     pub fn download_root_path(&self) -> PathBuf {
         self.resolve(&self.download_root)
+    }
+
+    /// Resolved extra connectors directory, if configured — `None`
+    /// means the caller falls back to `PATH`-only discovery.
+    pub fn connectors_dir_path(&self) -> Option<PathBuf> {
+        self.connectors_dir
+            .as_ref()
+            .map(|d| self.resolve(&d.to_string_lossy()))
     }
 
     /// Per-source download folder: `<download_root>/<source-name>`.
@@ -481,6 +493,9 @@ pub fn load_config(path: &Path) -> Result<Config, DbsError> {
         parallel: as_u32_or(table_get(&dbs_section, "parallel"), 1),
         sources,
         connectors,
+        connectors_dir: table_get(&dbs_section, "connectors_dir")
+            .and_then(Value::as_str)
+            .map(PathBuf::from),
         base_dir: resolved_path
             .parent()
             .map(Path::to_path_buf)

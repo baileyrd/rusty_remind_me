@@ -472,6 +472,7 @@ dependencies = [
  "chrono",
  "clap",
  "ctrlc",
+ "dbs-connector-raindrop",
  "dbs-core",
  "dbs-web",
  "serde_json",
