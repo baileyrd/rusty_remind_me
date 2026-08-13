@@ -8,6 +8,49 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `vimeo` connector (closes #94)
+**2026-08-13**
+
+- **New `dbs-connector-vimeo` crate** — backs up the catalog of videos
+  you own via Vimeo's REST API v3.4 (`GET /me/videos`), personal
+  access token auth (`VIMEO_TOKEN`). Mirrors `dbs.connectors.vimeo`:
+  a full-enumeration source like `podcast`/`pocketcasts` —
+  `supports_incremental = false`, every run re-reads `/me/videos` and
+  yields one `ReconcileMarker` so removed videos get soft-deleted.
+  `stats`/`metadata` (play counts, hypermedia links with short-lived
+  tokens) are declared volatile so an unchanged video never spawns a
+  spurious revision. By default only catalog metadata is stored (a
+  thumbnail + the watch-link `MediaRef`); `download_videos = true`
+  additionally pulls each video file via the `yt-dlp` *binary* into
+  the source's download folder, downloaded video winning over the
+  watch link once present.
+- **First connector to use `dbs-connector-support`** — its
+  `run_with_watchdog` guards the `yt-dlp` subprocess against hanging
+  indefinitely, with a heartbeat fed by the subprocess's own stdout
+  lines (`--newline` forces periodic progress output) rather than a
+  per-event progress-hook callback, since a shelled-out CLI has no
+  such hook. Per this port's round-1 decision (documented on
+  `dbs-connector-support` itself) `yt-dlp` is a subprocess, not a
+  library call, so there's no `impersonate_target()` capability probe
+  to port — `--impersonate chrome` (Vimeo blocks yt-dlp's default TLS
+  fingerprint on data-center/VPN IPs) is passed unconditionally, and a
+  missing `curl_cffi` backend just surfaces as an ordinary logged,
+  non-fatal download failure.
+- **Not wired up:** same boundary as `raindrop` (#85) through
+  `podcast` (#93) — this struct isn't reachable from a real
+  `dbs backup` run yet; the plugin registry's run/stream bridge
+  doesn't exist.
+- 14 new `dbs-connector-vimeo` tests: a full fetch yielding videos and
+  a reconcile marker, pagination following `paging.next`, a video with
+  a non-numeric uri being skipped, `download_videos` off by default
+  keeping the watch link, `download_videos` on downloading via a fake
+  `yt-dlp` script on disk (the same fake-executable-on-disk pattern
+  `dbs-research`'s YouTube search already uses) and preferring the
+  local path, a missing download folder being a config error, an
+  existing non-empty download being reused without invoking `yt-dlp`
+  at all, both HTTP status classifications (401/403 vs. other), and
+  direct unit tests of `video_id` and `safe_suffix`.
+
 ## `podcast` connector (closes #93)
 **2026-08-13**
 
