@@ -8,6 +8,51 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `youtube` connector (closes #98)
+**2026-08-13**
+
+- **New `dbs-connector-youtube` crate — fully implemented, not
+  blocked.** Unlike `reddit` (#96) and `skool` (#97), YouTube's lists
+  (Watch Later, Liked, watch history, owned playlists) need no
+  Playwright browser at all: the reference itself only ever calls
+  `yt_dlp.YoutubeDL(...).extract_info(...)`, so this port shells out
+  to the `yt-dlp` binary the same way `vimeo` (#94) and `udemy` (#95)
+  already do. `yt-dlp --dump-single-json --flat-playlist` mirrors
+  `extract_info()`'s return shape exactly — one JSON object with a
+  top-level `title` and an `entries` array — fast metadata only, no
+  media download; the video URL rides along as a `MediaRef`.
+- A full-enumeration source like `reddit`/`skool`: no server-side
+  delta, so every run is full and yields one `ReconcileMarker` —
+  unless a list failed to load, in which case the whole run's marker
+  is withheld (the same "one bad group taints the sweep" shape as
+  `skool`'s per-community partial enumeration). A video can live in
+  several lists at once, so `external_id` is namespaced by list
+  (`"<list>:<video_id>"`) — the same video in Watch Later and Liked
+  stays two distinct items; the same video listed twice *within* one
+  list keeps only its first occurrence.
+- There's no per-item progress to stream during a flat extraction
+  (unlike a real video download), so `run_with_watchdog` here is a
+  plain wall-clock deadline on the whole extraction (no heartbeat),
+  matching the reference's own timeout-only `run_with_watchdog` call.
+- Auth is `YOUTUBE_COOKIES_FILE` (a Netscape cookies.txt) or
+  `cookies_from_browser` in config to read cookies straight from a
+  local browser profile instead — no secret needed.
+- Not wired up: same registry run/stream boundary as `raindrop` (#85)
+  through `skool` (#97) — but acquisition itself works end to end and
+  is exercised as such.
+- 14 new `dbs-connector-youtube` tests, most running the real
+  acquisition path against a fake `yt-dlp` script on disk that
+  branches on a URL substring in its own arguments (the same
+  fake-executable pattern `dbs-research`'s YouTube search and
+  `dbs-connector-vimeo` already use): missing-cookies/nonexistent-
+  cookies-file errors, a full fetch across Watch Later and Liked with
+  a reconcile marker, history off by default and included when
+  enabled, a failed list withholding the marker while keeping the
+  healthy list's items, playlist discovery failing without aborting
+  the run, playlist discovery finding and dumping each playlist, a
+  duplicate video within one list keeping only its first occurrence,
+  and direct unit tests of `entry_record` and `to_item`.
+
 ## `skool` connector (closes #97)
 **2026-08-13**
 

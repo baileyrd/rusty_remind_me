@@ -628,6 +628,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-connector-youtube"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbs-connector-support",
+ "dbs-core",
+ "serde_json",
+]
+
+[[package]]
 name = "dbs-core"
 version = "0.1.0"
 dependencies = [
