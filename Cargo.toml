@@ -18,6 +18,7 @@ members = [
     "crates/dbs-connector-vimeo",
     "crates/dbs-connector-udemy",
     "crates/dbs-connector-reddit",
+    "crates/dbs-connector-skool",
 ]
 
 [workspace.package]
