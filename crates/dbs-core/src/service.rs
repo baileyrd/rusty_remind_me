@@ -2554,6 +2554,8 @@ mod tests {
                 description: None,
                 export_profile: None,
                 auth_capture: None,
+                pip_requirements: Vec::new(),
+                needs_playwright_browser: false,
             },
             command: std::path::PathBuf::from("dbs-connector-test"),
             args: Vec::new(),

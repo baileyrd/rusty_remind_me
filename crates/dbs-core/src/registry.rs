@@ -92,6 +92,16 @@ pub struct Handshake {
     /// token/secret).
     #[serde(default)]
     pub auth_capture: Option<crate::capabilities::AuthCapture>,
+    /// `pip install` package specs this connector needs before it can
+    /// run (issue #83's in-UI dependency-install job) — empty when it
+    /// has none beyond the base install.
+    #[serde(default)]
+    pub pip_requirements: Vec<String>,
+    /// Whether this connector's setup also needs `playwright install
+    /// chromium` (issue #83) — e.g. a `browser_session`/
+    /// `browser_cookies`/`browser_storage_state` capture connector.
+    #[serde(default)]
+    pub needs_playwright_browser: bool,
 }
 
 /// A successfully loaded, contract-valid connector.
@@ -432,6 +442,8 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            pip_requirements: Vec::new(),
+            needs_playwright_browser: false,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -452,6 +464,8 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            pip_requirements: Vec::new(),
+            needs_playwright_browser: false,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -472,6 +486,8 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            pip_requirements: Vec::new(),
+            needs_playwright_browser: false,
         };
         let err = validate_contract(&h).unwrap_err();
         assert!(err.contains("incompatible"));
@@ -496,6 +512,8 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            pip_requirements: Vec::new(),
+            needs_playwright_browser: false,
         };
         assert!(validate_contract(&h).is_ok());
     }
@@ -517,6 +535,8 @@ mod tests {
                 description: None,
                 export_profile: None,
                 auth_capture: None,
+                pip_requirements: Vec::new(),
+                needs_playwright_browser: false,
             },
             command: PathBuf::from("dbs-connector-raindrop"),
             args: Vec::new(),

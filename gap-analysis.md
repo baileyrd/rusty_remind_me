@@ -130,7 +130,7 @@ not left as one oversized issue.
 | Job manager (background jobs + SSE progress) | fn | spec | both | `src/dbs/web/jobs.py` | — | no | M | Done (#80) — `dbs-web::jobs`: generic submit/track/cancel + SSE, tested with a fake job; no `/api/backup` wiring yet (needs Auth first) and no VPN-subprocess routing (`BackupService` already refuses `requires_vpn` outside the namespace instead) |
 | Auth / CSRF / Origin / Host protection | fn | spec | both | `src/dbs/web/app.py` (security gate) | — | no | M | Done (#81) — `dbs-web::auth::security_gate`, wired into `router()`/`dbs serve`; DNS-rebinding Host check, Origin-based CSRF defense, opt-in bearer token gating `/api`. `dbs serve` now binds off-loopback for real once `--token` is given |
 | `envfile.py` (scoped secrets writer) | fn | spec | both | `src/dbs/web/envfile.py` | — | no | S | Done (#82) — `dbs-web::envfile`; the in-UI setup routes that call it are still #83 |
-| In-UI setup (dependency install + browser-auth capture jobs) | fn | spec | both | `src/dbs/web/setup.py` | — | no | L | Depends on browser-automation strategy — see Connectors |
+| In-UI setup (dependency install + browser-auth capture jobs) | fn | spec | both | `src/dbs/web/setup.py` | — | no | L | Done (#83) — `dbs-web::setup`: install job is fully real (derives + runs pip/playwright steps via the #80 job manager); capture job fails cleanly pending #99's Playwright helper. No `/api` routes yet |
 
 ## Research subsystem (NotebookLM-dependent, sits outside the connector model)
 
