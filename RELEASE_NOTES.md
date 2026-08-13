@@ -8,6 +8,44 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `pocketcasts` connector (closes #92)
+**2026-08-13**
+
+- **New `dbs-connector-pocketcasts` crate** — backs up podcast
+  subscriptions, starred episodes, and listening history via Pocket
+  Casts' unofficial web-player API (no official public API exists;
+  this speaks the same reverse-engineered endpoints the community
+  python/nodejs `pocketcasts` libraries use). Mirrors
+  `dbs.connectors.pocketcasts`: `POST /user/login` with
+  `POCKETCASTS_EMAIL`/`POCKETCASTS_PASSWORD` and `scope: "webplayer"`
+  returns a bearer token, then three POST endpoints
+  (`/user/podcast/list`, `/user/starred`, `/user/history`) each list
+  one kind, each its own small method so a shift in one endpoint's
+  shape stays a one-method fix. The API has no trustworthy
+  since-filter, so every run is a full walk of all three
+  (`supports_incremental=false`); a complete walk yields one
+  `ReconcileMarker`, so unsubscribed podcasts, unstarred episodes,
+  *and* history entries that scroll off Pocket Casts' server-side
+  history window all get soft-deleted — accepted, not a bug, since a
+  soft delete keeps the row and every revision. `playedUpTo`/
+  `playingStatus` are declared volatile so a listening-position
+  micro-update never spawns a revision by itself. A deliberately-
+  partial enumeration (any kind disabled) withholds the marker
+  entirely.
+- **Not wired up:** same boundary as `raindrop` (#85), `github` (#86),
+  `pinboard` (#87), `readwise` (#88), `mastodon` (#89), `bluesky`
+  (#90), and `spotify` (#91) — this struct isn't reachable from a real
+  `dbs backup` run yet; the plugin registry's run/stream bridge
+  doesn't exist.
+- 10 new `dbs-connector-pocketcasts` tests against a `mockito` fixture
+  server: missing-managed-http/missing-credentials errors, a rejected
+  login classified as an auth error, a full fetch yielding all three
+  item kinds and a reconcile marker, a disabled kind withholding the
+  marker, a podcast with no uuid being skipped, an episode url falling
+  back to the podcast page without a `shareUrl`, both HTTP status
+  classifications (401/403 vs. other) on the API, and connector
+  metadata matching the reference.
+
 ## `spotify` connector (closes #91)
 **2026-08-13**
 
