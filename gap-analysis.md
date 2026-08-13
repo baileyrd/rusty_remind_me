@@ -142,7 +142,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `raindrop` (template A: REST+token, real delta endpoint) | fn | spec | both | `connectors/raindrop.py` | — | no | M | Simplest connector — good first real connector after core lands |
+| `raindrop` (template A: REST+token, real delta endpoint) | fn | spec | both | `connectors/raindrop.py` | — | no | M | Done (#85) — new `dbs-connector-raindrop` crate; full incremental/reconcile/full fetch + trash polling against fixture HTTP. Not yet reachable from a real `dbs backup` run — the run/stream registry bridge (ADR-0001 steps 2-3) doesn't exist yet. `archive_permanent_copy` (opt-in, Pro-only) not ported |
 | `github` (template A: stars/gists) | fn | spec | both | `connectors/github.py` | — | no | M | |
 | `pinboard` (template A: `posts/update` delta) | fn | spec | both | `connectors/pinboard.py` | — | no | M | |
 | `readwise` (template A: `updatedAfter` cursor) | fn | spec | both | `connectors/readwise.py` | — | no | M | |
