@@ -8,6 +8,51 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `udemy` connector (closes #95)
+**2026-08-13**
+
+- **New `dbs-connector-udemy` crate** — backs up enrolled courses and
+  their full curricula via Udemy's own web-app REST surface
+  (`/api-2.0`; there's no official public learner API). Auth is the
+  `access_token` cookie from a logged-in browser
+  (`UDEMY_ACCESS_TOKEN`), sent both as a Bearer header and a cookie to
+  match the web client, with a desktop Chrome User-Agent since
+  Cloudflare fronts the API and blocks obviously non-browser clients.
+  Mirrors `dbs.connectors.udemy`: two item layers — `course` (one per
+  enrollment) and `lecture`/`quiz` (one per curriculum entry, walked
+  per course via `subscriber-curriculum-items`, quizzes sharing the
+  `lecture:` identity prefix exactly as the reference does). Article
+  lectures keep their full HTML in `body`; downloadable supplementary
+  assets become `file`-kind `MediaRef`s. A full-enumeration source
+  like `vimeo` (#94): every run walks everything and yields one
+  `ReconcileMarker` — but if any single course's curriculum fails to
+  load, the run continues (logged, not fatal) while the marker is
+  withheld entirely for that run, since a walk missing one course's
+  lectures would otherwise falsely sweep them.
+  `completion_ratio`/`last_accessed_time` are volatile so watch-
+  progress ticks never spawn revisions.
+- **Second connector to use `dbs-connector-support`** (after `vimeo`,
+  #94) — `download_videos = true` pulls each video lecture via the
+  `yt-dlp` binary (needs `UDEMY_COOKIES_FILE`, a full Netscape
+  cookies.txt export, since yt-dlp needs the whole cookie jar, not
+  just the one token), guarded by `run_with_watchdog` the same way.
+  Downloads are idempotent (existing file wins) and best-effort — a
+  failed or DRM-protected lecture is logged and the run moves on.
+- **Not wired up:** same boundary as `raindrop` (#85) through `vimeo`
+  (#94) — this struct isn't reachable from a real `dbs backup` run
+  yet; the plugin registry's run/stream bridge doesn't exist.
+- 16 new `dbs-connector-udemy` tests: a full fetch yielding course,
+  lecture, and quiz items plus a reconcile marker, `course_filter`
+  matching by id or slug, a failed curriculum withholding the marker
+  while keeping the other courses' items, pagination across `next`
+  links, an article lecture's HTML body, supplementary assets becoming
+  file `MediaRef`s, `download_videos` off by default having no video
+  media, a successful `yt-dlp` download via a fake script on disk, a
+  missing/invalid cookies file being skipped without failing the run,
+  an existing download being reused without invoking `yt-dlp` at all,
+  both HTTP status classifications (401/403 vs. other), and a direct
+  unit test of `safe_name`.
+
 ## `vimeo` connector (closes #94)
 **2026-08-13**
 
