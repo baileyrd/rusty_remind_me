@@ -8,6 +8,44 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `podcast` connector (closes #93)
+**2026-08-13**
+
+- **New `dbs-connector-podcast` crate** — backs up episodes from
+  RSS/Atom feeds you list, no account or token needed. The first new
+  XML-parsing dependency in the workspace (`roxmltree`, a read-only
+  DOM parser — no other connector needed one). Mirrors
+  `dbs.connectors.podcast`: the source of truth is a plain list of
+  feed URLs from `feeds` and/or an OPML subscription export
+  (`opml_path`), merged and deduplicated. Both RSS 2.0 (with the
+  iTunes namespace) and Atom are supported via one pure `parse_feed`
+  function, directly unit-tested. `download_audio = true` downloads
+  each episode's enclosure into the source's download folder
+  (idempotent — an existing non-empty file wins — and best-effort — a
+  dead enclosure never fails the run); otherwise the enclosure is
+  referenced by URL only via a `MediaRef`. One broken feed of many is
+  logged and skipped so healthy feeds still make progress; only when
+  *every* feed fails does the run fail.
+- **Deletion detection is deliberately disabled** — a podcast feed is
+  a rolling window over the newest N episodes, so an episode leaving
+  the feed is ordinary aging, not a deletion. Hence
+  `supports_full_enumeration = false` and no `ReconcileMarker`, ever;
+  what this connector has stored, it keeps.
+- **Not wired up:** same boundary as `raindrop` (#85) through
+  `pocketcasts` (#92) — this struct isn't reachable from a real
+  `dbs backup` run yet; the plugin registry's run/stream bridge
+  doesn't exist.
+- 12 new `dbs-connector-podcast` tests against a `mockito` fixture
+  server plus direct unit tests of `parse_feed`: missing-managed-
+  http/no-feeds-configured errors, an RSS feed and an Atom feed each
+  parsed into episodes, OPML feeds merged and deduplicated against
+  configured `feeds`, one broken feed of many being skipped while
+  healthy feeds still yield items, every feed failing being a
+  transient error, `download_audio` downloading an enclosure into the
+  download dir, `max_episodes_per_feed` capping the count, a
+  non-RSS/Atom root being rejected, and an episode with no
+  guid/link/enclosure being skipped.
+
 ## `pocketcasts` connector (closes #92)
 **2026-08-13**
 
