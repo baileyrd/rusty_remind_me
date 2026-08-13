@@ -125,6 +125,18 @@ jobs:
       - name: cargo clippy --features cloud-backup
         run: cargo clippy -p remind_me_core --features cloud-backup --all-targets --locked -- -D warnings
 
+      # Each `cargo test` step above relinks every integration test binary in
+      # remind_me_core/remind_me_hub against that step's own feature set, and
+      # none of those binaries are reused by a later step -- they just sit in
+      # target/debug/deps taking up space. Freeing the runner's preinstalled
+      # tooling (above) wasn't enough headroom on its own to reach the end of
+      # this job; reclaiming the previous steps' now-dead test binaries here
+      # is what actually buys the room the next `cargo test` step needs.
+      # `cargo clean -p` drops incremental state too, so the next build from
+      # here recompiles from scratch -- slower, but correctness over speed.
+      - name: Reclaim disk before the next full test-and-link step
+        run: cargo clean -p remind_me_core -p remind_me_hub
+
       # usearch builds a C++ library from source (~5 min), so this runs the
       # tests rather than only clippy: the equivalence check — that narrowing
       # never drops a row brute force would rank — is the whole reason the
@@ -144,6 +156,14 @@ jobs:
 
       - name: cargo clippy --features audio
         run: cargo clippy -p remind_me_core --features audio --all-targets --locked -- -D warnings
+
+      # Same reclaim as before the `ann` step, and for the same reason: this
+      # is the next full `cargo test` (as opposed to clippy-only) step, and
+      # relinking against `rten`/`tokenizers` on top of `ann`'s leftover
+      # `usearch`-linked binaries is what pushed this job over the runner's
+      # disk (`ld` SIGBUS on an unrelated test binary, not a real code fault).
+      - name: Reclaim disk before the next full test-and-link step
+        run: cargo clean -p remind_me_core -p remind_me_hub
 
       # This one runs the tests rather than only clippy, unlike ocr/audio
       # above. The difference is that its feature-on tests assert something a
@@ -166,6 +186,13 @@ jobs:
       # invokes the linker, so it is unaffected.
       - name: cargo clippy --features local-embed
         run: cargo clippy -p remind_me_core --features local-embed --all-targets --locked -- -D warnings
+
+      # Same reclaim as before `ann`/`rerank`. `local-embed` just above is
+      # clippy-only (no linking), but `ocr`/`audio` before it still compiled
+      # `rten`/`tokenizers`/`whisper-rs` object files that never got linked
+      # into a binary and are otherwise still sitting in target/debug.
+      - name: Reclaim disk before the next full test-and-link step
+        run: cargo clean -p remind_me_core -p remind_me_hub
 
       # Like `rerank` above, this runs the tests rather than only clippy, and
       # for a stronger reason: the feature's entire claim is that a thread
