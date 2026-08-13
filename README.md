@@ -69,6 +69,28 @@ The hook and the slash commands both bypass MCP entirely — they invoke the pla
 
 To use it, `rusty-remind-me` must be on `PATH` (`cargo build --release -p rusty-remind-me` then add `target/release` to `PATH`, or `cargo install --path crates/remind_me_cli`), then add this repo as a plugin source in Claude Code.
 
+### Multi-node sync through the plugin
+
+`.mcp.json` sets no `env` — Claude Code spawns a plugin's MCP server with
+`{...process.env, ...pluginEnv}`, so with nothing in `pluginEnv` the
+`rusty-remind-me server` process the plugin starts inherits Claude Code's own
+environment in full. If `REMIND_ME_NODE_ID`, `REMIND_ME_HUB_URL`, and
+`REMIND_ME_SYNC_SECRET` are already set in that environment, sync comes up
+transparently — the plugin neither enables nor blocks it, and there's
+nowhere here that would hardcode a shared secret into a file that ships with
+the plugin.
+
+What that inheritance does *not* change is which surface actually carries
+sync: per the note above, the background sync thread only runs inside the
+MCP server process, and the plugin's MCP server is the only one of its three
+surfaces that's an MCP server — the `SessionStart` hook and both slash
+commands invoke the plain CLI as one-shot subprocesses that exit
+immediately, same as `add`/`search` always have, sync thread or not. A
+memory added via `/rusty-remind-me:remember` while the MCP connection is
+down still lands in the local outbox; it just doesn't reach the hub until
+some running `rusty-remind-me server` process — this plugin's or otherwise,
+against the same database — picks it up on its next cycle.
+
 ---
 
 ## Automated Client Setup (Claude Desktop, Antigravity, Cursor, Codex)
@@ -152,6 +174,17 @@ A node pushes its outbox to a hub and pulls the hub's changes back; peers are
 also discovered directly (a static list, or Tailscale's local API) for
 peer-to-peer push. Sync stays off until `REMIND_ME_NODE_ID`,
 `REMIND_ME_HUB_URL`, and `REMIND_ME_SYNC_SECRET` are all set.
+
+**The background sync thread only exists inside the MCP server process.**
+`SyncWorker::from_env` — the loop that actually pushes/pulls on
+`REMIND_ME_SYNC_INTERVAL` — is constructed exactly once in this codebase,
+inside `McpServer::new` (`crates/remind_me_mcp/src/lib.rs`). Neither the
+one-shot CLI subcommands (`add`, `search`, `list`, ...) nor the REST API
+daemon (`remind_me_api`) start one. A write from any of those still lands in
+the shared SQLite outbox — it isn't lost — but nothing pushes it to the hub
+until a process that *is* running the MCP server picks it up on its next
+cycle. Concretely: `rusty-remind-me server` (or `rusty-remind-me mcp`) has to
+be up for sync to actually move data, running `add`/`search` alone does not.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
