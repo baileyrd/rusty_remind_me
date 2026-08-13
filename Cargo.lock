@@ -506,6 +506,7 @@ name = "dbs-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "dbs-core",
  "futures-util",
  "http-body-util",
  "serde",

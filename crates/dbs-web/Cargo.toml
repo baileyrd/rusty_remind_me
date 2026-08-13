@@ -8,6 +8,7 @@ description = "Web app skeleton for rusty_dbs, mirroring dbs.web.app in baileyrd
 
 [dependencies]
 axum = "0.7"
+dbs-core = { path = "../dbs-core" }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
