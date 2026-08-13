@@ -8,6 +8,54 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `raindrop` connector (closes #85)
+**2026-08-13**
+
+- **New `dbs-connector-raindrop` crate** — the first connector this
+  port implements `dbs_core::Connector` for. Mirrors
+  `dbs.connectors.raindrop` faithfully: token-based REST auth (bearer,
+  `RAINDROP_TOKEN`), the three engine-selected modes (incremental —
+  pages `-created`-sorted and early-stops past a stored
+  `created_high_watermark` cursor minus a small overlap, optionally
+  polling the Trash collection `-99` for same-day deletions; reconcile
+  — full page walk + a `ReconcileMarker` of every live id; full — same
+  as reconcile but ignores the existing cursor), and the exact
+  `to_item` field mapping (title/url/body/tags/media/deleted).
+- **Extends `RunContext` with `http`** (`Option<RefCell<ManagedHttpClient>>`)
+  — issue #22's `ManagedHttpClient` existed but wasn't wired into
+  `RunContext` yet; this is the first connector that actually needs
+  it. `RefCell` because the client's retry/rate-limit bookkeeping needs
+  `&mut self` per request while `fetch` only ever holds `&RunContext`.
+  `RunContext` drops its `Debug`/`Clone` derives as a result (neither
+  was ever actually used outside this module's own tests — `Managed
+  HttpClient` holds a boxed closure that can't derive either).
+- A connector's `fetch()` reclassifies a non-retryable HTTP status per
+  its own domain knowledge (documented on `HttpError` itself): 401/403
+  become `ConnectorError::Auth`, everything else non-retryable becomes
+  `Transient`.
+- **Not ported:** `archive_permanent_copy` — an opt-in, Pro-tier-only
+  feature that opportunistically downloads Raindrop's cached snapshot
+  of a bookmark via a redirect-following, deliberately unauthenticated
+  second request. Off by default in the reference too, and orthogonal
+  to what this issue asks for (token auth + delta/cursor fetch).
+- **Not wired up:** `RaindropConnector` isn't reachable from a real
+  `dbs backup` run yet. Per ADR-0001 a real connector is its own
+  subprocess binary discovered through the plugin registry's handshake
+  protocol (`dbs-core::registry`, already built) — but the *run/stream*
+  half (writing a `RunContext`, reading a `FetchEvent` stream back over
+  the wire) is a separate, not-yet-built bridge, same gap
+  `registry.rs`'s own scope note already documented. This issue's
+  acceptance criteria are scoped to the connector's own fetch/delta
+  logic, tested directly against the `Connector` trait and fixture
+  HTTP responses.
+- 8 new `dbs-connector-raindrop` tests against a `mockito` fixture
+  server: missing-managed-http and missing-token config/auth errors, a
+  full fetch paging two items and yielding a reconcile marker, an
+  incremental fetch early-stopping past the watermark, a trashed item
+  yielded with `deleted: true`, `include_types` filtering, a 401
+  response classified as an auth error, and connector metadata
+  (type/secret_keys/capabilities) matching the reference.
+
 ## Research pipeline: YouTube search → NotebookLM synthesis → report (closes #84)
 **2026-08-13**
 

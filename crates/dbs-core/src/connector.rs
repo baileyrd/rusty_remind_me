@@ -14,10 +14,12 @@
 //! the ABI story is settled.
 //!
 //! [`RunContext`] grows toward the reference's full shape as its
-//! dependent pieces land: `secrets` (#6) and `cancel` (#10) are now
-//! present; the managed HTTP client (#22) and a logger equivalent are
-//! still missing.
+//! dependent pieces land: `secrets` (#6), `cancel` (#10), and `http`
+//! (#22's [`ManagedHttpClient`], wired in for issue #85's
+//! `RaindropConnector`) are now present; a logger equivalent is still
+//! missing.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -25,15 +27,20 @@ use chrono::{DateTime, Utc};
 use crate::cancel::CancelToken;
 use crate::capabilities::{AuthCapture, Capabilities, ItemKind};
 use crate::errors::ConnectorError;
+use crate::http::ManagedHttpClient;
 use crate::models::{Cursor, FetchEvent};
 use crate::secrets::Secrets;
 pub use crate::versioning::CORE_API_VERSION;
 
 /// Everything a connector needs for one run, injected by the engine.
 ///
-/// Still missing `http` (#22) and a logger equivalent relative to the
-/// reference's full `RunContext`.
-#[derive(Debug, Clone)]
+/// Still missing a logger equivalent relative to the reference's full
+/// `RunContext`. Not `Debug`/`Clone` (unlike most of this crate's
+/// types) — `ManagedHttpClient` holds a boxed retry-sleep closure that
+/// can't derive either, and nothing outside this module's own tests
+/// has ever needed a `RunContext` to be debug-printed or cloned (the
+/// run/stream bridge that would construct one for a real backup run
+/// doesn't exist yet — see `registry.rs`'s scope note).
 pub struct RunContext {
     pub source_id: i64,
     pub source_name: String,
@@ -59,6 +66,16 @@ pub struct RunContext {
     /// The engine (later issue) polls it between fetched items and halts
     /// gracefully when set. `None` means the run cannot be cancelled.
     pub cancel: Option<CancelToken>,
+    /// The managed HTTP client, present iff [`Connector::wants_managed_http`]
+    /// is true. `RefCell`, not a plain field, because [`ManagedHttpClient`]'s
+    /// retry/rate-limit bookkeeping needs `&mut self` per request while
+    /// `fetch` only ever holds `&RunContext` — `ctx.http.as_ref().unwrap()
+    /// .borrow_mut()` gets the exclusive access one request needs without
+    /// threading a lifetime/mutability parameter through `RunContext`
+    /// itself. Single-threaded per run (one connector fetches sequentially),
+    /// so the runtime borrow-check `RefCell` performs can never actually
+    /// conflict.
+    pub http: Option<RefCell<ManagedHttpClient>>,
 }
 
 impl RunContext {
@@ -256,6 +273,7 @@ mod tests {
             download_dir: None,
             items_failed: 0,
             cancel: None,
+            http: None,
         }
     }
 
