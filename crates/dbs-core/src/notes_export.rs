@@ -238,7 +238,7 @@ pub fn export_notes(
     let mut notes_by_identity: HashMap<String, (String, String, Option<String>)> = HashMap::new();
     for query in &queries {
         let tmp_zip = temp_zip_path("notes-export");
-        let write_result = service.export(query, "obsidian", &tmp_zip);
+        let write_result = service.export(query, "obsidian", &tmp_zip, None);
         let read_result = write_result.and_then(|_| {
             let file = std::fs::File::open(&tmp_zip).map_err(io_err)?;
             let mut archive = zip::ZipArchive::new(file).map_err(zip_err)?;
@@ -354,7 +354,7 @@ pub fn export_wiki_dir(
 
     let tmp_zip = temp_zip_path("wiki-dir");
     let outcome = (|| -> Result<(ExportResult, u64, u64), DbsError> {
-        let export_result = service.export(&query, "wiki", &tmp_zip)?;
+        let export_result = service.export(&query, "wiki", &tmp_zip, None)?;
         let (pages, files) = unpack_wiki_zip(&tmp_zip, out_dir)?;
         Ok((export_result, pages, files))
     })();

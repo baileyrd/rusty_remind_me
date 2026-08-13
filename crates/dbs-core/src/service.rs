@@ -51,7 +51,9 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crate::cancel::CancelToken;
 use crate::capabilities::Capabilities;
 use crate::config::{Config, SourceConfig, VpnGuard};
-use crate::crypto::{decrypt_file, is_encrypted, resolve_passphrase, DEFAULT_PASSPHRASE_ENV};
+use crate::crypto::{
+    decrypt_file, is_encrypted, resolve_passphrase, EncryptingWriter, DEFAULT_PASSPHRASE_ENV,
+};
 use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError};
 use crate::export::{get_exporter, ExportResult, ExportSource};
 use crate::export_profile::{resolve_export_profile, ExportProfile};
@@ -1240,8 +1242,14 @@ impl<'a> BackupService<'a> {
     /// Runs `query` through `format`'s [`Exporter`](crate::export::Exporter)
     /// and atomically writes the result to `path` (write to a sibling
     /// `.tmp` file, then rename — a crash mid-export never leaves a
-    /// half-written file at `path`). Mirrors the reference's
-    /// `BackupService.export`.
+    /// half-written file at `path`). With `encrypt_passphrase: Some(_)`,
+    /// the exporter writes through an [`EncryptingWriter`] instead of
+    /// straight to the file — same atomicity, since encryption happens
+    /// inside the tmp-file-then-rename span, not after it. Mirrors the
+    /// reference's `BackupService.export`; passphrase *resolution*
+    /// (`--passphrase-env` / `.env` / the process environment) is the
+    /// caller's job via [`crate::crypto::resolve_passphrase`], matching
+    /// how this method also doesn't own `ExportQuery` construction.
     ///
     /// Pulled forward from #70 (the CLI-facing `dbs export*` wiring):
     /// [`crate::notes_export::export_notes`]/`export_wiki_dir` (#61)
@@ -1255,6 +1263,7 @@ impl<'a> BackupService<'a> {
         query: &ExportQuery,
         format: &str,
         path: &Path,
+        encrypt_passphrase: Option<&str>,
     ) -> Result<ExportResult, DbsError> {
         let exporter = get_exporter(format)?;
         let source = self.build_export_source(query)?;
@@ -1271,13 +1280,28 @@ impl<'a> BackupService<'a> {
         let tmp_path = path.with_file_name(tmp_name);
 
         let mut result = {
-            let mut file = std::fs::File::create(&tmp_path).map_err(|e| {
+            let file = std::fs::File::create(&tmp_path).map_err(|e| {
                 DbsError::Storage(format!("failed to create export temp file: {e}"))
             })?;
-            let result = exporter.write(&source, &mut file, query)?;
-            file.flush()
-                .map_err(|e| DbsError::Storage(format!("failed to flush export file: {e}")))?;
-            result
+            match encrypt_passphrase {
+                Some(passphrase) => {
+                    let mut writer = EncryptingWriter::new(file, passphrase)?;
+                    let result = exporter.write(&source, &mut writer, query)?;
+                    let mut file = writer.finish()?;
+                    file.flush().map_err(|e| {
+                        DbsError::Storage(format!("failed to flush export file: {e}"))
+                    })?;
+                    result
+                }
+                None => {
+                    let mut file = file;
+                    let result = exporter.write(&source, &mut file, query)?;
+                    file.flush().map_err(|e| {
+                        DbsError::Storage(format!("failed to flush export file: {e}"))
+                    })?;
+                    result
+                }
+            }
         };
         std::fs::rename(&tmp_path, path)
             .map_err(|e| DbsError::Storage(format!("failed to finalize export file: {e}")))?;
@@ -1347,7 +1371,7 @@ impl<'a> BackupService<'a> {
     /// Connector default, then the source's `[sources.NAME.export]`
     /// block, field by field. Mirrors the reference's
     /// `BackupService._export_profiles`.
-    fn export_profiles(&self) -> HashMap<String, ExportProfile> {
+    pub fn export_profiles(&self) -> HashMap<String, ExportProfile> {
         let mut profiles = HashMap::new();
         for (name, sc) in &self.config.sources {
             let default = self
@@ -3122,7 +3146,7 @@ mod tests {
         let service = BackupService::new(&mut storage, &config, &registry, &runner);
 
         let result = service
-            .export(&crate::storage::ExportQuery::default(), "json", &path)
+            .export(&crate::storage::ExportQuery::default(), "json", &path, None)
             .unwrap();
         assert_eq!(result.item_count, 1);
         assert_eq!(result.path.as_deref(), Some(path.to_str().unwrap()));
@@ -3134,6 +3158,72 @@ mod tests {
         assert!(text.contains("\"external_id\": \"e1\""));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_with_a_passphrase_produces_an_encrypted_file_that_decrypts_to_the_plain_export() {
+        let dir = restore_temp_dir("export-encrypted");
+        let plain_path = dir.join("export.ndjson");
+        let enc_path = dir.join("export.ndjson.enc");
+
+        let mut storage = FakeStorage {
+            export_items: vec![export_item_row("raindrop", "e1", "hello")],
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        service
+            .export(
+                &crate::storage::ExportQuery::default(),
+                "ndjson",
+                &plain_path,
+                None,
+            )
+            .unwrap();
+        let result = service
+            .export(
+                &crate::storage::ExportQuery::default(),
+                "ndjson",
+                &enc_path,
+                Some("hunter2"),
+            )
+            .unwrap();
+        assert_eq!(result.item_count, 1);
+        assert!(crate::crypto::is_encrypted(&enc_path));
+
+        let decrypted_path = dir.join("roundtrip.ndjson");
+        crate::crypto::decrypt_file(&enc_path, &decrypted_path, "hunter2").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&plain_path).unwrap(),
+            std::fs::read_to_string(&decrypted_path).unwrap(),
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_profiles_applies_a_source_level_override_over_the_connector_default() {
+        let mut sc = test_source_config("a", "raindrop");
+        sc.export = Some(crate::export_profile::ExportProfileOverride {
+            enabled: Some(false),
+            item_kinds: None,
+            group_by: None,
+            body_from: None,
+            page_per: None,
+        });
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), sc);
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let profiles = service.export_profiles();
+        assert!(!profiles["a"].enabled);
     }
 
     #[test]
@@ -3149,6 +3239,7 @@ mod tests {
                 &crate::storage::ExportQuery::default(),
                 "bogus",
                 &dir.join("out.bin"),
+                None,
             )
             .unwrap_err();
         assert!(err.to_string().contains("bogus"));
@@ -3170,7 +3261,12 @@ mod tests {
         let service = BackupService::new(&mut storage, &config, &registry, &runner);
 
         service
-            .export(&crate::storage::ExportQuery::default(), "obsidian", &path)
+            .export(
+                &crate::storage::ExportQuery::default(),
+                "obsidian",
+                &path,
+                None,
+            )
             .unwrap();
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();

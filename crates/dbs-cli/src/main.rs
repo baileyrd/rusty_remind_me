@@ -171,22 +171,109 @@ enum Command {
         json_out: bool,
     },
     /// Export items to a file in the given format.
-    Export,
+    Export {
+        /// Output file (or .zip for archive/obsidian).
+        #[arg(long = "out", short = 'o')]
+        out: PathBuf,
+        /// json|ndjson|csv|markdown|archive|obsidian|wiki.
+        #[arg(long = "format", short = 'f', default_value = "ndjson")]
+        format: String,
+        /// Filter by source name (repeatable).
+        #[arg(long = "source")]
+        source: Vec<String>,
+        /// Filter by item kind (repeatable).
+        #[arg(long = "type")]
+        item_type: Vec<String>,
+        /// Only items created on/after (YYYY-MM-DD or full ISO-8601).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only items created on/before.
+        #[arg(long)]
+        until: Option<String>,
+        /// Only items updated on/after — independent of --since.
+        #[arg(long = "since-updated")]
+        since_updated: Option<String>,
+        /// Only items updated on/before.
+        #[arg(long = "until-updated")]
+        until_updated: Option<String>,
+        #[arg(long)]
+        include_deleted: bool,
+        /// (archive) full revision history.
+        #[arg(long)]
+        include_revisions: bool,
+        /// Omit verbatim raw payloads.
+        #[arg(long)]
+        no_raw: bool,
+        /// (wiki) 'topic' for hub pages, 'item' for one page per item.
+        #[arg(long = "wiki-grouping", default_value = "topic")]
+        wiki_grouping: String,
+        /// Encrypt the output with a passphrase (scrypt + AES-256-GCM).
+        #[arg(long)]
+        encrypt: bool,
+        /// Env var (or .env key) holding the passphrase.
+        #[arg(long = "passphrase-env")]
+        passphrase_env: Option<String>,
+    },
     /// Incrementally export one Markdown note per item into a directory.
     #[command(name = "export-notes")]
-    ExportNotes,
+    ExportNotes {
+        /// Directory to write one Markdown note per item into.
+        #[arg(long = "out-dir", short = 'd')]
+        out_dir: PathBuf,
+        /// Filter by source name (repeatable).
+        #[arg(long = "source")]
+        source: Vec<String>,
+        /// Filter by item kind (repeatable).
+        #[arg(long = "type")]
+        item_type: Vec<String>,
+        /// Only items created on/after — overrides the incremental state file.
+        #[arg(long)]
+        since: Option<String>,
+        /// Ignore the incremental state file; consider every live item.
+        #[arg(long)]
+        full: bool,
+    },
     /// Show each source's resolved export profile.
     #[command(name = "export-profiles")]
-    ExportProfiles,
+    ExportProfiles {
+        /// Machine-readable output.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Export the wiki format's pages loose into a directory.
     #[command(name = "export-wiki")]
-    ExportWiki,
+    ExportWiki {
+        /// Directory to write loose wiki pages into.
+        #[arg(long = "out-dir", short = 'd')]
+        out_dir: PathBuf,
+        /// 'topic' for hub pages, 'item' for one page per item.
+        #[arg(long, default_value = "topic")]
+        grouping: String,
+        /// Filter by source name (repeatable).
+        #[arg(long = "source")]
+        source: Vec<String>,
+        /// Filter by item kind (repeatable).
+        #[arg(long = "type")]
+        item_type: Vec<String>,
+        /// Only items created on/after.
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// Check database integrity and per-source state, or an archive's checksums.
     Verify,
     /// Replay an exported backup into the database.
     Restore,
     /// Decrypt a `dbs export --encrypt`-produced bundle.
-    Decrypt,
+    Decrypt {
+        /// A file written by `dbs export --encrypt`.
+        src: PathBuf,
+        /// Destination (default: SRC minus its .enc suffix, else SRC + .plain).
+        #[arg(long = "out", short = 'o')]
+        out: Option<PathBuf>,
+        /// Env var (or .env key) holding the passphrase.
+        #[arg(long = "passphrase-env")]
+        passphrase_env: Option<String>,
+    },
     /// Run environment/dependency health checks.
     Doctor,
     /// Update the bundled yt-dlp build.
@@ -299,6 +386,58 @@ fn main() {
             json_out,
         ),
         Command::Stats { json_out } => cmd_stats(&cli.config, json_out),
+        Command::Export {
+            out,
+            format,
+            source,
+            item_type,
+            since,
+            until,
+            since_updated,
+            until_updated,
+            include_deleted,
+            include_revisions,
+            no_raw,
+            wiki_grouping,
+            encrypt,
+            passphrase_env,
+        } => cmd_export(
+            &cli.config,
+            out,
+            format,
+            source,
+            item_type,
+            since,
+            until,
+            since_updated,
+            until_updated,
+            include_deleted,
+            include_revisions,
+            no_raw,
+            wiki_grouping,
+            encrypt,
+            passphrase_env,
+        ),
+        Command::ExportNotes {
+            out_dir,
+            source,
+            item_type,
+            since,
+            full,
+        } => cmd_export_notes(&cli.config, out_dir, source, item_type, since, full),
+        Command::ExportProfiles { json_out } => cmd_export_profiles(&cli.config, json_out),
+        Command::ExportWiki {
+            out_dir,
+            grouping,
+            source,
+            item_type,
+            since,
+        } => cmd_export_wiki(&cli.config, out_dir, grouping, source, item_type, since),
+        Command::Decrypt {
+            src,
+            out,
+            passphrase_env,
+        } => cmd_decrypt(&cli.config, src, out, passphrase_env),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -312,13 +451,13 @@ fn command_name(command: &Command) -> &'static str {
         Command::History { .. } => "history",
         Command::Items { .. } => "items",
         Command::Stats { .. } => "stats",
-        Command::Export => "export",
-        Command::ExportNotes => "export-notes",
-        Command::ExportProfiles => "export-profiles",
-        Command::ExportWiki => "export-wiki",
+        Command::Export { .. } => "export",
+        Command::ExportNotes { .. } => "export-notes",
+        Command::ExportProfiles { .. } => "export-profiles",
+        Command::ExportWiki { .. } => "export-wiki",
         Command::Verify => "verify",
         Command::Restore => "restore",
-        Command::Decrypt => "decrypt",
+        Command::Decrypt { .. } => "decrypt",
         Command::Doctor => "doctor",
         Command::UpdateYtdlp => "update-ytdlp",
         Command::Maintain => "maintain",
@@ -1124,6 +1263,461 @@ fn cmd_stats(config_path: &Path, json_out: bool) -> i32 {
         );
     }
     0
+}
+
+/// Reads `<config's dir>/.env` (same convention as `.env.example`,
+/// written by `dbs init`) into a `KEY=VALUE` map — the `secret_store`
+/// [`resolve_passphrase`] checks before falling back to the process
+/// environment. A missing file is an empty map, not an error.
+fn load_env_secret_store(config_path: &Path) -> std::collections::HashMap<String, String> {
+    let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    dbs_core::parse_env_file(&dir.join(".env"))
+}
+
+/// Mirrors the reference's `export` command.
+#[allow(clippy::too_many_arguments)]
+fn cmd_export(
+    config_path: &Path,
+    out: PathBuf,
+    format: String,
+    source: Vec<String>,
+    item_type: Vec<String>,
+    since: Option<String>,
+    until: Option<String>,
+    since_updated: Option<String>,
+    until_updated: Option<String>,
+    include_deleted: bool,
+    include_revisions: bool,
+    no_raw: bool,
+    wiki_grouping: String,
+    encrypt: bool,
+    passphrase_env: Option<String>,
+) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let since_dt = match parse_date_arg(since.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let until_dt = match parse_date_arg(until.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let since_updated_dt = match parse_date_arg(since_updated.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let until_updated_dt = match parse_date_arg(until_updated.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let query = ExportQuery {
+        sources: if source.is_empty() {
+            None
+        } else {
+            Some(source)
+        },
+        item_types: if item_type.is_empty() {
+            None
+        } else {
+            Some(item_type)
+        },
+        since: since_dt,
+        until: until_dt,
+        since_updated: since_updated_dt,
+        until_updated: until_updated_dt,
+        include_deleted,
+        include_revisions,
+        include_raw: !no_raw,
+        wiki_grouping,
+    };
+
+    let passphrase = if encrypt {
+        let env_name = passphrase_env
+            .clone()
+            .unwrap_or_else(|| dbs_core::DEFAULT_PASSPHRASE_ENV.to_string());
+        let secret_store = load_env_secret_store(config_path);
+        match dbs_core::resolve_passphrase(Some(&secret_store), &env_name) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("{e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+    } else {
+        None
+    };
+
+    let result = match service.export(&query, &format, &out, passphrase.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+
+    let media = result
+        .extra
+        .get("media")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let pages = result
+        .extra
+        .get("pages")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let mut line = format!("Exported {} item(s)", result.item_count);
+    if result.revision_count > 0 {
+        line.push_str(&format!(", {} revision(s)", result.revision_count));
+    }
+    if media > 0 {
+        line.push_str(&format!(", {media} media file(s)"));
+    }
+    if pages > 0 {
+        line.push_str(&format!(" as {pages} wiki page(s)"));
+    }
+    line.push_str(&format!(
+        " to {} ({})",
+        result.path.as_deref().unwrap_or("?"),
+        result.format
+    ));
+    println!("{line}");
+    0
+}
+
+/// Mirrors the reference's `export-notes` command.
+fn cmd_export_notes(
+    config_path: &Path,
+    out_dir: PathBuf,
+    source: Vec<String>,
+    item_type: Vec<String>,
+    since: Option<String>,
+    full: bool,
+) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let since_dt = match parse_date_arg(since.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let sources = if source.is_empty() {
+        None
+    } else {
+        Some(source)
+    };
+    let item_types = if item_type.is_empty() {
+        None
+    } else {
+        Some(item_type)
+    };
+
+    let result = match dbs_core::export_notes(
+        &service,
+        &out_dir,
+        sources.as_deref(),
+        item_types.as_deref(),
+        since_dt,
+        !full,
+    ) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+    let since_desc = result
+        .extra
+        .get("since")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("the beginning");
+    println!(
+        "Wrote {} note(s) to {} (since {since_desc})",
+        result.item_count,
+        result.path.as_deref().unwrap_or("?"),
+    );
+    0
+}
+
+/// Mirrors the reference's `export-profiles` command.
+fn cmd_export_profiles(config_path: &Path, json_out: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let mut profiles: Vec<(String, dbs_core::ExportProfile)> =
+        service.export_profiles().into_iter().collect();
+    profiles.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if json_out {
+        let mut out = serde_json::Map::new();
+        for (name, p) in &profiles {
+            let type_ = cfg
+                .sources
+                .get(name)
+                .map(|sc| sc.type_.clone())
+                .unwrap_or_default();
+            let overridden = source_export_overrides(&cfg, name);
+            out.insert(
+                name.clone(),
+                serde_json::json!({
+                    "type": type_,
+                    "resolved": p,
+                    "overridden": overridden,
+                }),
+            );
+        }
+        match serde_json::to_string_pretty(&serde_json::Value::Object(out)) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode export profiles as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+
+    if profiles.is_empty() {
+        println!("No sources configured.");
+        return 0;
+    }
+    for (name, p) in &profiles {
+        let type_ = cfg
+            .sources
+            .get(name)
+            .map(|sc| sc.type_.as_str())
+            .unwrap_or("?");
+        let over = source_export_overrides(&cfg, name);
+        let mark = |field: &str| {
+            if over.contains(&field.to_string()) {
+                "*"
+            } else {
+                " "
+            }
+        };
+        let state = if p.enabled { "enabled" } else { "EXCLUDED" };
+        println!("\n{name}  ({type_}) \u{2014} {state}{}", mark("enabled"));
+        let kinds = p
+            .item_kinds
+            .as_ref()
+            .map(|k| k.join(", "))
+            .unwrap_or_else(|| "all".to_string());
+        println!("  {} item kinds : {kinds}", mark("item_kinds"));
+        let group_by = if p.group_by.is_empty() {
+            "tags (generic fallback)".to_string()
+        } else {
+            p.group_by.join(", ")
+        };
+        println!("  {} group by   : {group_by}", mark("group_by"));
+        let body_from = if p.body_from.is_empty() {
+            "the item's body column".to_string()
+        } else {
+            p.body_from.join(", ")
+        };
+        println!("  {} body from  : {body_from}", mark("body_from"));
+        println!(
+            "  {} page per   : {}",
+            mark("page_per"),
+            p.page_per.as_deref().unwrap_or("follows --grouping"),
+        );
+    }
+    println!("\n* = set by a [sources.NAME.export] block; the rest are connector defaults.");
+    println!("group_by/body_from read the raw payload, so --no-raw falls back to tags.");
+    0
+}
+
+/// Which `[sources.NAME.export]` fields the config explicitly set, for
+/// `cmd_export_profiles`'s `*` marker.
+fn source_export_overrides(cfg: &dbs_core::Config, name: &str) -> Vec<String> {
+    let Some(over) = cfg.sources.get(name).and_then(|sc| sc.export.as_ref()) else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    if over.enabled.is_some() {
+        fields.push("enabled".to_string());
+    }
+    if over.item_kinds.is_some() {
+        fields.push("item_kinds".to_string());
+    }
+    if over.group_by.is_some() {
+        fields.push("group_by".to_string());
+    }
+    if over.body_from.is_some() {
+        fields.push("body_from".to_string());
+    }
+    if over.page_per.is_some() {
+        fields.push("page_per".to_string());
+    }
+    fields
+}
+
+/// Mirrors the reference's `export-wiki` command.
+fn cmd_export_wiki(
+    config_path: &Path,
+    out_dir: PathBuf,
+    grouping: String,
+    source: Vec<String>,
+    item_type: Vec<String>,
+    since: Option<String>,
+) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let since_dt = match parse_date_arg(since.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let sources = if source.is_empty() {
+        None
+    } else {
+        Some(source)
+    };
+    let item_types = if item_type.is_empty() {
+        None
+    } else {
+        Some(item_type)
+    };
+
+    let result = match dbs_core::export_wiki_dir(
+        &service,
+        &out_dir,
+        sources.as_deref(),
+        item_types.as_deref(),
+        since_dt,
+        &grouping,
+    ) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+    let pages = result
+        .extra
+        .get("pages")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let grouping_used = result
+        .extra
+        .get("grouping")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&grouping);
+    println!(
+        "Wrote {pages} page(s) + index from {} item(s) to {} (grouping: {grouping_used})",
+        result.item_count,
+        result.path.as_deref().unwrap_or("?"),
+    );
+    0
+}
+
+/// Mirrors the reference's `decrypt` command.
+fn cmd_decrypt(
+    config_path: &Path,
+    src: PathBuf,
+    out: Option<PathBuf>,
+    passphrase_env: Option<String>,
+) -> i32 {
+    if !src.is_file() {
+        eprintln!("no such file: {}", src.display());
+        return CONFIG_ERROR_EXIT_CODE;
+    }
+    if !dbs_core::is_encrypted(&src) {
+        eprintln!("{} is not a dbs-encrypted file", src.display());
+        return CONFIG_ERROR_EXIT_CODE;
+    }
+    let dest = out.unwrap_or_else(|| {
+        if src.extension().is_some_and(|ext| ext == "enc") {
+            src.with_extension("")
+        } else {
+            let mut name = src.file_name().unwrap_or_default().to_os_string();
+            name.push(".plain");
+            src.with_file_name(name)
+        }
+    });
+    if dest.exists() {
+        eprintln!("refusing to overwrite {}", dest.display());
+        return STUB_EXIT_CODE;
+    }
+
+    let env_name = passphrase_env.unwrap_or_else(|| dbs_core::DEFAULT_PASSPHRASE_ENV.to_string());
+    let secret_store = load_env_secret_store(config_path);
+    let passphrase = match dbs_core::resolve_passphrase(Some(&secret_store), &env_name) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+
+    match dbs_core::decrypt_file(&src, &dest, &passphrase) {
+        Ok(n) => {
+            println!("Wrote {} ({n} bytes)", dest.display());
+            0
+        }
+        Err(e) => {
+            std::fs::remove_file(&dest).ok();
+            eprintln!("{e}");
+            STUB_EXIT_CODE
+        }
+    }
 }
 
 fn run_status_str(status: RunStatus) -> &'static str {

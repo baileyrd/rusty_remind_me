@@ -112,7 +112,7 @@ not left as one oversized issue.
 | `dbs backup` progress line + Ctrl+C handling | fn | spec | both | `cli.py` | — | no | S | Done (#67) — only `SourceStart`/`SourceDone` are emitted (no run/stream protocol yet for per-item progress) |
 | `dbs status` / `dbs history` | fn | spec | both | `cli.py` | — | no | S | Done (#68) |
 | `dbs items` / `dbs stats` (browse + FTS5 CLI) | fn | spec | both | `cli.py` | — | no | M | Done (#69) — full FTS5 search already available (landed with `Storage::browse_items`, not gated on this issue) |
-| `dbs export*` / `dbs decrypt` CLI wiring | fn | spec | both | `cli.py` | — | no | M | |
+| `dbs export*` / `dbs decrypt` CLI wiring | fn | spec | both | `cli.py` | — | no | M | Done (#70) |
 | `dbs sources` / `dbs connectors` (list/add/check/describe) | fn | spec | both | `cli.py` | — | no | M | |
 | `dbs doctor` | fn | spec | both | `cli.py` | — | no | M | |
 | `dbs update-ytdlp` | fn | spec | both | `cli.py` | — | no | S | Only meaningful once/if a yt-dlp-equivalent connector strategy is decided (see Connectors section) |

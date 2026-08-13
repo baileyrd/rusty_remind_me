@@ -8,6 +8,61 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs export* / dbs decrypt CLI wiring (closes #70)
+**2026-08-13**
+
+- **Implemented:** `dbs export`, `dbs export-notes`, `dbs
+  export-profiles`, `dbs export-wiki`, and `dbs decrypt`, wired to the
+  export/crypto machinery that already existed in `dbs-core` (the
+  exporter issues #51-#58, `BackupService::export` pulled forward into
+  #61, `notes_export::export_notes`/`export_wiki_dir` from #61, and
+  the crypto module). `BackupService::export_profiles` — previously
+  private, used only to build the export manifest — is now `pub` so
+  the CLI can render it directly.
+- **`BackupService::export` gained encryption:** a new
+  `encrypt_passphrase: Option<&str>` parameter. When set, the exporter
+  writes through an `EncryptingWriter` instead of straight to the file
+  — still inside the existing tmp-file-then-rename span, so a crash
+  mid-export still never leaves a half-written (or half-encrypted)
+  file at the destination. Passphrase *resolution* (`--passphrase-env`
+  / `.env` / the process environment, via
+  `crypto::resolve_passphrase`) stays the CLI's job, mirroring how the
+  CLI already owns `ExportQuery` construction.
+- `dbs export --out PATH --format FMT [--source]... [--type]...
+  [--since] [--until] [--since-updated] [--until-updated]
+  [--include-deleted] [--include-revisions] [--no-raw]
+  [--wiki-grouping] [--encrypt] [--passphrase-env]`: all 7 formats,
+  filter flags mapping onto `ExportQuery` (reusing `parse_date_arg`
+  from #69 for `--since`/`--until`/`--since-updated`/`--until-updated`).
+- `dbs export-notes --out-dir DIR [--source]... [--type]... [--since]
+  [--full]` and `dbs export-wiki --out-dir DIR [--grouping]
+  [--source]... [--type]... [--since]`: unzipped directory variants of
+  the `obsidian`/`wiki` formats for a folder-watching downstream tool.
+- `dbs export-profiles [--json]`: each source's resolved export rules
+  (item kinds, group-by, body-from, page-per), with a `*` marker on
+  fields a `[sources.NAME.export]` block explicitly overrode.
+- `dbs decrypt SRC [--out] [--passphrase-env]`: decrypts a `dbs export
+  --encrypt` file back to plain form — refuses to overwrite an
+  existing destination, and cleans up a partial destination file on a
+  failed decrypt (wrong passphrase/corruption) rather than leaving one
+  behind.
+- Passphrases are resolved from a `<config dir>/.env` file (the same
+  convention `dbs init` already writes `.env.example` into) or the
+  process environment — never accepted as a CLI argument.
+- Updated `a_stub_subcommand_reports_not_yet_implemented` to use
+  `verify` instead of `export`, now that the `export*`/`decrypt`
+  family is no longer stubbed.
+- 2 new `dbs-core` unit tests (an encrypt-then-decrypt round trip
+  producing byte-identical content to a plain export; a source-level
+  `[sources.NAME.export]` override actually taking effect) plus 15 new
+  `dbs-cli` integration tests seeding real item rows via `SqliteStorage`
+  (no connector-candidate discovery exists yet, #85-100): each export
+  format's CLI invocation, an unknown format, a full CLI-level
+  encrypt/decrypt round trip, decrypt's overwrite/not-encrypted/
+  missing-file/wrong-passphrase error paths, `export-notes`,
+  `export-wiki`, and `export-profiles`' override marker (text and
+  JSON).
+
 ## dbs items / dbs stats (closes #69)
 **2026-08-13**
 
