@@ -550,6 +550,7 @@ name = "dbs-connector-raindrop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dbs-connector-support",
  "dbs-core",
  "mockito",
  "reqwest",
@@ -604,6 +605,8 @@ dependencies = [
 name = "dbs-connector-support"
 version = "0.1.0"
 dependencies = [
+ "dbs-core",
+ "reqwest",
  "serde_json",
 ]
 

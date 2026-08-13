@@ -25,13 +25,24 @@
 //! `tiptap` (issue #100) is a direct, node-for-node port of
 //! `connectors/_tiptap.py` — TipTap/ProseMirror rich-text JSON to
 //! Markdown, used by `skool` lesson descriptions.
+//!
+//! `subprocess_main` (issue #161) is this crate's first module to
+//! depend on `dbs-core` itself — every other module here is
+//! `dbs-core`-agnostic connector plumbing, but the whole point of this
+//! one is bridging a `dbs_core::Connector` implementation to
+//! `dbs_core::run_stream`'s wire protocol (#157), so the dependency is
+//! unavoidable and correct: this crate sits *below* the individual
+//! `dbs-connector-<type>` binaries, which depend on both it and
+//! `dbs-core`.
 
 pub mod python_launch;
+pub mod subprocess_main;
 pub mod tiptap;
 pub mod watchdog;
 
 pub use python_launch::{
     find_python, run_python_script, run_python_script_using, PythonLaunchError,
 };
+pub use subprocess_main::run_connector_main;
 pub use tiptap::tiptap_markdown;
 pub use watchdog::{run_with_watchdog, WatchdogError, WatchdogTimeout};

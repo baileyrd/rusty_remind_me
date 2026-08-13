@@ -19,8 +19,11 @@
 //!   writing anything.
 //!
 //! Run/stream modes (`tests/run_stream_integration.rs`), all of which
-//! first read and parse one [`dbs_core::WireRunContext`] line from
-//! stdin — `usage: test_connector_fixture run <scenario> [args...]`:
+//! first write a handshake line (real connector spawns always do,
+//! whether the spawn turns out to be a discovery probe or a real run —
+//! see `write_run_handshake`) and then read and parse one
+//! [`dbs_core::WireRunContext`] line from stdin —
+//! `usage: test_connector_fixture run <scenario> [args...]`:
 //! - `run ok <n>` — writes `n` `Item`s (the first one's `raw` echoes
 //!   the received [`WireRunContext`] under `"_wire_ctx"`, so a test can
 //!   assert on exactly what the host sent), a `Checkpoint`, then
@@ -61,8 +64,29 @@ fn read_wire_context() -> WireRunContext {
     serde_json::from_str(line.trim()).expect("parse WireRunContext")
 }
 
+/// Every real connector spawn writes its handshake line first (ADR-0001
+/// step 1) before anything else, whether the spawn turns out to be a
+/// discovery probe or a real run — `run_connector_subprocess` (#157)
+/// reads and discards exactly one such line before the `WireLine`
+/// stream begins. The `run` fixture modes mirror that here so they
+/// exercise the same real shape a genuine `dbs-connector-<type>`
+/// binary's stdout produces.
+fn write_run_handshake() {
+    let handshake = serde_json::json!({
+        "type": "fixture",
+        "core_api_version": 1,
+        "schema_version": 1,
+        "capabilities": {"requires_auth": false},
+        "secret_keys": [],
+        "item_kinds": ["item"],
+    });
+    println!("{handshake}");
+    let _ = std::io::stdout().flush();
+}
+
 fn run_fixture(args: &mut dyn Iterator<Item = String>) {
     let scenario = args.next().unwrap_or_default();
+    write_run_handshake();
     let ctx = read_wire_context();
     match scenario.as_str() {
         "ok" => {
