@@ -8,6 +8,32 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## envfile.py (scoped secrets writer) (closes #82)
+**2026-08-13**
+
+- **Implemented:** `dbs-web::envfile` — a minimal, dependency-free
+  `.env` writer mirroring the reference's `envfile.py`: `set_var`
+  upserts a single `KEY="value"` line while preserving the rest of the
+  file (comments, ordering, unrelated keys, collapsing any duplicate
+  existing assignment of the same key to one), `unset_var` removes
+  every assignment of a key, and `read_keys` returns the set of keys
+  currently assigned a non-empty value (reusing
+  `dbs_core::parse_env_file` rather than re-parsing the format a
+  second time — the one place `dbs-web` depends on `dbs-core` so far).
+  `validate` rejects an invalid env var name or a value containing a
+  newline/CR/double-quote, since every written value is double-quoted
+  and an embedded one could inject extra lines/keys. A newly-created
+  file is `chmod 0600` on Unix (best-effort, matching the reference).
+- **Deliberately scoped:** the in-UI setup routes that will actually
+  call this from the web UI (issue #83) don't exist yet — this issue
+  is just the writer itself, same as #80's job manager landing ahead
+  of the routes that use it.
+- 14 new `dbs-web` tests: create/update/preserve-unrelated-lines,
+  duplicate-assignment collapse, the `export` prefix, invalid key/value
+  rejection, the Unix chmod, `unset_var`'s three outcomes (removed, no
+  such file, key never present), and `read_keys` (non-empty-only,
+  missing file).
+
 ## Auth / CSRF / Origin / Host protection (closes #81)
 **2026-08-13**
 

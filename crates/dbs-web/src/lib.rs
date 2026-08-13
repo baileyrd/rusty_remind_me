@@ -46,6 +46,7 @@ use axum::routing::get;
 use axum::Router;
 
 pub mod auth;
+pub mod envfile;
 pub mod jobs;
 
 use auth::SecurityConfig;
