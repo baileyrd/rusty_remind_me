@@ -55,7 +55,7 @@ rusty_remind_me/
 
 - **`.mcp.json`** — the same stdio MCP server (`rusty-remind-me server`) described above, registered automatically instead of via the `configure` command or a manual client config edit.
 - **`hooks/hooks.json`** — a `SessionStart` hook (`hooks/scripts/session-start.sh`) that runs `rusty-remind-me list --limit 8` directly (no MCP round-trip, no model decision required) and injects the most recently written memories as context at the start of every session.
-- **`commands/remember.md`, `commands/recall.md`** — `/remember <text> [--category NAME] [--tags a,b]` and `/recall <query> [--limit N]`, each running `rusty-remind-me add`/`search` directly (via the command body's `` !`...` `` bash-execution syntax) before the model ever sees the prompt. `allowed-tools` scopes each command to exactly one CLI invocation shape (`Bash(rusty-remind-me add *)` / `Bash(rusty-remind-me search *)`).
+- **`commands/remember.md`, `commands/recall.md`** — `/rusty-remind-me:remember <text> [--category NAME] [--tags a,b]` and `/rusty-remind-me:recall <query> [--limit N]`, each running `rusty-remind-me add`/`search` directly (via the command body's `` !`...` `` bash-execution syntax) before the model ever sees the prompt. `allowed-tools` scopes each command to exactly one CLI invocation shape (`Bash(rusty-remind-me add *)` / `Bash(rusty-remind-me search *)`). Plugin-provided commands are namespaced as `/plugin-name:command-name` — the bare `/remember` is not registered, only `/rusty-remind-me:remember`.
 
 Three different connections, each with a different trigger:
 
@@ -63,7 +63,7 @@ Three different connections, each with a different trigger:
 | --- | --- | --- |
 | MCP tools | Model issues a `tools/call` | Decides whether and when to call |
 | `SessionStart` hook | Every session start, unconditionally | None — output is injected before the model sees the prompt |
-| `/remember`, `/recall` | User types the command | None for the CLI call itself; model only sees/summarizes the result |
+| `/rusty-remind-me:remember`, `/rusty-remind-me:recall` | User types the command | None for the CLI call itself; model only sees/summarizes the result |
 
 The hook and the slash commands both bypass MCP entirely — they invoke the plain CLI binary as a subprocess and never speak the MCP JSON-RPC protocol. The hook degrades safely: if `rusty-remind-me` isn't on `PATH` yet, or the store is empty, it emits `{"continue": true}` (optionally with a one-line `systemMessage` nudge to build the binary) rather than failing the session. The slash commands surface the same "not on PATH" condition as plain shell output for the model to relay, rather than silently retrying some other way.
 
