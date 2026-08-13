@@ -8,6 +8,29 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs serve flag wiring (closes #75)
+**2026-08-13**
+
+- **Implemented:** `dbs serve --host --port --allow-setup/--no-setup
+  --token --schedule/--no-schedule`, matching the reference's flag
+  surface and its security-relevant validation (refusing to bind
+  off-localhost without a `--token`, since the API would otherwise be
+  unauthenticated and able to read backups/write secrets).
+- **Deliberately scoped, per this issue's own framing:** the actual
+  web server is out of scope here — see gap-analysis.md's Web tier
+  rows (app skeleton, job manager, auth) — so once flags validate,
+  `dbs serve` reports what it *would* do (address, scheduler-on,
+  setup-actions-disabled, token-required) instead of pretending to
+  listen for real, and exits `4` (same code the reference uses for its
+  own "web extras not installed" case).
+- `is_local_host` mirrors the reference's `is_local` check exactly,
+  including treating an empty host string as local.
+- 2 new unit tests for `is_local_host` plus 8 new `dbs-cli` integration
+  tests: default host/port, a custom port, the off-localhost-without-
+  token refusal and its accepted-with-token counterpart, `localhost`
+  by name, `--schedule`/`--no-setup` reflected in the report, and
+  `--allow-setup --no-setup` together as a usage error.
+
 ## dbs schedule (closes #74)
 **2026-08-13**
 
