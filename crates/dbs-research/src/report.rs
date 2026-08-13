@@ -71,7 +71,7 @@ pub fn render_report(result: &ResearchResult) -> String {
     lines.push("### Top Performers (by views)".to_string());
     lines.push(String::new());
     let mut by_views: Vec<&VideoMeta> = indexed.clone();
-    by_views.sort_by(|a, b| b.view_count.unwrap_or(0).cmp(&a.view_count.unwrap_or(0)));
+    by_views.sort_by_key(|v| std::cmp::Reverse(v.view_count.unwrap_or(0)));
     lines.extend(video_table(&by_views[..by_views.len().min(5)]));
     lines.push(String::new());
     lines.push("### Small Channel Outliers (by engagement)".to_string());
