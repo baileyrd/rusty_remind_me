@@ -76,12 +76,42 @@ pub const DEFAULT_PEER_PORT: u16 = 8766;
 
 pub const DEFAULT_CLIENT: &str = "unknown";
 
+/// The literal text a `${user_config.KEY}` reference in an MCP client's
+/// `env` config would leave behind if that substitution were attempted
+/// against an unfilled value, rather than falling back to an empty string --
+/// observed directly wiring a Claude Code plugin's `userConfig` into this
+/// plugin's own `.mcp.json`, an approach abandoned after confirming neither
+/// of Claude Code's two documented delivery paths (manifest-level
+/// `${user_config.*}` substitution, or `CLAUDE_PLUGIN_OPTION_<KEY>` env
+/// export) actually reaches an MCP server subprocess, only hook processes.
+/// Kept as a defensive guard regardless of that history: none of
+/// `NODE_ID_ENV`/`HUB_URL_ENV`/`SYNC_SECRET_ENV` is ever legitimately this
+/// shape, so a value here means "never configured", not a hub URL/secret to
+/// actually use -- without this check, `sync_enabled` would read it as a
+/// real (if unusual) value and turn sync on against a garbage endpoint
+/// instead of leaving it off.
+fn is_unresolved_placeholder(value: &str) -> bool {
+    value.starts_with("${user_config.")
+}
+
+/// Read a sync config var, treating both "unset" and an unresolved
+/// `${user_config.*}` placeholder (see [`is_unresolved_placeholder`]) as
+/// `""`.
+fn configured_env(key: &str) -> String {
+    let value = std::env::var(key).unwrap_or_default();
+    if is_unresolved_placeholder(&value) {
+        String::new()
+    } else {
+        value
+    }
+}
+
 /// This node's configured identity, or `""` if unset — stamped on every
 /// newly created memory regardless of whether sync is enabled, matching
 /// the reference's own `memory_add` exactly (`NODE_ID`/`CLIENT` are plain
 /// module-level config, read unconditionally).
 pub fn configured_node_id() -> String {
-    std::env::var(NODE_ID_ENV).unwrap_or_default()
+    configured_env(NODE_ID_ENV)
 }
 
 /// Identity reported by the MCP client in its `initialize` handshake.
@@ -145,11 +175,11 @@ pub fn memory_provenance() -> (String, String) {
 }
 
 fn configured_hub_url() -> String {
-    std::env::var(HUB_URL_ENV).unwrap_or_default()
+    configured_env(HUB_URL_ENV)
 }
 
 fn configured_sync_secret() -> String {
-    std::env::var(SYNC_SECRET_ENV).unwrap_or_default()
+    configured_env(SYNC_SECRET_ENV)
 }
 
 /// `NODE_ID`, `HUB_URL`, and `SYNC_SECRET` are all non-empty — matching the
@@ -400,4 +430,62 @@ pub(crate) fn record_pull(conn: &Connection, remote_id: &str) {
              last_pull_at = excluded.last_pull_at",
         params![remote_id, now, now],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Env vars are process-global; serialize this module's env-touching
+    // tests so they don't race each other the way `cargo test` otherwise
+    // would.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_env() {
+        std::env::remove_var(NODE_ID_ENV);
+        std::env::remove_var(HUB_URL_ENV);
+        std::env::remove_var(SYNC_SECRET_ENV);
+    }
+
+    /// A stray literal `${user_config.KEY}` string in one of these vars --
+    /// what an MCP client's `env` config substitution would leave behind if
+    /// it were ever attempted and failed to resolve -- must not read as a
+    /// real (if unusual) hub URL/node id/secret. `sync_enabled` must treat
+    /// it exactly like the var being unset, and never turn sync on against a
+    /// garbage endpoint.
+    #[test]
+    fn unresolved_user_config_placeholder_does_not_enable_sync() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var(NODE_ID_ENV, "${user_config.node_id}");
+        std::env::set_var(HUB_URL_ENV, "${user_config.hub_url}");
+        std::env::set_var(SYNC_SECRET_ENV, "${user_config.sync_secret}");
+
+        assert!(!sync_enabled());
+        assert_eq!(configured_node_id(), "");
+        assert_eq!(configured_hub_url(), "");
+        assert_eq!(configured_sync_secret(), "");
+
+        clear_env();
+    }
+
+    /// A real, fully-configured triple still enables sync -- the placeholder
+    /// guard must not reject legitimate values that simply start with `$`
+    /// or otherwise resemble the pattern by coincidence.
+    #[test]
+    fn a_real_triple_still_enables_sync() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var(NODE_ID_ENV, "my-laptop");
+        std::env::set_var(HUB_URL_ENV, "https://hub.example.com");
+        std::env::set_var(SYNC_SECRET_ENV, "s3cr3t");
+
+        assert!(sync_enabled());
+        assert_eq!(configured_node_id(), "my-laptop");
+        assert_eq!(configured_hub_url(), "https://hub.example.com");
+        assert_eq!(configured_sync_secret(), "s3cr3t");
+
+        clear_env();
+    }
 }
