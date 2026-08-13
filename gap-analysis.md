@@ -114,7 +114,7 @@ not left as one oversized issue.
 | `dbs items` / `dbs stats` (browse + FTS5 CLI) | fn | spec | both | `cli.py` | — | no | M | Done (#69) — full FTS5 search already available (landed with `Storage::browse_items`, not gated on this issue) |
 | `dbs export*` / `dbs decrypt` CLI wiring | fn | spec | both | `cli.py` | — | no | M | Done (#70) |
 | `dbs sources` / `dbs connectors` (list/add/check/describe) | fn | spec | both | `cli.py` | — | no | M | Done (#71) — `check`/`add`/`describe` validate only connector *resolvability*, since a subprocess connector has no in-process config schema to validate against |
-| `dbs doctor` | fn | spec | both | `cli.py` | — | no | M | |
+| `dbs doctor` | fn | spec | both | `cli.py` | — | no | M | Done (#72) — Pydantic option/dependency validation and yt-dlp version checks have no equivalent in this port's architecture |
 | `dbs update-ytdlp` | fn | spec | both | `cli.py` | — | no | S | Only meaningful once/if a yt-dlp-equivalent connector strategy is decided (see Connectors section) |
 | `dbs schedule` (cron/systemd snippets) | fn | spec | both | `cli.py` | — | no | S | Windows needs a Task Scheduler snippet instead of systemd — cross-platform floor makes this two branches, not one |
 | `dbs serve` flag wiring | fn | spec | both | `cli.py` | — | no | S | Thin; real work is the Web tier row below |

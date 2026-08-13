@@ -275,7 +275,11 @@ enum Command {
         passphrase_env: Option<String>,
     },
     /// Run environment/dependency health checks.
-    Doctor,
+    Doctor {
+        /// Emit JSON.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Update the bundled yt-dlp build.
     #[command(name = "update-ytdlp")]
     UpdateYtdlp,
@@ -472,6 +476,7 @@ fn main() {
             }
             ConnectorsCommand::Describe { type_ } => cmd_connectors_describe(&cli.config, type_),
         },
+        Command::Doctor { json_out } => cmd_doctor(&cli.config, json_out),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -492,7 +497,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Verify => "verify",
         Command::Restore => "restore",
         Command::Decrypt { .. } => "decrypt",
-        Command::Doctor => "doctor",
+        Command::Doctor { .. } => "doctor",
         Command::UpdateYtdlp => "update-ytdlp",
         Command::Maintain => "maintain",
         Command::Schedule => "schedule",
@@ -2024,6 +2029,49 @@ fn cmd_connectors_describe(config_path: &Path, type_: String) -> i32 {
     // model, there's nothing to introspect here yet.
     println!("\nConfig schema: {{}}");
     0
+}
+
+/// Mirrors the reference's `doctor` command. See
+/// `BackupService::doctor`'s doc-comment for the two check categories
+/// (Pydantic option/dependency validation, yt-dlp version) this port's
+/// architecture has no equivalent for.
+fn cmd_doctor(config_path: &Path, json_out: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let secret_store = load_env_secret_store(config_path);
+    let checks = service.doctor(Some(&secret_store));
+
+    if json_out {
+        match serde_json::to_string_pretty(&checks) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode doctor checks as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+    } else {
+        for c in &checks {
+            println!("  [{:^4}] {}: {}", c.status, c.name, c.detail);
+        }
+    }
+    if checks.iter().any(|c| c.status == "fail") {
+        1
+    } else {
+        0
+    }
 }
 
 fn run_status_str(status: RunStatus) -> &'static str {

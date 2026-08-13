@@ -59,10 +59,10 @@ use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError
 use crate::export::{get_exporter, ExportResult, ExportSource};
 use crate::export_profile::{resolve_export_profile, ExportProfile};
 use crate::models::{
-    ConnectorInfo, Cursor, ProgressEvent, ProgressPhase, RestoreReport, RunResult, RunStatus,
-    SourceStatus, VerifyIssue, VerifyReport,
+    ConnectorInfo, Cursor, DoctorCheck, ProgressEvent, ProgressPhase, RestoreReport, RunResult,
+    RunStatus, SourceStatus, VerifyIssue, VerifyReport,
 };
-use crate::netns::in_named_netns;
+use crate::netns::{in_named_netns, named_netns_exists};
 use crate::registry::{ConnectorRegistry, RegisteredConnector};
 use crate::restore::{
     iter_export_rows, prepared_item_from_row, read_manifest, skipped_extras, verify_archive,
@@ -1150,6 +1150,199 @@ impl<'a> BackupService<'a> {
         file.write_all(block.as_bytes())
             .map_err(|e| DbsError::Storage(format!("failed to append source to config: {e}")))?;
         Ok(())
+    }
+
+    /// Environment/health diagnostics — the README's troubleshooting
+    /// checklist as a command. Read-only; never mutates anything.
+    /// Mirrors the reference's `doctor`, minus two checks that don't
+    /// have an equivalent in this port's architecture (documented at
+    /// the call site, not silently dropped):
+    ///
+    /// * `source.NAME.config` (Pydantic option validation) and
+    ///   `source.NAME.deps` (Python runtime-dependency importability)
+    ///   assume an in-process connector class; this port's connectors
+    ///   are external subprocesses whose only interface is the
+    ///   spawn/handshake protocol (ADR-0001 step 1), same gap
+    ///   [`Self::check_sources`]'s doc-comment explains.
+    /// * `deps.yt-dlp` checks a Python package this Rust binary
+    ///   doesn't depend on — not applicable until a connector/download
+    ///   pipeline issue introduces whatever tooling this port uses for
+    ///   that.
+    ///
+    /// `secret_store`, like [`crate::crypto::resolve_passphrase`]'s
+    /// parameter of the same name, is the caller's `.env`/environment
+    /// map — `BackupService` doesn't own one itself.
+    pub fn doctor(&self, secret_store: Option<&HashMap<String, String>>) -> Vec<DoctorCheck> {
+        let mut checks = Vec::new();
+
+        let integrity = self
+            .storage
+            .integrity_check()
+            .unwrap_or_else(|e| e.to_string());
+        checks.push(DoctorCheck {
+            name: "database.integrity".to_string(),
+            status: if integrity == "ok" { "ok" } else { "fail" }.to_string(),
+            detail: integrity,
+        });
+
+        let wal_path = format!("{}-wal", self.config.database);
+        let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+        const WAL_WARN_BYTES: u64 = 10_000_000;
+        checks.push(DoctorCheck {
+            name: "database.wal".to_string(),
+            status: if wal_bytes > WAL_WARN_BYTES {
+                "warn"
+            } else {
+                "ok"
+            }
+            .to_string(),
+            detail: if wal_bytes > WAL_WARN_BYTES {
+                format!("{wal_bytes} bytes — run `dbs maintain` to fold it into the main file")
+            } else {
+                format!("{wal_bytes} bytes")
+            },
+        });
+
+        let interrupted = self
+            .storage
+            .recent_runs(None, 50)
+            .map(|runs| {
+                runs.iter()
+                    .filter(|r| r.get("status").and_then(|v| v.as_str()) == Some("interrupted"))
+                    .count()
+            })
+            .unwrap_or(0);
+        checks.push(DoctorCheck {
+            name: "runs.interrupted".to_string(),
+            status: if interrupted > 0 { "warn" } else { "ok" }.to_string(),
+            detail: format!("{interrupted} interrupted run(s) in recent history")
+                + if interrupted > 0 {
+                    " \u{2014} a crash/kill; the next backup resumes from the last committed cursor"
+                } else {
+                    ""
+                },
+        });
+
+        let mut names: Vec<&String> = self.config.sources.keys().collect();
+        names.sort();
+        for name in names {
+            let sc = &self.config.sources[name];
+            if !sc.enabled {
+                checks.push(DoctorCheck {
+                    name: format!("source.{name}"),
+                    status: "ok".to_string(),
+                    detail: "disabled".to_string(),
+                });
+                continue;
+            }
+            let Some(rc) = self.registry.get(&sc.type_) else {
+                checks.push(DoctorCheck {
+                    name: format!("source.{name}"),
+                    status: "fail".to_string(),
+                    detail: format!("connector {:?} unavailable: not found", sc.type_),
+                });
+                continue;
+            };
+
+            if sc.requires_vpn {
+                checks.push(self.vpn_doctor_check(name));
+            }
+
+            let declared = &rc.handshake.secret_keys;
+            if rc.handshake.capabilities.requires_auth && !declared.is_empty() {
+                let present: Vec<&str> = declared
+                    .iter()
+                    .filter(|k| {
+                        secret_store
+                            .and_then(|s| s.get(k.as_str()))
+                            .is_some_and(|v| !v.is_empty())
+                    })
+                    .map(String::as_str)
+                    .collect();
+                checks.push(DoctorCheck {
+                    name: format!("source.{name}.secrets"),
+                    status: if present.is_empty() { "fail" } else { "ok" }.to_string(),
+                    detail: if present.is_empty() {
+                        format!(
+                            "none of {} is set \u{2014} the run will fail at auth",
+                            declared.join(", ")
+                        )
+                    } else {
+                        format!("set: {}", present.join(", "))
+                    },
+                });
+            }
+
+            if let Some(source) = self.storage.get_source(name).ok().flatten() {
+                let last_ok = self
+                    .storage
+                    .recent_runs(Some(source.id), 50)
+                    .ok()
+                    .and_then(|runs| {
+                        runs.iter()
+                            .find(|r| r.get("status").and_then(|v| v.as_str()) == Some("success"))
+                            .and_then(|r| r.get("started_at"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| parse_iso(Some(s)))
+                    });
+                if let Some(last_ok) = last_ok {
+                    let schedule = sc.schedule.clone().unwrap_or_else(|| "daily".to_string());
+                    let slack = schedule_slack(&schedule);
+                    if Utc::now() - last_ok > slack + slack {
+                        checks.push(DoctorCheck {
+                            name: format!("source.{name}.staleness"),
+                            status: "warn".to_string(),
+                            detail: format!(
+                                "last successful backup was {} \u{2014} more than twice the {schedule} cadence ago",
+                                iso_z(last_ok)
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        checks
+    }
+
+    /// Readiness of a `requires_vpn` source's VPN routing. Mirrors the
+    /// reference's `_vpn_doctor_check` (see [`vpn_guard_skip`] for the
+    /// enforcement side of the same check).
+    fn vpn_doctor_check(&self, name: &str) -> DoctorCheck {
+        let ns = &self.config.vpn_netns;
+        let check_name = format!("source.{name}.vpn");
+        if self.config.vpn_guard == VpnGuard::Off {
+            return DoctorCheck {
+                name: check_name,
+                status: "ok".to_string(),
+                detail: "requires_vpn set but vpn_guard=off (not enforced)".to_string(),
+            };
+        }
+        if in_named_netns(ns) {
+            return DoctorCheck {
+                name: check_name,
+                status: "ok".to_string(),
+                detail: format!("running inside the {ns:?} netns"),
+            };
+        }
+        if named_netns_exists(ns) {
+            return DoctorCheck {
+                name: check_name,
+                status: "ok".to_string(),
+                detail: format!(
+                    "requires VPN; the {ns:?} netns is up \u{2014} run via `{} dbs backup {name}` (a direct run here is skipped)",
+                    self.config.vpn_exec
+                ),
+            };
+        }
+        DoctorCheck {
+            name: check_name,
+            status: "warn".to_string(),
+            detail: format!(
+                "requires VPN but the {ns:?} netns is not up \u{2014} start it (e.g. `sudo systemctl start vpn-netns`), then run via `{}`",
+                self.config.vpn_exec
+            ),
+        }
     }
 
     /// Replays an export (archive zip or raw-bearing ndjson) into the
@@ -3533,6 +3726,282 @@ mod tests {
             .add_source("a", "raindrop", &HashMap::new(), false, 0, false)
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn doctor_reports_database_integrity_ok_on_a_healthy_db() {
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let integrity = checks
+            .iter()
+            .find(|c| c.name == "database.integrity")
+            .unwrap();
+        assert_eq!(integrity.status, "ok");
+    }
+
+    #[test]
+    fn doctor_reports_a_failed_integrity_check() {
+        let mut storage = FakeStorage {
+            integrity: "database disk image is malformed".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let integrity = checks
+            .iter()
+            .find(|c| c.name == "database.integrity")
+            .unwrap();
+        assert_eq!(integrity.status, "fail");
+        assert!(integrity.detail.contains("malformed"));
+    }
+
+    #[test]
+    fn doctor_reports_interrupted_runs_as_a_warning() {
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let source = storage
+            .upsert_source("a", "raindrop", "test:raindrop", "{}", 1)
+            .unwrap();
+        let run_id = storage
+            .begin_run(source.id, "test", "incremental", None)
+            .unwrap();
+        storage
+            .finish_run(
+                run_id,
+                "interrupted",
+                &BatchResult::default(),
+                0,
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let interrupted = checks
+            .iter()
+            .find(|c| c.name == "runs.interrupted")
+            .unwrap();
+        assert_eq!(interrupted.status, "warn");
+        assert!(interrupted.detail.contains("1 interrupted"));
+    }
+
+    #[test]
+    fn doctor_marks_a_disabled_source_ok_without_touching_the_registry() {
+        let mut sc = test_source_config("a", "raindrop");
+        sc.enabled = false;
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), sc);
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let source_check = checks.iter().find(|c| c.name == "source.a").unwrap();
+        assert_eq!(source_check.status, "ok");
+        assert_eq!(source_check.detail, "disabled");
+    }
+
+    #[test]
+    fn doctor_marks_an_unregistered_source_type_as_a_failure() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let source_check = checks.iter().find(|c| c.name == "source.a").unwrap();
+        assert_eq!(source_check.status, "fail");
+        assert!(source_check.detail.contains("unavailable"));
+    }
+
+    fn fake_connector_requiring_auth(secret_keys: &[&str]) -> RegisteredConnector {
+        let mut rc = fake_connector("raindrop", true, true);
+        rc.handshake.capabilities.requires_auth = true;
+        rc.handshake.secret_keys = secret_keys.iter().map(|s| s.to_string()).collect();
+        rc
+    }
+
+    #[test]
+    fn doctor_secrets_check_fails_when_none_of_the_declared_secrets_are_set() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(sources);
+        let registry =
+            ConnectorRegistry::from_resolved([fake_connector_requiring_auth(&["RAINDROP_TOKEN"])]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let secrets_check = checks
+            .iter()
+            .find(|c| c.name == "source.a.secrets")
+            .unwrap();
+        assert_eq!(secrets_check.status, "fail");
+        assert!(secrets_check.detail.contains("RAINDROP_TOKEN"));
+    }
+
+    #[test]
+    fn doctor_secrets_check_passes_when_a_declared_secret_is_set() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(sources);
+        let registry =
+            ConnectorRegistry::from_resolved([fake_connector_requiring_auth(&["RAINDROP_TOKEN"])]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let mut secret_store = HashMap::new();
+        secret_store.insert("RAINDROP_TOKEN".to_string(), "secret-value".to_string());
+
+        let checks = service.doctor(Some(&secret_store));
+        let secrets_check = checks
+            .iter()
+            .find(|c| c.name == "source.a.secrets")
+            .unwrap();
+        assert_eq!(secrets_check.status, "ok");
+        assert!(secrets_check.detail.contains("RAINDROP_TOKEN"));
+    }
+
+    #[test]
+    fn doctor_vpn_check_is_ok_when_the_guard_is_off_even_without_a_netns() {
+        let mut sc = test_source_config("a", "raindrop");
+        sc.requires_vpn = true;
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), sc);
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let mut config = test_config(sources);
+        config.vpn_guard = crate::config::VpnGuard::Off;
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let vpn_check = checks.iter().find(|c| c.name == "source.a.vpn").unwrap();
+        assert_eq!(vpn_check.status, "ok");
+        assert!(vpn_check.detail.contains("vpn_guard=off"));
+    }
+
+    #[test]
+    fn doctor_vpn_check_warns_when_the_netns_is_not_up() {
+        let mut sc = test_source_config("a", "raindrop");
+        sc.requires_vpn = true;
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), sc);
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let mut config = test_config(sources);
+        // Default VpnGuard::Skip plus a netns name that certainly
+        // doesn't exist on the test runner.
+        config.vpn_netns = "rusty-dbs-test-netns-that-does-not-exist".to_string();
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let vpn_check = checks.iter().find(|c| c.name == "source.a.vpn").unwrap();
+        assert_eq!(vpn_check.status, "warn");
+        assert!(vpn_check.detail.contains("not up"));
+    }
+
+    #[test]
+    fn doctor_staleness_warns_when_the_last_success_is_far_past_the_schedule_slack() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        // FakeStorage timestamps every run at a fixed 2026-01-01 —
+        // always more than twice the daily slack behind "now" (this
+        // session's date context is 2026-08-13), so a committed
+        // success run here is deterministically stale.
+        let source = storage
+            .upsert_source("a", "raindrop", "test:raindrop", "{}", 1)
+            .unwrap();
+        let run_id = storage
+            .begin_run(source.id, "test", "incremental", None)
+            .unwrap();
+        storage
+            .finish_run(
+                run_id,
+                "success",
+                &BatchResult::default(),
+                0,
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        let staleness = checks
+            .iter()
+            .find(|c| c.name == "source.a.staleness")
+            .unwrap();
+        assert_eq!(staleness.status, "warn");
+    }
+
+    #[test]
+    fn doctor_no_staleness_check_for_a_source_that_has_never_run() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage {
+            integrity: "ok".to_string(),
+            ..Default::default()
+        };
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let checks = service.doctor(None);
+        assert!(!checks.iter().any(|c| c.name == "source.a.staleness"));
     }
 
     #[test]

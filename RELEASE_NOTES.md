@@ -8,6 +8,39 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs doctor (closes #72)
+**2026-08-13**
+
+- **Implemented:** `dbs doctor` — read-only environment/health
+  diagnostics — wired to a new `BackupService::doctor` method.
+- **Architecture note:** two of the reference's check categories have
+  no equivalent here and are intentionally omitted (not silently
+  dropped — documented on `doctor`'s doc-comment): per-source
+  `config`/`deps` checks assume an in-process connector class with a
+  Pydantic model and importable Python dependencies, but this port's
+  connectors are external subprocesses whose only interface is the
+  spawn/handshake protocol (ADR-0001 step 1) — same gap `check_sources`
+  (#71) already has. `deps.yt-dlp` checks a Python package this Rust
+  binary doesn't depend on at all.
+- Checks implemented: `database.integrity` (`Storage::integrity_check`),
+  `database.wal` (warns past 10MB, unfolded into the main file),
+  `runs.interrupted` (recent-history scan), and per enabled source:
+  connector resolvability, VPN-netns readiness (reusing the same
+  `named_netns_exists`/`in_named_netns` logic the backup-time VPN
+  guard uses), declared-secret presence (checked against a
+  `.env`/environment map, the same convention `dbs export --encrypt`
+  already reads passphrases from), and staleness (no successful run
+  within 2x the schedule cadence — reusing `schedule_slack`).
+- `dbs doctor [--json]`: `  [status] name: detail` per line (or the
+  raw `DoctorCheck` list as JSON); exits `1` if any check is `fail`.
+- 11 new `dbs-core` unit tests (using `ConnectorRegistry::from_resolved`
+  for the checks that need a real registry entry — secrets ok/fail,
+  VPN guard-off vs. netns-not-up, staleness warn vs. never-run) plus 5
+  new `dbs-cli` integration tests covering what the CLI's always-empty
+  registry can honestly produce: healthy-database-only state, the
+  connector-unavailable failure and its exit code, a disabled source
+  reporting ok, and `--json` in both the healthy and failing cases.
+
 ## dbs sources / dbs connectors (closes #71)
 **2026-08-13**
 
