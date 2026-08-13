@@ -579,6 +579,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-connector-skool"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbs-core",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "dbs-connector-spotify"
 version = "0.1.0"
 dependencies = [

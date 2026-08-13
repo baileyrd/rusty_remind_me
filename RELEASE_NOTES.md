@@ -8,6 +8,62 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `skool` connector (closes #97)
+**2026-08-13**
+
+- **New `dbs-connector-skool` crate** — scaffolds the connector for
+  your Skool communities/courses/lessons, with the same **honestly
+  blocked** acquisition posture as `reddit` (#96): Skool has no public
+  API, but every classroom page embeds a `__NEXT_DATA__` JSON blob;
+  reading it (and visiting each lesson's own page to sniff its Mux
+  video/resources) needs a live, logged-in Chromium page, which this
+  port has no Playwright launch helper for yet (issue #99, same gap
+  `dbs-connector-reddit` documents). `fetch()` validates everything it
+  honestly can — `video_cookies_file_env` is declared correctly, the
+  `SKOOL_SESSION_DIR` secret is set, the session directory exists, a
+  downloads folder resolves — then returns a clear `Config` error
+  naming #99.
+- **Every genuinely pure function is ported and tested**, ready for
+  #99's future acquisition step to call into: extracting a
+  community's display name, BFS-searching a `__NEXT_DATA__` tree for
+  a key or a specific lesson node, decoding a lesson's JSON-encoded
+  `metadata` fields (video/resources/desc, including marking a
+  link-only resource as external), matching a configured
+  `communities`/`courses` selector (with `"community/course"`
+  scoping), reconstructing a Mux HLS URL, matching a URL's host
+  against an allow-list, classifying a permanent-vs-transient video
+  error, parsing memberships/courses/lessons out of a `__NEXT_DATA__`
+  blob (module vs. bare-lesson tree shape), and the
+  community/course/lesson → `BackupItem` mapping (a downloaded video
+  path winning over the watch link, an unavailable video's link
+  suppressed entirely).
+- **TipTap rich-text → Markdown rendering is deliberately deferred to
+  issue #100** (its own listed unit of work) — a lesson's `body` here
+  is the raw `desc` string, unrendered.
+- **Deliberately not ported**, for the same reason as acquisition
+  itself: resource-file downloads, the `yt-dlp`-driven video download
+  once a URL is found, the `.meta.json` sidecar/resume pipeline,
+  directory-naming and note-writing, and GitHub-zip archiving —
+  pipeline mechanics with zero reachable callers until #99 exists.
+- **Not wired up:** same boundary as `raindrop` (#85) through `reddit`
+  (#96) for the registry run/stream bridge — and, separately, blocked
+  on issue #99 for acquisition specifically.
+- 25 new `dbs-connector-skool` tests: the four `fetch()` validation
+  stages in order plus the final #99-blocked error, `group_name`'s
+  fallback chain, `deep_find`'s BFS-first-match semantics, `json_field`
+  parsing embedded JSON strings, `lesson_fields` extracting a video
+  link and marking a link-only resource external, `find_lesson_node`
+  matching by id under course props, `course_selected`'s scoped and
+  unscoped selector matching, `mux_hls_url`'s exact-id-match
+  reconstruction, `url_host_matches`'s subdomain handling and
+  lookalike rejection, `classify_video_error`'s permanent-vs-transient
+  split (never matching a bot-check message), `parse_memberships`
+  deduping by slug, `parse_courses`'s tri-state `hasAccess` mapping,
+  `parse_lessons` splitting modules from bare lessons,
+  `slug_from_community`'s URL/bare-slug handling, all three item
+  mappers, `to_item`'s dispatch, and connector metadata matching the
+  reference.
+
 ## `reddit` connector (closes #96)
 **2026-08-13**
 
