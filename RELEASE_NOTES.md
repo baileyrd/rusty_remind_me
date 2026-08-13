@@ -8,6 +8,38 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `bluesky` connector (closes #90)
+**2026-08-13**
+
+- **New `dbs-connector-bluesky` crate** — backs up liked posts via the
+  AT Protocol, app-password auth (`BLUESKY_APP_PASSWORD`, Settings →
+  App Passwords — never the account password). Mirrors
+  `dbs.connectors.bluesky`: likes are records in your own repo
+  (collection `app.bsky.feed.like`), enumerable via
+  `com.atproto.repo.listRecords` with plain cursor pagination — no
+  scraping. Each run exchanges the app password for a session token
+  via `com.atproto.server.createSession`; the resolved DID from that
+  session (not the configured handle) is what gets enumerated, so a
+  handle change never breaks the source. Records are tiny with no
+  usable delta filter, so every run is a full enumeration
+  (`supports_incremental=false`) followed by one `ReconcileMarker`.
+  Identity is the record's `at://` URI (immutable); like records never
+  mutate, so no `volatile_fields`. The subject post's web URL is
+  derived (`https://bsky.app/profile/<did>/post/<rkey>`) from the
+  record's `at://` subject reference.
+- **Not wired up:** same boundary as `raindrop` (#85), `github` (#86),
+  `pinboard` (#87), `readwise` (#88), and `mastodon` (#89) — this
+  struct isn't reachable from a real `dbs backup` run yet; the plugin
+  registry's run/stream bridge doesn't exist.
+- 12 new `dbs-connector-bluesky` tests against a `mockito` fixture
+  server plus direct unit tests of `derive_bsky_url`: missing-managed-
+  http/missing-password errors, a rejected session classified as an
+  auth error, a full fetch yielding a like and a reconcile marker,
+  cursor pagination across pages, a record with no uri being skipped,
+  a non-post subject producing no derived url, both HTTP status
+  classifications (401/403 vs. other) on `listRecords`, and connector
+  metadata matching the reference.
+
 ## `mastodon` connector (closes #89)
 **2026-08-13**
 

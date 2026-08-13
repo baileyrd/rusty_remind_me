@@ -479,6 +479,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-connector-bluesky"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbs-core",
+ "mockito",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "dbs-connector-github"
 version = "0.1.0"
 dependencies = [
