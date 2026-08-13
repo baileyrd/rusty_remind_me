@@ -48,6 +48,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
+use crate::cancel::CancelToken;
 use crate::capabilities::Capabilities;
 use crate::config::{Config, SourceConfig, VpnGuard};
 use crate::crypto::{decrypt_file, is_encrypted, resolve_passphrase, DEFAULT_PASSPHRASE_ENV};
@@ -55,7 +56,8 @@ use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError
 use crate::export::{get_exporter, ExportResult, ExportSource};
 use crate::export_profile::{resolve_export_profile, ExportProfile};
 use crate::models::{
-    Cursor, RestoreReport, RunResult, RunStatus, SourceStatus, VerifyIssue, VerifyReport,
+    Cursor, ProgressEvent, ProgressPhase, RestoreReport, RunResult, RunStatus, SourceStatus,
+    VerifyIssue, VerifyReport,
 };
 use crate::netns::in_named_netns;
 use crate::registry::{ConnectorRegistry, RegisteredConnector};
@@ -261,10 +263,69 @@ impl ConnectorRunner for UnimplementedRunner {
     }
 }
 
+/// Receiver for [`ProgressEvent`]s emitted during a backup run — the
+/// seam a CLI live-progress line (or a future web tier) renders over.
+/// Mirrors the reference's `ProgressCallback = Callable[[ProgressEvent],
+/// None]`; a trait (rather than a bare `Fn` alias) so a stateful
+/// renderer can implement it directly instead of closing over interior
+/// mutability. `Sync` so one sink can be shared read-only across
+/// `backup --all --parallel N` worker threads.
+///
+/// **Scope note (issue #67):** `BackupService::backup_source` currently
+/// hands off to [`ConnectorRunner`] as a single blocking call — there's
+/// no run/stream protocol yet (ADR-0001 steps 2-3) to report
+/// per-item progress from. Only [`ProgressPhase::SourceStart`] and
+/// [`ProgressPhase::SourceDone`] are emitted today; `Item`/
+/// `Checkpoint`/`Sweep` stay reserved on the enum for that follow-up
+/// issue to start emitting through this same seam without an API
+/// break.
+pub trait ProgressSink: Sync {
+    fn emit(&self, event: &ProgressEvent);
+}
+
+impl<F: Fn(&ProgressEvent) + Sync> ProgressSink for F {
+    fn emit(&self, event: &ProgressEvent) {
+        self(event)
+    }
+}
+
+/// Wraps an inner [`ProgressSink`] to fill in `source_index`/
+/// `source_total` for `dbs backup --all` — mirrors the reference's
+/// `_frame_progress`.
+struct FramedProgress<'a> {
+    inner: &'a dyn ProgressSink,
+    index: u32,
+    total: u32,
+}
+
+impl ProgressSink for FramedProgress<'_> {
+    fn emit(&self, event: &ProgressEvent) {
+        let mut framed = event.clone();
+        framed.source_index = Some(self.index);
+        framed.source_total = Some(self.total);
+        self.inner.emit(&framed);
+    }
+}
+
+/// Wraps an inner [`ProgressSink`] with a lock so events from several
+/// `--parallel` worker threads never interleave — mirrors the
+/// reference's `threading.Lock`-guarded `safe_progress`.
+struct LockedProgress<'a> {
+    inner: &'a dyn ProgressSink,
+    lock: &'a Mutex<()>,
+}
+
+impl ProgressSink for LockedProgress<'_> {
+    fn emit(&self, event: &ProgressEvent) {
+        let _guard = self.lock.lock().unwrap();
+        self.inner.emit(event);
+    }
+}
+
 /// Options for [`BackupService::backup_source`]. `mode` is one of
 /// `"auto"` (default), `"incremental"`, `"reconcile"`, or `"full"`.
-#[derive(Debug, Clone)]
-pub struct BackupSourceOptions {
+#[derive(Clone)]
+pub struct BackupSourceOptions<'a> {
     pub mode: String,
     pub force_full: bool,
     pub force_reconcile: bool,
@@ -273,9 +334,13 @@ pub struct BackupSourceOptions {
     /// Whether this call should itself reap interrupted runs — `false`
     /// when called from `backup_all`, which reaps once up front instead.
     pub reap: bool,
+    /// Receives [`ProgressPhase::SourceStart`]/[`ProgressPhase::SourceDone`]
+    /// for this source's run — see [`ProgressSink`] for what's emitted
+    /// today and why.
+    pub on_progress: Option<&'a dyn ProgressSink>,
 }
 
-impl Default for BackupSourceOptions {
+impl<'a> Default for BackupSourceOptions<'a> {
     fn default() -> Self {
         Self {
             mode: "auto".to_string(),
@@ -284,6 +349,7 @@ impl Default for BackupSourceOptions {
             dry_run: false,
             limit: None,
             reap: true,
+            on_progress: None,
         }
     }
 }
@@ -292,8 +358,8 @@ impl Default for BackupSourceOptions {
 /// (the reference preserves TOML declaration order via a Python dict;
 /// this crate's `Config::sources` is a `HashMap`, so sorted-by-name is
 /// the deterministic substitute).
-#[derive(Debug, Clone)]
-pub struct BackupAllOptions {
+#[derive(Clone)]
+pub struct BackupAllOptions<'a> {
     /// Skip a source whose `schedule` cadence hasn't elapsed since its
     /// last run (see [`crate::service::BackupService`]'s private
     /// `is_due`/`next_due_at`, ported from the reference's
@@ -310,9 +376,19 @@ pub struct BackupAllOptions {
     /// sequential path — mirrors the reference's `parallel` param on
     /// `backup_all`.
     pub parallel: Option<u32>,
+    /// Receives each source's [`ProgressEvent`]s, framed with
+    /// `source_index`/`source_total` (see [`FramedProgress`]) and,
+    /// on the parallel path, serialized so concurrent workers never
+    /// interleave a delivery (see [`LockedProgress`]).
+    pub on_progress: Option<&'a dyn ProgressSink>,
+    /// Checked between sources: a cancelled token stops the batch
+    /// from starting any source not already in flight (in-flight
+    /// sources still finish and commit) — mirrors the reference's
+    /// `backup_all(cancel=...)`. Ctrl+C in the CLI sets this.
+    pub cancel: Option<CancelToken>,
 }
 
-impl Default for BackupAllOptions {
+impl<'a> Default for BackupAllOptions<'a> {
     fn default() -> Self {
         Self {
             only_due: false,
@@ -322,6 +398,8 @@ impl Default for BackupAllOptions {
             dry_run: false,
             limit: None,
             parallel: None,
+            on_progress: None,
+            cancel: None,
         }
     }
 }
@@ -359,7 +437,7 @@ impl<'a> BackupService<'a> {
     pub fn backup_source(
         &mut self,
         name: &str,
-        opts: &BackupSourceOptions,
+        opts: &BackupSourceOptions<'_>,
     ) -> Result<RunResult, DbsError> {
         if opts.reap {
             self.storage.reap_interrupted_runs()?;
@@ -439,6 +517,23 @@ impl<'a> BackupService<'a> {
             )));
         }
 
+        if let Some(sink) = opts.on_progress {
+            sink.emit(&ProgressEvent {
+                phase: ProgressPhase::SourceStart,
+                source: name.to_string(),
+                mode: chosen_mode.clone(),
+                fetched: 0,
+                created: 0,
+                updated: 0,
+                unchanged: 0,
+                deleted: 0,
+                source_index: None,
+                source_total: None,
+                result: None,
+                note: String::new(),
+            });
+        }
+
         let since = watermark
             .map(|w| w - ChronoDuration::seconds(self.config.default_overlap_seconds as i64));
         let outcome =
@@ -473,7 +568,7 @@ impl<'a> BackupService<'a> {
             &outcome.warnings,
         )?;
 
-        Ok(RunResult {
+        let result = RunResult {
             source: name.to_string(),
             status: outcome.status,
             started_at: now,
@@ -490,7 +585,26 @@ impl<'a> BackupService<'a> {
             items_failed: 0,
             error: outcome.error,
             warnings: outcome.warnings,
-        })
+        };
+
+        if let Some(sink) = opts.on_progress {
+            sink.emit(&ProgressEvent {
+                phase: ProgressPhase::SourceDone,
+                source: result.source.clone(),
+                mode: result.mode.clone(),
+                fetched: result.fetched,
+                created: result.created,
+                updated: result.updated,
+                unchanged: result.unchanged,
+                deleted: result.deleted,
+                source_index: None,
+                source_total: None,
+                result: Some(result.clone()),
+                note: String::new(),
+            });
+        }
+
+        Ok(result)
     }
 
     /// Mirrors the reference's `_is_due`: `true` if `name`'s `schedule`
@@ -521,7 +635,14 @@ impl<'a> BackupService<'a> {
     /// (see [`Self::backup_all_parallel`]). Reaps once, up front, while no
     /// run of ours is live yet — a per-source reap mid-batch would flip a
     /// sibling's genuinely-running row.
-    pub fn backup_all(&mut self, opts: &BackupAllOptions) -> Result<Vec<RunResult>, DbsError> {
+    ///
+    /// `opts.cancel`, if set, is checked before each source starts (the
+    /// sequential path) or before each dequeue (the parallel path): a
+    /// source already in flight always finishes and commits, but no new
+    /// one starts once cancelled — the CLI's Ctrl+C handling (#67) sets
+    /// this. `opts.on_progress` receives `SourceStart`/`SourceDone` for
+    /// each source, framed with `source_index`/`source_total`.
+    pub fn backup_all(&mut self, opts: &BackupAllOptions<'_>) -> Result<Vec<RunResult>, DbsError> {
         self.storage.reap_interrupted_runs()?;
 
         let mut names: Vec<String> = self
@@ -551,6 +672,7 @@ impl<'a> BackupService<'a> {
             dry_run: opts.dry_run,
             limit: opts.limit,
             reap: false,
+            on_progress: None,
         };
 
         let requested_workers = opts.parallel.unwrap_or(self.config.parallel).max(1);
@@ -559,18 +681,34 @@ impl<'a> BackupService<'a> {
         // sequential path (which threads dry_run through to backup_source).
         if requested_workers > 1 && names.len() > 1 && !opts.dry_run {
             let workers = (requested_workers as usize).min(names.len());
-            if let Some(outcome) =
-                self.backup_all_parallel(&names, workers, &per_source, opts.continue_on_error)
-            {
+            if let Some(outcome) = self.backup_all_parallel(
+                &names,
+                workers,
+                &per_source,
+                opts.continue_on_error,
+                opts.on_progress,
+                opts.cancel.clone(),
+            ) {
                 return outcome;
             }
             // Storage can't provide worker connections (e.g. an in-memory
             // database) — fall through to the sequential path below.
         }
 
+        let total = names.len() as u32;
         let mut results = Vec::with_capacity(names.len());
-        for name in &names {
-            match self.backup_source(name, &per_source) {
+        for (i, name) in names.iter().enumerate() {
+            if opts.cancel.as_ref().is_some_and(CancelToken::cancelled) {
+                break;
+            }
+            let framed = opts.on_progress.map(|sink| FramedProgress {
+                inner: sink,
+                index: i as u32 + 1,
+                total,
+            });
+            let mut source_opts = per_source.clone();
+            source_opts.on_progress = framed.as_ref().map(|f| f as &dyn ProgressSink);
+            match self.backup_source(name, &source_opts) {
                 Ok(r) => results.push(r),
                 Err(e) => {
                     if !opts.continue_on_error {
@@ -607,13 +745,20 @@ impl<'a> BackupService<'a> {
     /// sequential path: `continue_on_error` turns them into a `Failed`
     /// [`RunResult`] instead of aborting the batch; when it's `false`,
     /// the first error stops new work from being dequeued (sources
-    /// already in flight still finish) and is returned as `Err`.
+    /// already in flight still finish) and is returned as `Err`. A
+    /// cancelled `cancel` token has the same "stop dequeuing, let
+    /// in-flight work finish" effect. `on_progress`, if set, is framed
+    /// per source (`source_index`/`source_total`) and lock-serialized
+    /// so concurrent workers' deliveries never interleave.
+    #[allow(clippy::too_many_arguments)]
     fn backup_all_parallel(
         &self,
         names: &[String],
         workers: usize,
-        per_source: &BackupSourceOptions,
+        per_source: &BackupSourceOptions<'_>,
         continue_on_error: bool,
+        on_progress: Option<&dyn ProgressSink>,
+        cancel: Option<CancelToken>,
     ) -> Option<Result<Vec<RunResult>, DbsError>> {
         let mut worker_storages: Vec<Box<dyn Storage>> = Vec::with_capacity(workers);
         for _ in 0..workers {
@@ -623,11 +768,13 @@ impl<'a> BackupService<'a> {
         let config = self.config;
         let registry = self.registry;
         let runner = self.runner;
+        let total = names.len() as u32;
         let queue: Mutex<VecDeque<(usize, String)>> =
             Mutex::new(names.iter().cloned().enumerate().collect());
         let results: Mutex<Vec<Option<RunResult>>> = Mutex::new(vec![None; names.len()]);
         let first_error: Mutex<Option<DbsError>> = Mutex::new(None);
         let stop = AtomicBool::new(false);
+        let progress_lock: Mutex<()> = Mutex::new(());
 
         std::thread::scope(|scope| {
             for mut storage in worker_storages {
@@ -635,9 +782,13 @@ impl<'a> BackupService<'a> {
                 let results = &results;
                 let first_error = &first_error;
                 let stop = &stop;
+                let progress_lock = &progress_lock;
+                let cancel = cancel.clone();
                 scope.spawn(move || {
                     loop {
-                        if stop.load(Ordering::Relaxed) {
+                        if stop.load(Ordering::Relaxed)
+                            || cancel.as_ref().is_some_and(CancelToken::cancelled)
+                        {
                             break;
                         }
                         let next = queue.lock().unwrap().pop_front();
@@ -645,9 +796,21 @@ impl<'a> BackupService<'a> {
                             Some(v) => v,
                             None => break,
                         };
+                        let locked = on_progress.map(|sink| LockedProgress {
+                            inner: sink,
+                            lock: progress_lock,
+                        });
+                        let framed = locked.as_ref().map(|l| FramedProgress {
+                            inner: l as &dyn ProgressSink,
+                            index: idx as u32 + 1,
+                            total,
+                        });
+                        let mut source_opts = per_source.clone();
+                        source_opts.on_progress = framed.as_ref().map(|f| f as &dyn ProgressSink);
+
                         let mut svc =
                             BackupService::new(storage.as_mut(), config, registry, runner);
-                        match svc.backup_source(&name, per_source) {
+                        match svc.backup_source(&name, &source_opts) {
                             Ok(r) => results.lock().unwrap()[idx] = Some(r),
                             Err(e) => {
                                 if continue_on_error {
@@ -2015,6 +2178,219 @@ mod tests {
         assert_eq!(result.status, RunStatus::Skipped);
         assert_eq!(result.error.as_deref(), Some("dry-run"));
         assert_eq!(result.mode, "full"); // first-ever run, full enumeration supported
+    }
+
+    #[derive(Default)]
+    struct CollectingSink {
+        events: Mutex<Vec<ProgressEvent>>,
+    }
+
+    impl CollectingSink {
+        fn events(&self) -> Vec<ProgressEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl ProgressSink for CollectingSink {
+        fn emit(&self, event: &ProgressEvent) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+    }
+
+    /// Forwards to `inner`, then cancels `cancel` the moment a
+    /// `SourceDone` event is seen — how the cancellation tests below
+    /// simulate Ctrl+C landing right after one source finishes.
+    struct CancelAfterSourceDone<'a> {
+        inner: &'a CollectingSink,
+        cancel: CancelToken,
+    }
+
+    impl ProgressSink for CancelAfterSourceDone<'_> {
+        fn emit(&self, event: &ProgressEvent) {
+            self.inner.emit(event);
+            if event.phase == ProgressPhase::SourceDone {
+                self.cancel.cancel();
+            }
+        }
+    }
+
+    #[test]
+    fn backup_source_emits_source_start_then_source_done() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 3);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let sink = CollectingSink::default();
+        let opts = BackupSourceOptions {
+            on_progress: Some(&sink),
+            ..BackupSourceOptions::default()
+        };
+        let result = service.backup_source("a", &opts).unwrap();
+
+        let events = sink.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0].phase, ProgressPhase::SourceStart);
+        assert_eq!(events[0].source, "a");
+        assert!(events[0].result.is_none());
+        assert_eq!(events[1].phase, ProgressPhase::SourceDone);
+        assert_eq!(events[1].fetched, 3);
+        assert_eq!(events[1].result.as_ref().unwrap().status, result.status);
+    }
+
+    #[test]
+    fn backup_source_emits_no_progress_for_a_disabled_source() {
+        // Nothing is actually dispatched for a disabled source (it returns
+        // before the registry lookup), so there's no SourceStart/SourceDone
+        // to report — an honest silence, not a missed event.
+        let mut sources = HashMap::new();
+        let mut disabled = test_source_config("a", "raindrop");
+        disabled.enabled = false;
+        sources.insert("a".to_string(), disabled);
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let sink = CollectingSink::default();
+        let opts = BackupSourceOptions {
+            on_progress: Some(&sink),
+            ..BackupSourceOptions::default()
+        };
+        service.backup_source("a", &opts).unwrap();
+        assert!(sink.events().is_empty());
+    }
+
+    #[test]
+    fn backup_all_frames_progress_events_with_source_index_and_total() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let sink = CollectingSink::default();
+        let opts = BackupAllOptions {
+            on_progress: Some(&sink),
+            ..BackupAllOptions::default()
+        };
+        service.backup_all(&opts).unwrap();
+
+        let starts: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|e| e.phase == ProgressPhase::SourceStart)
+            .collect();
+        assert_eq!(starts.len(), 2, "{starts:?}");
+        // Sources run in name-sorted order: "a" then "b".
+        assert_eq!(starts[0].source, "a");
+        assert_eq!(starts[0].source_index, Some(1));
+        assert_eq!(starts[0].source_total, Some(2));
+        assert_eq!(starts[1].source, "b");
+        assert_eq!(starts[1].source_index, Some(2));
+        assert_eq!(starts[1].source_total, Some(2));
+    }
+
+    #[test]
+    fn backup_all_cancel_token_stops_before_the_next_source() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "raindrop"));
+        sources.insert("c".to_string(), test_source_config("c", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let sink = CollectingSink::default();
+        let cancel = CancelToken::new();
+        let cancelling_sink = CancelAfterSourceDone {
+            inner: &sink,
+            cancel: cancel.clone(),
+        };
+        let opts = BackupAllOptions {
+            on_progress: Some(&cancelling_sink),
+            cancel: Some(cancel),
+            ..BackupAllOptions::default()
+        };
+        // "a" sorts first: it runs and its SourceDone cancels the token
+        // before "b" can start.
+        let results = service.backup_all(&opts).unwrap();
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].source, "a");
+    }
+
+    #[test]
+    fn backup_all_without_cancel_runs_every_source_as_usual() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let results = service.backup_all(&BackupAllOptions::default()).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn backup_all_parallel_cancel_token_stops_dequeuing_new_work() {
+        // A real, file-backed SqliteStorage — the only kind Storage::spawn
+        // can serve workers from — with a single worker so cancellation
+        // timing is deterministic: "a" (name-sorted first) runs, its
+        // SourceDone cancels the token, and no further source starts.
+        // Every started run still reaches finish_run (backup_source's own
+        // invariant), so storage is left consistent, not half-committed.
+        let db_path = parallel_test_db_path("cancel");
+        std::fs::remove_file(&db_path).ok();
+        let mut storage =
+            crate::storage::sqlite_storage::SqliteStorage::open(db_path.to_str().unwrap()).unwrap();
+        storage.migrate().unwrap();
+
+        let mut sources = HashMap::new();
+        for name in ["a", "b", "c", "d"] {
+            sources.insert(name.to_string(), test_source_config(name, "raindrop"));
+        }
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let sink = CollectingSink::default();
+        let cancel = CancelToken::new();
+        let cancelling_sink = CancelAfterSourceDone {
+            inner: &sink,
+            cancel: cancel.clone(),
+        };
+        let opts = BackupAllOptions {
+            parallel: Some(1),
+            on_progress: Some(&cancelling_sink),
+            cancel: Some(cancel),
+            ..BackupAllOptions::default()
+        };
+        let results = service.backup_all(&opts).unwrap();
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].source, "a");
+
+        // Storage consistency: the one run that did start reached a
+        // terminal status, not left dangling as "running".
+        let source = storage.get_source("a").unwrap().unwrap();
+        let recent = storage.recent_runs(Some(source.id), 1).unwrap();
+        let status = recent[0].get("status").and_then(|v| v.as_str()).unwrap();
+        assert_ne!(status, "running");
+
+        storage.close();
+        std::fs::remove_file(&db_path).ok();
     }
 
     #[test]

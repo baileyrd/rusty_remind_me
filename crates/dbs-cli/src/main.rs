@@ -30,16 +30,19 @@
 //! Stub subcommands use `1` (not one of the above) since they represent
 //! no real outcome yet, not any of the reference's actual result codes.
 
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
 use dbs_core::service::{
-    BackupAllOptions, BackupService, BackupSourceOptions, UnimplementedRunner,
+    BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink, UnimplementedRunner,
 };
 use dbs_core::{
-    load_config, write_scaffolding, BackupRunError, ConnectorRegistry, DbsError, RunResult,
-    RunStatus, SqliteStorage, Storage,
+    load_config, write_scaffolding, BackupRunError, CancelToken, ConnectorRegistry, DbsError,
+    ProgressEvent, ProgressPhase, RunResult, RunStatus, SqliteStorage, Storage,
 };
 
 const STUB_EXIT_CODE: i32 = 1;
@@ -101,6 +104,12 @@ enum Command {
         /// Stop after N items (smoke tests / first-run bound).
         #[arg(long)]
         limit: Option<u32>,
+        /// Show a live progress line on stderr (default: auto — on for a TTY).
+        #[arg(long, conflicts_with = "no_progress")]
+        progress: bool,
+        /// Never show the live progress line.
+        #[arg(long)]
+        no_progress: bool,
     },
     /// Show each configured source's last-run summary.
     Status,
@@ -193,6 +202,8 @@ fn main() {
             reconcile,
             dry_run,
             limit,
+            progress,
+            no_progress,
         } => cmd_backup(
             &cli.config,
             source,
@@ -203,6 +214,8 @@ fn main() {
             reconcile,
             dry_run,
             limit,
+            progress,
+            no_progress,
         ),
         other => cmd_stub(command_name(&other)),
     };
@@ -289,9 +302,100 @@ fn report_config_error(e: &DbsError) -> i32 {
     CONFIG_ERROR_EXIT_CODE
 }
 
-/// Mirrors the reference's `backup` command's single-source path
-/// (issue #64's own scope — `--all` is a later follow-up issue's job,
-/// #65/#66/#67, so it stubs out here rather than half-working).
+/// A transient live status line for `dbs backup`, written to *stderr* so
+/// it never pollutes the results table on stdout. Mirrors the
+/// reference's `_ProgressRenderer` — minus its spinner and item-count
+/// throttling, since [`ProgressSink`]'s doc-comment explains why only
+/// `SourceStart`/`SourceDone` are emitted today: with nothing between
+/// them to animate against, a static line is more honest than a fake
+/// spinner over a value that never changes.
+struct ProgressRenderer {
+    enabled: bool,
+    dirty: AtomicBool,
+}
+
+impl ProgressRenderer {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            dirty: AtomicBool::new(false),
+        }
+    }
+
+    fn draw(&self, ev: &ProgressEvent) {
+        let pos = match (ev.source_index, ev.source_total) {
+            (Some(i), Some(n)) => format!("[{i}/{n}] "),
+            _ => String::new(),
+        };
+        eprint!("\r\x1b[K{pos}{} [{}] running\u{2026}", ev.source, ev.mode);
+        let _ = std::io::stderr().flush();
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Wipes the line, if one is currently drawn. Safe to call more
+    /// than once, and from the Ctrl+C handler thread.
+    fn close(&self) {
+        if self.dirty.swap(false, Ordering::Relaxed) {
+            eprint!("\r\x1b[K");
+            let _ = std::io::stderr().flush();
+        }
+    }
+}
+
+impl ProgressSink for ProgressRenderer {
+    fn emit(&self, ev: &ProgressEvent) {
+        if !self.enabled {
+            return;
+        }
+        match ev.phase {
+            ProgressPhase::SourceStart => self.draw(ev),
+            ProgressPhase::SourceDone => self.close(),
+            ProgressPhase::Item | ProgressPhase::Checkpoint | ProgressPhase::Sweep => {}
+        }
+    }
+}
+
+/// Routes Ctrl+C (SIGINT) into a graceful early stop, mirroring the
+/// reference's `_install_stop_handler`. The first Ctrl+C cancels
+/// `renderer`'s line and sets the returned [`CancelToken`] — for
+/// `--all`, `BackupService::backup_all` stops starting new sources but
+/// lets an in-flight one finish and commit; a second Ctrl+C aborts the
+/// whole process immediately via `exit(130)` (matching the reference's
+/// documented `KeyboardInterrupt`-on-second-signal behavior), since a
+/// single in-flight connector call can't be interrupted mid-fetch
+/// without the run/stream protocol (ADR-0001 steps 2-3, not yet
+/// implemented — same gap [`ProgressSink`] documents).
+fn install_stop_handler(renderer: Arc<ProgressRenderer>, all_sources: bool) -> CancelToken {
+    let cancel = CancelToken::new();
+    let handler_cancel = cancel.clone();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let result = ctrlc::set_handler(move || {
+        if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+            handler_cancel.cancel();
+            renderer.close();
+            let msg = if all_sources {
+                "\nStopping \u{2014} the current source will finish, then no more \
+                 start (Ctrl+C again to abort now)."
+            } else {
+                "\nStopping the current backup (Ctrl+C again to abort now)."
+            };
+            eprintln!("{msg}");
+        } else {
+            renderer.close();
+            eprintln!("\nAborted.");
+            std::process::exit(130);
+        }
+    });
+    if result.is_err() {
+        eprintln!("warning: could not install a Ctrl+C handler");
+    }
+    cancel
+}
+
+/// Mirrors the reference's `backup` command. `--parallel`/`--only-due`
+/// (#65/#66) and the progress line + Ctrl+C handling (#67) are wired;
+/// see [`ProgressSink`]'s doc-comment for the one honest gap that
+/// remains (per-item progress needs the run/stream protocol).
 ///
 /// No connector-candidate discovery mechanism exists yet (scanning
 /// for installed connector subprocesses on disk — an implicit
@@ -312,6 +416,8 @@ fn cmd_backup(
     reconcile: bool,
     dry_run: bool,
     limit: Option<u32>,
+    progress: bool,
+    no_progress: bool,
 ) -> i32 {
     if !all_sources && source.is_none() {
         eprintln!("Specify a SOURCE name or --all.");
@@ -334,6 +440,16 @@ fn cmd_backup(
     let runner = UnimplementedRunner;
     let mut service = BackupService::new(&mut storage, &cfg, &registry, &runner);
 
+    let show_progress = if no_progress {
+        false
+    } else if progress {
+        true
+    } else {
+        std::io::stderr().is_terminal()
+    };
+    let renderer = Arc::new(ProgressRenderer::new(show_progress));
+    let cancel = install_stop_handler(Arc::clone(&renderer), all_sources);
+
     if all_sources {
         let opts = BackupAllOptions {
             only_due,
@@ -343,16 +459,22 @@ fn cmd_backup(
             dry_run,
             limit,
             parallel,
+            on_progress: Some(renderer.as_ref()),
+            cancel: Some(cancel),
         };
         return match service.backup_all(&opts) {
             Ok(results) => {
+                renderer.close();
                 println!("Backup results:");
                 for result in &results {
                     print_run(result);
                 }
                 exit_code(&results)
             }
-            Err(e) => report_config_error(&e),
+            Err(e) => {
+                renderer.close();
+                report_config_error(&e)
+            }
         };
     }
 
@@ -364,23 +486,30 @@ fn cmd_backup(
         dry_run,
         limit,
         reap: true,
+        on_progress: Some(renderer.as_ref()),
     };
 
     match service.backup_source(&name, &opts) {
         Ok(result) => {
+            renderer.close();
             println!("Backup results:");
             print_run(&result);
             exit_code(std::slice::from_ref(&result))
         }
         Err(DbsError::Run(BackupRunError::SourceLocked(e))) => {
+            renderer.close();
             eprintln!("source already locked: {e}");
             2
         }
         Err(DbsError::Run(BackupRunError::UnknownSource(e))) => {
+            renderer.close();
             eprintln!("unknown source: {e}");
             5
         }
-        Err(e) => report_config_error(&e),
+        Err(e) => {
+            renderer.close();
+            report_config_error(&e)
+        }
     }
 }
 
@@ -395,8 +524,7 @@ fn run_status_str(status: RunStatus) -> &'static str {
 }
 
 /// Mirrors the reference's `_print_run` (colors dropped — no color
-/// dependency added for this issue; a follow-up issue can add one
-/// alongside the progress-line work, #67, if desired).
+/// dependency added; a future issue can add one if desired).
 fn print_run(r: &RunResult) {
     let failed = if r.items_failed > 0 {
         format!(" !{}", r.items_failed)
@@ -449,5 +577,79 @@ fn exit_code(results: &[RunResult]) -> i32 {
         2
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod progress_renderer_tests {
+    //! `ProgressRenderer`'s drawn *text* can't be exercised through the
+    //! compiled binary yet — every source the CLI can construct a
+    //! registry for reports "connector not found" before `backup_source`
+    //! ever reaches its `SourceStart` emission point (no
+    //! connector-candidate discovery exists yet, #85-100), so there's no
+    //! way to make a real `dbs backup` invocation draw a line to check
+    //! against. These tests instead exercise the renderer's dirty-line
+    //! state machine directly against synthetic events — the same
+    //! `emit`/`draw`/`close` logic a real run would drive once a
+    //! connector can succeed.
+
+    use super::*;
+
+    fn event(
+        phase: ProgressPhase,
+        source_index: Option<u32>,
+        source_total: Option<u32>,
+    ) -> ProgressEvent {
+        ProgressEvent {
+            phase,
+            source: "a".to_string(),
+            mode: "incremental".to_string(),
+            fetched: 0,
+            created: 0,
+            updated: 0,
+            unchanged: 0,
+            deleted: 0,
+            source_index,
+            source_total,
+            result: None,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_disabled_renderer_never_becomes_dirty() {
+        let renderer = ProgressRenderer::new(false);
+        renderer.emit(&event(ProgressPhase::SourceStart, None, None));
+        assert!(!renderer.dirty.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn source_start_marks_dirty_and_source_done_clears_it() {
+        let renderer = ProgressRenderer::new(true);
+        renderer.emit(&event(ProgressPhase::SourceStart, Some(1), Some(2)));
+        assert!(renderer.dirty.load(Ordering::Relaxed));
+        renderer.emit(&event(ProgressPhase::SourceDone, None, None));
+        assert!(!renderer.dirty.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn close_is_idempotent_when_nothing_was_drawn() {
+        let renderer = ProgressRenderer::new(true);
+        renderer.close();
+        renderer.close();
+        assert!(!renderer.dirty.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn item_and_checkpoint_and_sweep_are_ignored() {
+        let renderer = ProgressRenderer::new(true);
+        for phase in [
+            ProgressPhase::Item,
+            ProgressPhase::Checkpoint,
+            ProgressPhase::Sweep,
+        ] {
+            renderer.emit(&event(phase, None, None));
+        }
+        assert!(!renderer.dirty.load(Ordering::Relaxed));
     }
 }

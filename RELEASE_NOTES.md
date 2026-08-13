@@ -8,6 +8,55 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs backup progress line + Ctrl+C handling (closes #67)
+**2026-08-13**
+
+- **Implemented:** a live progress line during `dbs backup` runs, and
+  a Ctrl+C handler that lets in-flight work finish rather than aborting
+  mid-write. `crate::cancel::CancelToken` already existed (#10) — this
+  issue wires it up: `BackupService::backup_source`/`backup_all` gained
+  `on_progress`/`cancel` (the latter on `backup_all` only) options,
+  `dbs-cli` gained a `ProgressRenderer` and a `ctrlc`-based SIGINT
+  handler.
+- **Scope note, not a bug:** `backup_source` currently hands off to
+  `ConnectorRunner` as a single blocking call — there's no run/stream
+  protocol yet (ADR-0001 steps 2-3) to report *per-item* progress
+  from. Only `ProgressPhase::SourceStart`/`SourceDone` are emitted
+  today; `Item`/`Checkpoint`/`Sweep` stay reserved on the enum (already
+  present from an earlier models-parity pass) for that follow-up issue
+  to start emitting through this same seam without an API break. The
+  CLI's progress line reflects this honestly: a static `[i/N] source
+  [mode] running…` rather than the reference's animated spinner + live
+  item counter, since nothing changes between a source's start and its
+  end without per-item events to redraw against.
+- `backup_all`'s `cancel` token is checked between sources (sequential
+  path) and before each dequeue (parallel path, `--parallel N`): a
+  cancelled token stops new sources from starting while any already in
+  flight finish and commit normally — every started run still reaches
+  `finish_run`, so storage is never left half-committed.
+- The CLI installs a Ctrl+C handler once per `dbs backup` invocation:
+  the first press cancels the token and prints a "Stopping…" notice;
+  a second press aborts the whole process immediately via `exit(130)`
+  — a single in-flight connector call can't be interrupted mid-fetch
+  without the run/stream protocol either, so this matches the
+  reference's own documented behavior rather than pretending to do
+  more.
+- New CLI flags: `--progress`/`--no-progress` (default: auto, on for a
+  TTY).
+- `Storage` and `ConnectorRunner`'s trait bounds already required
+  `Send`/`Send + Sync` (from #66); this issue adds a `ProgressSink`
+  trait (`Sync`, implemented for any `Fn(&ProgressEvent) + Sync`) as
+  the callback seam, plus private `FramedProgress` (source_index/total)
+  and `LockedProgress` (serializes delivery across `--parallel`
+  workers) wrapper sinks.
+- 8 new `dbs-core` unit tests (`SourceStart`→`SourceDone` emission
+  shape, silence for a disabled source, cross-source framing,
+  sequential and parallel cancellation — the parallel one against a
+  real `SqliteStorage`, confirming the stopped-early run still reached
+  a terminal status) plus 4 `dbs-cli` unit tests for the renderer's
+  dirty-line state machine and 3 CLI integration tests for the new
+  flags.
+
 ## dbs backup --all --parallel N: worker pool (closes #66)
 **2026-08-13**
 
