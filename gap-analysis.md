@@ -35,30 +35,30 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Core data model (`Item`, `MediaRef`, `Checkpoint`, `RunResult`, etc.) | type | spec | both | `src/dbs/core/models.py` | — | no | M | Foundation everything else depends on; do first |
-| Error hierarchy (`ConnectorConfigError`/`ConnectorAuthError`/`TransientFetchError`/`RateLimitedError`/`ConnectorContractError`) | type | spec | both | `src/dbs/core/errors.py` | — | no | S | |
-| Connector contract + `Capabilities` | type | spec | both | `src/dbs/core/connector.py`, `capabilities.py` | — | no | M | The trait/interface every connector implements |
-| Plugin registry / discovery | fn | spec | both | `src/dbs/core/registry.py` | — | no | L | Python uses entry-point discovery; Rust has no equivalent — this is an early **architecture decision** (compiled-in registry vs. dynamic loading), not a straight port. Flag for explicit design discussion before implementing. |
-| Engine — cursor/checkpoint transaction safety | fn | spec | both | `src/dbs/core/engine.py` | rusty_db (unverified) | no | M | Split from engine below — "cursor never gets ahead of data" invariant |
-| Engine — idempotent upsert + content-hash classification | fn | spec | both | `src/dbs/core/engine.py`, `hashing.py` | rusty_db (unverified) | no | M | |
-| Engine — revision history writing | fn | spec | both | `src/dbs/core/engine.py` | — | no | S | |
-| Engine — soft-delete sweep + safety-fraction guard | fn | spec | both | `src/dbs/core/engine.py` | — | no | M | Data-safety critical — the 50%-mass-delete guard |
-| Engine — crash-recovery reaper | fn | spec | both | `src/dbs/core/engine.py` | — | no | S | |
-| Engine — least-privilege secrets scoping | fn | spec | both | `src/dbs/core/secrets.py` | — | no | S | |
-| Managed HTTP client (backoff, `Retry-After`, rate limit) | fn | spec | both | `src/dbs/core/http.py` | rusty_http / rusty_request (unverified) | no | M | |
-| Timeutil helpers | fn | spec | both | `src/dbs/core/timeutil.py` | — | no | S | |
-| `CORE_API_VERSION` gating | fn | spec | both | `src/dbs/core/versioning.py` | — | no | S | |
+| Core data model (`Item`, `MediaRef`, `Checkpoint`, `RunResult`, etc.) | type | spec | both | `src/dbs/core/models.py` | — | no | M | Done (#2) — foundation everything else depends on |
+| Error hierarchy (`ConnectorConfigError`/`ConnectorAuthError`/`TransientFetchError`/`RateLimitedError`/`ConnectorContractError`) | type | spec | both | `src/dbs/core/errors.py` | — | no | S | Done (#3) |
+| Connector contract + `Capabilities` | type | spec | both | `src/dbs/core/connector.py`, `capabilities.py` | — | no | M | Done (#4) — the trait/interface every connector implements |
+| Plugin registry / discovery | fn | spec | both | `src/dbs/core/registry.py` | — | no | L | Done (#5 ADR, #45 implementation) — subprocess + line-delimited JSON-IPC per ADR-0001; #45 covers handshake/contract-validation/version-gating/collision-resolution only (protocol steps 1 and 4) — see the `run_source` row below for steps 2-3 |
+| Engine — cursor/checkpoint transaction safety | fn | spec | both | `src/dbs/core/engine.py` | rusty_db (unverified) | no | M | Done (#16) — "cursor never gets ahead of data" invariant |
+| Engine — idempotent upsert + content-hash classification | fn | spec | both | `src/dbs/core/engine.py`, `hashing.py` | rusty_db (unverified) | no | M | Done (#7, #17) |
+| Engine — revision history writing | fn | spec | both | `src/dbs/core/engine.py` | — | no | S | Done (#19) |
+| Engine — soft-delete sweep + safety-fraction guard | fn | spec | both | `src/dbs/core/engine.py` | — | no | M | Done (#20) — data-safety critical, the 50%-mass-delete guard |
+| Engine — crash-recovery reaper | fn | spec | both | `src/dbs/core/engine.py` | — | no | S | Done (#21) |
+| Engine — least-privilege secrets scoping | fn | spec | both | `src/dbs/core/secrets.py` | — | no | S | Done (#6) |
+| Managed HTTP client (backoff, `Retry-After`, rate limit) | fn | spec | both | `src/dbs/core/http.py` | rusty_http / rusty_request (unverified) | no | M | Done (#22) |
+| Timeutil helpers | fn | spec | both | `src/dbs/core/timeutil.py` | — | no | S | Done (#8) |
+| `CORE_API_VERSION` gating | fn | spec | both | `src/dbs/core/versioning.py` | — | no | S | Done (#9) |
 | Cooperative cancellation (Ctrl+C → finish in-flight, no new starts) | fn | spec | both | `src/dbs/core/cancel.py` | — | no | S | Done (#10, #67) — `CancelToken` primitive landed in #10; `backup_all`/CLI wiring landed in #67 |
-| `netns` helper | fn | spec | linux | `src/dbs/core/netns.py` | — | no | S | Confirm Linux-only scope when picked up — name suggests network-namespace, may not need a Windows counterpart |
+| `netns` helper | fn | spec | linux | `src/dbs/core/netns.py` | — | no | S | Done (#24) — Linux-only, degrades to a safe `false` off-Linux |
 | `BackupService` (UI-agnostic façade: `backup_source`/`backup_all`, connector instantiation via the registry, VPN guard checks, status/history rendering, once-per-call crash-recovery reap threading) | type+fn | spec | both | `src/dbs/core/service.py` | — | no | L | Done (#21 reap-once slice, #46 the rest) |
-| Engine — `run_source` orchestrator / connector run-stream bridge (drives one connector's actual fetch: writes a `RunContext`, reads the `FetchEvent` stream back over ADR-0001's subprocess protocol — steps 2-3, not yet implemented; #45 only did step 1/4 handshake+discovery) | fn | spec | both | `src/dbs/core/engine.py` (`Engine.run_source`) | — | no | M | **Discovered while implementing #46** — `BackupService.backup_source` calls `self.engine.run_source(rc, ctx, ...)` in the reference, and nothing in this port does that job yet. #46 introduced a `ConnectorRunner` trait as the seam (`UnimplementedRunner` is the production stand-in today) specifically so this row didn't have to block #46's own scope. Whoever picks this up implements a real `ConnectorRunner`: write the `RunContext` JSON line, read `FetchEvent` lines back, drive `engine::{prepare, commit_checkpoint, sweep_deletions}` per event, same as the reference's fetch loop. |
+| Engine — `run_source` orchestrator / connector run-stream bridge (drives one connector's actual fetch: writes a `RunContext`, reads the `FetchEvent` stream back over ADR-0001's subprocess protocol — steps 2-3, not yet implemented; #45 only did step 1/4 handshake+discovery) | fn | spec | both | `src/dbs/core/engine.py` (`Engine.run_source`) | — | no | M | **Filed as #157** — `BackupService.backup_source` calls `self.engine.run_source(rc, ctx, ...)` in the reference, and nothing in this port does that job yet. #46 introduced a `ConnectorRunner` trait as the seam (`UnimplementedRunner` is the production stand-in today, wired into every `dbs-cli` command) specifically so this row didn't have to block #46's own scope. This is the one gap every connector row below and the job manager (#80) are waiting on — "not yet reachable from a real `dbs backup` run" all point here |
 
 ## Storage
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `Storage` trait (ABC) | type | spec | both | `src/dbs/storage/base.py` | rusty_db (unverified) | no | S | |
-| SQLite storage — schema + migrations | fn | spec | both | `src/dbs/storage/{sqlite,migrations}.py` | rusty_db (unverified) | no | M | New dependency: a SQLite crate (`rusqlite` or similar) — flagged below |
+| `Storage` trait (ABC) | type | spec | both | `src/dbs/storage/base.py` | rusty_db (unverified) | no | S | Done (#11) |
+| SQLite storage — schema + migrations | fn | spec | both | `src/dbs/storage/{sqlite,migrations}.py` | rusty_db (unverified) | no | M | Done (#12) — `rusqlite` dependency added |
 | SQLite storage — upsert/classify/revisions | fn | spec | both | `src/dbs/storage/sqlite.py` | rusty_db (unverified) | no | M | Done (#36) |
 | SQLite storage — browse/query + FTS5 search | fn | spec | both | `src/dbs/storage/sqlite.py` | rusty_db (unverified) | no | M | Done (#36, #47, #48) |
 | SQLite storage — metrics aggregation | fn | spec | both | `src/dbs/storage/sqlite.py` | — | no | S | Done (#36) |
@@ -70,7 +70,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Config loading (`dbs.toml` + `.env`, per-source blocks, inline-secret rejection) | fn | spec | both | `src/dbs/config.py` | — | no | M | New dependency: TOML parser — check rusty_json's scope first (name suggests JSON only) |
+| Config loading (`dbs.toml` + `.env`, per-source blocks, inline-secret rejection) | fn | spec | both | `src/dbs/config.py` | — | no | M | Done (#13) — `toml` dependency added |
 | Export profile (`ExportProfile`/`ExportProfileOverride` — per-source export rules: which item kinds export, wiki grouping) | type | spec | both | `src/dbs/core/export_profile.py` | — | no | S | Done (#49) |
 
 ## Crypto
@@ -158,7 +158,7 @@ not left as one oversized issue.
 | `youtube` (yt-dlp-based) | fn | spec | both | `connectors/youtube.py` | — | no | L | Done (#98) — new `dbs-connector-youtube` crate; unlike `reddit`/`skool`, needs no Playwright browser (the reference itself is yt-dlp-only), so `yt-dlp --dump-single-json --flat-playlist` shells out directly and `fetch()` is fully implemented and tested end to end against a fake `yt-dlp` script, not blocked on #99. Not yet reachable from a real `dbs backup` run — same registry run/stream gap as `raindrop` (#85) through `skool` (#97) |
 | Shared Playwright launch helper | fn | spec | both | `connectors/_playwright.py` | — | no | M | Done (#99) — new `dbs-connector-support::python_launch` module. The reference's `launch_scrubbed_context` drives Playwright in-process (no Rust equivalent), so this ports the module's *role*, not its code: a generic, Playwright-agnostic subprocess launcher (`find_python`/`run_python_script`/`run_python_script_using`) that `reddit`/`skool`/`youtube`/`dbs capture` will shell a separate Python/Playwright script out to, reusing `run_with_watchdog` for the stall timeout. `reddit` (#96) and `skool` (#97) are not yet wired to it — they still name #99 in their blocked-`fetch()` error, which now points at real infrastructure instead of a nonexistent issue |
 | Tiptap rich-text→Markdown helper | fn | spec | both | `connectors/_tiptap.py` | — | no | S | Done (#100) — new `dbs-connector-support::tiptap` module, a node-for-node port of the reference (paragraphs, headings, code blocks, blockquotes, bullet/ordered lists incl. nesting, horizontal rules, images, hard breaks, and text marks bold/italic/code/strike/link, with `]` escaped in link text). Wired into `skool`'s lesson `body` (previously the raw unrendered `desc` string, per #97's note) |
-| Shared watchdog/timeout helper | fn | spec | both | `connectors/_util.py` | — | no | S | Reusable — do early, several connectors depend on it |
+| Shared watchdog/timeout helper | fn | spec | both | `connectors/_util.py` | — | no | S | Done (#14) — `dbs-connector-support::watchdog`'s `run_with_watchdog`, reused by `vimeo` (#94), `udemy` (#95), and `python_launch` (#99) |
 
 ---
 
