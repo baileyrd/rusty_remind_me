@@ -8,6 +8,19 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs version (closes #78)
+**2026-08-13**
+
+- **Implemented:** `dbs version`, matching the reference's output shape
+  (`<tool> <version> (core API v<N>)`). Uses `rusty_dbs` as the
+  self-identifying tool name — the same name every export manifest
+  already writes to its `tool` field
+  (`BackupService::export_manifest_row`) — and this crate's own
+  `Cargo.toml` version rather than the reference's `dbs.__version__`
+  (there's no equivalent Rust-side single-sourced-version mechanism to
+  port).
+- 1 new `dbs-cli` integration test asserting the exact output string.
+
 ## dbs research subcommands (closes #77)
 **2026-08-13**
 

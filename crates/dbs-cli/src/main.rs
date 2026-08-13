@@ -43,7 +43,7 @@ use dbs_core::service::{
 use dbs_core::{
     load_config, parse_iso, write_scaffolding, BackupRunError, CancelToken, ConnectorRegistry,
     DbsError, ExportQuery, ItemRow, ProgressEvent, ProgressPhase, RunResult, RunStatus,
-    SqliteStorage, Storage,
+    SqliteStorage, Storage, CURRENT_API_VERSION,
 };
 
 const STUB_EXIT_CODE: i32 = 1;
@@ -650,6 +650,7 @@ fn main() {
                 },
             ),
         },
+        Command::Version => cmd_version(),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -2633,6 +2634,19 @@ fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchAr
         eprintln!("  (auth state: {})", path.display());
     }
     CONFIG_ERROR_EXIT_CODE
+}
+
+/// Mirrors the reference's `version` command: `<tool> <version> (core
+/// API v<N>)`. `rusty_dbs` is this port's self-identifying tool name,
+/// matching the manifest `tool` field every export writes
+/// (`BackupService::export_manifest_row`); the version comes from this
+/// crate's own `Cargo.toml` rather than the reference's `dbs.__version__`.
+fn cmd_version() -> i32 {
+    println!(
+        "rusty_dbs {} (core API v{CURRENT_API_VERSION})",
+        env!("CARGO_PKG_VERSION")
+    );
+    0
 }
 
 fn run_status_str(status: RunStatus) -> &'static str {
