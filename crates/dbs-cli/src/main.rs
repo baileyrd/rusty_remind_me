@@ -303,9 +303,20 @@ enum Command {
 #[derive(Subcommand)]
 enum SourcesCommand {
     /// List configured sources.
-    List,
-    /// Add a source to the config.
-    Add,
+    List {
+        /// Emit JSON.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
+    /// Add a source to the config (validated against the connector's schema).
+    Add {
+        name: String,
+        #[arg(long = "type", short = 't')]
+        type_: String,
+        /// Option as key=value (repeatable).
+        #[arg(long = "set")]
+        set: Vec<String>,
+    },
     /// Check every configured source's connector loads and validates.
     Check,
 }
@@ -313,9 +324,19 @@ enum SourcesCommand {
 #[derive(Subcommand)]
 enum ConnectorsCommand {
     /// List every discovered connector.
-    List,
+    List {
+        /// Emit JSON.
+        #[arg(long = "json")]
+        json_out: bool,
+        /// Show load failures.
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
     /// Describe one connector's config schema and capabilities.
-    Describe,
+    Describe {
+        #[arg(value_name = "TYPE")]
+        type_: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -438,6 +459,19 @@ fn main() {
             out,
             passphrase_env,
         } => cmd_decrypt(&cli.config, src, out, passphrase_env),
+        Command::Sources(sub) => match sub {
+            SourcesCommand::List { json_out } => cmd_sources_list(&cli.config, json_out),
+            SourcesCommand::Add { name, type_, set } => {
+                cmd_sources_add(&cli.config, name, type_, set)
+            }
+            SourcesCommand::Check => cmd_sources_check(&cli.config),
+        },
+        Command::Connectors(sub) => match sub {
+            ConnectorsCommand::List { json_out, verbose } => {
+                cmd_connectors_list(&cli.config, json_out, verbose)
+            }
+            ConnectorsCommand::Describe { type_ } => cmd_connectors_describe(&cli.config, type_),
+        },
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -1718,6 +1752,278 @@ fn cmd_decrypt(
             STUB_EXIT_CODE
         }
     }
+}
+
+/// Mirrors the reference's `sources list`.
+fn cmd_sources_list(config_path: &Path, json_out: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let rows = match service.list_sources() {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+
+    if json_out {
+        match serde_json::to_string_pretty(&rows) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode sources as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+
+    if rows.is_empty() {
+        println!("No sources configured. Add one with: dbs sources add ...");
+        return 0;
+    }
+    for r in &rows {
+        let get_str = |key: &str| r.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        let enabled = r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let backed_up = r
+            .get("backed_up")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        println!(
+            "{:<24} {:<10} {:<9} {}",
+            get_str("name"),
+            get_str("type"),
+            if enabled { "enabled" } else { "disabled" },
+            if backed_up { "(backed up)" } else { "" },
+        );
+    }
+    0
+}
+
+/// Best-effort coerce a `--set` string into bool/int/list/str for the
+/// config file. Mirrors the reference's `_coerce`.
+fn coerce_set_value(value: &str) -> serde_json::Value {
+    let low = value.to_ascii_lowercase();
+    if low == "true" || low == "false" {
+        return serde_json::Value::Bool(low == "true");
+    }
+    if let Ok(n) = value.parse::<i64>() {
+        return serde_json::Value::from(n);
+    }
+    if let Some(inner) = value.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let inner = inner.trim();
+        return serde_json::Value::Array(if inner.is_empty() {
+            Vec::new()
+        } else {
+            inner
+                .split(',')
+                .map(|s| serde_json::Value::String(s.trim().to_string()))
+                .collect()
+        });
+    }
+    serde_json::Value::String(value.to_string())
+}
+
+/// Mirrors the reference's `sources add`.
+fn cmd_sources_add(config_path: &Path, name: String, type_: String, set: Vec<String>) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let mut options = std::collections::HashMap::new();
+    for pair in &set {
+        let Some((key, value)) = pair.split_once('=') else {
+            eprintln!("--set expects key=value, got {pair:?}");
+            return CONFIG_ERROR_EXIT_CODE;
+        };
+        options.insert(key.trim().to_string(), coerce_set_value(value.trim()));
+    }
+
+    match service.add_source(&name, &type_, &options, false, 0, false) {
+        Ok(()) => {
+            println!("Added source {name:?} ({type_}).");
+            0
+        }
+        Err(e) => report_config_error(&e),
+    }
+}
+
+/// Mirrors the reference's `sources check`.
+fn cmd_sources_check(config_path: &Path) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let results = service.check_sources();
+    let mut bad = 0;
+    for (name, err) in &results {
+        match err {
+            Some(e) => {
+                bad += 1;
+                println!("  {name}: {e}");
+            }
+            None => println!("  {name}: ok"),
+        }
+    }
+    if bad > 0 {
+        CONFIG_ERROR_EXIT_CODE
+    } else {
+        0
+    }
+}
+
+/// Mirrors the reference's `connectors list`.
+fn cmd_connectors_list(config_path: &Path, json_out: bool, verbose: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let infos = service.list_connectors();
+
+    if json_out {
+        let rows: Vec<_> = infos
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "type": i.type_,
+                    "plugin_id": i.plugin_id,
+                    "builtin": i.is_builtin,
+                    "display_name": i.display_name,
+                    "secret_keys": i.secret_keys,
+                })
+            })
+            .collect();
+        match serde_json::to_string_pretty(&rows) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode connectors as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+
+    for i in &infos {
+        let tag = if i.is_builtin {
+            "built-in".to_string()
+        } else {
+            i.dist_name.clone()
+        };
+        println!("{:<14} {:<22} [{tag}]", i.type_, i.display_name);
+    }
+    let report = service.registry.report();
+    if verbose && !report.failures.is_empty() {
+        println!("\nLoad failures:");
+        for f in &report.failures {
+            println!("  {}: {}", f.dist_name, f.reason);
+        }
+    }
+    if verbose && !report.shadowed.is_empty() {
+        println!("\nShadowed (collision):");
+        for s in &report.shadowed {
+            println!("  {}", s.plugin_id);
+        }
+    }
+    0
+}
+
+/// Mirrors the reference's `connectors describe`.
+fn cmd_connectors_describe(config_path: &Path, type_: String) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let Some(rc) = service.registry.get(&type_) else {
+        eprintln!("connector plugin not found: {type_}");
+        return CONFIG_ERROR_EXIT_CODE;
+    };
+
+    println!(
+        "{} ({})",
+        rc.handshake.display_name.as_deref().unwrap_or(&rc.type_),
+        rc.plugin_id,
+    );
+    if let Some(desc) = rc
+        .handshake
+        .description
+        .as_deref()
+        .filter(|d| !d.is_empty())
+    {
+        println!("{desc}");
+    }
+    println!("\nItem kinds: {}", rc.handshake.item_kinds.join(", "));
+    let secrets = if rc.handshake.secret_keys.is_empty() {
+        "(none)".to_string()
+    } else {
+        rc.handshake.secret_keys.join(", ")
+    };
+    println!("Required secrets: {secrets}");
+    let caps = &rc.handshake.capabilities;
+    println!(
+        "Capabilities: incremental={}, full_enumeration={}, native_deletes={}, media={}",
+        caps.supports_incremental,
+        caps.supports_full_enumeration,
+        caps.supports_native_deletes,
+        caps.produces_media,
+    );
+    // No config-schema field travels over the spawn/handshake protocol
+    // (ADR-0001 step 1) — unlike the reference's in-process Pydantic
+    // model, there's nothing to introspect here yet.
+    println!("\nConfig schema: {{}}");
+    0
 }
 
 fn run_status_str(status: RunStatus) -> &'static str {

@@ -47,9 +47,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use serde_json::Value;
 
 use crate::cancel::CancelToken;
-use crate::capabilities::Capabilities;
+use crate::capabilities::{Capabilities, ItemKind};
 use crate::config::{Config, SourceConfig, VpnGuard};
 use crate::crypto::{
     decrypt_file, is_encrypted, resolve_passphrase, EncryptingWriter, DEFAULT_PASSPHRASE_ENV,
@@ -58,8 +59,8 @@ use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError
 use crate::export::{get_exporter, ExportResult, ExportSource};
 use crate::export_profile::{resolve_export_profile, ExportProfile};
 use crate::models::{
-    Cursor, ProgressEvent, ProgressPhase, RestoreReport, RunResult, RunStatus, SourceStatus,
-    VerifyIssue, VerifyReport,
+    ConnectorInfo, Cursor, ProgressEvent, ProgressPhase, RestoreReport, RunResult, RunStatus,
+    SourceStatus, VerifyIssue, VerifyReport,
 };
 use crate::netns::in_named_netns;
 use crate::registry::{ConnectorRegistry, RegisteredConnector};
@@ -204,6 +205,34 @@ fn run_status_str(status: RunStatus) -> &'static str {
         RunStatus::Failed => "failed",
         RunStatus::Skipped => "skipped",
         RunStatus::Interrupted => "interrupted",
+    }
+}
+
+/// Serializes a JSON value back to a TOML literal, for
+/// [`BackupService::add_source`] appending `--set key=value` pairs to
+/// the config file. Mirrors the reference's `_toml_value`.
+fn toml_value(value: &Value) -> String {
+    match value {
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(toml_value).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Null => "\"\"".to_string(),
+        other => {
+            let text = other
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| other.to_string());
+            let escaped = text
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            format!("\"{escaped}\"")
+        }
     }
 }
 
@@ -972,6 +1001,155 @@ impl<'a> BackupService<'a> {
     /// of the metrics strip. Delegates to [`Storage::metrics`].
     pub fn metrics(&self) -> Result<ItemRow, DbsError> {
         self.storage.metrics()
+    }
+
+    /// One row per configured source, in config order — `name`/`type`/
+    /// `enabled`/`schedule`/`backed_up` (whether it has ever produced a
+    /// `sources` row, i.e. run at least once). Mirrors the reference's
+    /// `list_sources`.
+    pub fn list_sources(&self) -> Result<Vec<ItemRow>, DbsError> {
+        let mut names: Vec<&String> = self.config.sources.keys().collect();
+        names.sort();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let sc = &self.config.sources[name];
+            let backed_up = self.storage.get_source(name)?.is_some();
+            let mut row = ItemRow::new();
+            row.insert("name".to_string(), Value::from(name.clone()));
+            row.insert("type".to_string(), Value::from(sc.type_.clone()));
+            row.insert("enabled".to_string(), Value::from(sc.enabled));
+            row.insert(
+                "schedule".to_string(),
+                sc.schedule.clone().map(Value::from).unwrap_or(Value::Null),
+            );
+            row.insert("backed_up".to_string(), Value::from(backed_up));
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// One [`ConnectorInfo`] per registry entry, in discovery order.
+    /// Mirrors the reference's `list_connectors`. `item_kinds` carries
+    /// only the handshake's bare kind names — the connector's own
+    /// richer per-kind `display_name`/`description` (Python's
+    /// `cls.item_kinds`) isn't part of the spawn/handshake protocol
+    /// (ADR-0001 step 1), so both fields fall back to the name itself.
+    pub fn list_connectors(&self) -> Vec<ConnectorInfo> {
+        self.registry
+            .all()
+            .into_iter()
+            .map(|rc| ConnectorInfo {
+                type_: rc.type_.clone(),
+                plugin_id: rc.plugin_id.clone(),
+                dist_name: rc.dist_name.clone(),
+                is_builtin: rc.is_builtin,
+                display_name: rc
+                    .handshake
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| rc.type_.clone()),
+                description: rc.handshake.description.clone().unwrap_or_default(),
+                capabilities: rc.handshake.capabilities.clone(),
+                item_kinds: rc
+                    .handshake
+                    .item_kinds
+                    .iter()
+                    .map(|k| ItemKind {
+                        name: k.clone(),
+                        display_name: k.clone(),
+                        description: String::new(),
+                    })
+                    .collect(),
+                secret_keys: rc.handshake.secret_keys.clone(),
+                config_schema: Value::Null,
+            })
+            .collect()
+    }
+
+    /// Validates every configured source's connector type is
+    /// resolvable in the registry. Returns `(name, error_or_none)`,
+    /// in config order. Mirrors the reference's `check_sources` — the
+    /// per-option Pydantic-model validation it also does has no
+    /// analogue here (a subprocess connector doesn't expose a config
+    /// schema to validate against in-process, only at handshake time),
+    /// so this checks connector *resolvability*, the one thing this
+    /// registry can answer without spawning anything.
+    pub fn check_sources(&self) -> Vec<(String, Option<String>)> {
+        let mut names: Vec<&String> = self.config.sources.keys().collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                let sc = &self.config.sources[name];
+                let err = if self.registry.get(&sc.type_).is_some() {
+                    None
+                } else {
+                    Some(format!("connector plugin not found: {}", sc.type_))
+                };
+                (name.clone(), err)
+            })
+            .collect()
+    }
+
+    /// Validates `name`/`type_` (name not already configured, `type_`
+    /// resolvable in the registry) and, if `self.config.source_path` is
+    /// set, appends a `[sources.NAME]` block to that file. Mirrors the
+    /// reference's `add_source` — minus the Pydantic option validation
+    /// [`Self::check_sources`]'s doc-comment explains isn't available
+    /// here; `options` are written through verbatim.
+    ///
+    /// Does **not** update `self.config` in memory (unlike the
+    /// reference) — `BackupService` only borrows its `Config`
+    /// (`&'a Config`, not owned), and the CLI's short-lived process
+    /// re-reads the file on its next invocation anyway, so there's
+    /// nothing in-process left to keep in sync.
+    pub fn add_source(
+        &self,
+        name: &str,
+        type_: &str,
+        options: &HashMap<String, Value>,
+        store_media: bool,
+        max_media_mb: u32,
+        requires_vpn: bool,
+    ) -> Result<(), DbsError> {
+        if self.config.sources.contains_key(name) {
+            return Err(DbsError::Config(format!(
+                "source {name:?} already exists in config"
+            )));
+        }
+        self.registry
+            .get(type_)
+            .ok_or_else(|| DbsError::Load(ConnectorLoadError::NotFound(type_.to_string())))?;
+
+        let Some(path) = &self.config.source_path else {
+            return Err(DbsError::Config(
+                "no config file to append the new source to".to_string(),
+            ));
+        };
+        let mut block = format!("\n[sources.{name}]\ntype = \"{type_}\"\nenabled = true\n");
+        if store_media {
+            block.push_str("store_media = true\n");
+            if max_media_mb > 0 {
+                block.push_str(&format!("max_media_mb = {max_media_mb}\n"));
+            }
+        }
+        if requires_vpn {
+            block.push_str("requires_vpn = true\n");
+        }
+        let mut option_keys: Vec<&String> = options.keys().collect();
+        option_keys.sort();
+        for key in option_keys {
+            block.push_str(&format!("{key} = {}\n", toml_value(&options[key])));
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .map_err(|e| DbsError::Storage(format!("failed to open config file: {e}")))?;
+        file.write_all(block.as_bytes())
+            .map_err(|e| DbsError::Storage(format!("failed to append source to config: {e}")))?;
+        Ok(())
     }
 
     /// Replays an export (archive zip or raw-bearing ndjson) into the
@@ -3224,6 +3402,137 @@ mod tests {
 
         let profiles = service.export_profiles();
         assert!(!profiles["a"].enabled);
+    }
+
+    #[test]
+    fn list_sources_reports_type_enabled_and_backed_up_state() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut disabled = test_source_config("b", "raindrop");
+        disabled.enabled = false;
+        sources.insert("b".to_string(), disabled);
+
+        let mut storage = FakeStorage::default();
+        // "a" has actually been backed up before; "b" never has.
+        storage
+            .upsert_source("a", "raindrop", "test:raindrop", "{}", 1)
+            .unwrap();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let rows = service.list_sources().unwrap();
+        assert_eq!(rows.len(), 2);
+        let a = rows.iter().find(|r| r["name"] == "a").unwrap();
+        assert_eq!(a["type"], "raindrop");
+        assert_eq!(a["enabled"], true);
+        assert_eq!(a["backed_up"], true);
+        let b = rows.iter().find(|r| r["name"] == "b").unwrap();
+        assert_eq!(b["enabled"], false);
+        assert_eq!(b["backed_up"], false);
+    }
+
+    #[test]
+    fn list_connectors_maps_registered_connectors_to_connector_info() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let infos = service.list_connectors();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].type_, "raindrop");
+        assert!(infos[0].is_builtin);
+        assert_eq!(infos[0].item_kinds.len(), 1);
+        assert_eq!(infos[0].item_kinds[0].name, "item");
+    }
+
+    #[test]
+    fn check_sources_reports_ok_for_a_registered_type_and_an_error_for_an_unregistered_one() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "unregistered"));
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let results: HashMap<String, Option<String>> =
+            service.check_sources().into_iter().collect();
+        assert_eq!(results["a"], None);
+        assert!(results["b"].as_ref().unwrap().contains("unregistered"));
+    }
+
+    #[test]
+    fn add_source_appends_a_toml_block_for_a_registered_type() {
+        let dir = restore_temp_dir("add-source");
+        let config_path = dir.join("dbs.toml");
+        std::fs::write(&config_path, "[dbs]\ndatabase = \"dbs.sqlite3\"\n").unwrap();
+
+        let mut storage = FakeStorage::default();
+        let mut config = test_config(HashMap::new());
+        config.source_path = Some(config_path.clone());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let mut options = HashMap::new();
+        options.insert("collection".to_string(), serde_json::Value::from("123"));
+        service
+            .add_source("a", "raindrop", &options, false, 0, false)
+            .unwrap();
+
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("[sources.a]"), "{text}");
+        assert!(text.contains("type = \"raindrop\""), "{text}");
+        assert!(text.contains("collection = \"123\""), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_source_rejects_an_unregistered_connector_type_without_touching_the_file() {
+        let dir = restore_temp_dir("add-source-bad-type");
+        let config_path = dir.join("dbs.toml");
+        std::fs::write(&config_path, "[dbs]\ndatabase = \"dbs.sqlite3\"\n").unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        let mut storage = FakeStorage::default();
+        let mut config = test_config(HashMap::new());
+        config.source_path = Some(config_path.clone());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service
+            .add_source("a", "raindrop", &HashMap::new(), false, 0, false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DbsError::Load(crate::errors::ConnectorLoadError::NotFound(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_source_rejects_a_name_that_already_exists() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service
+            .add_source("a", "raindrop", &HashMap::new(), false, 0, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"));
     }
 
     #[test]

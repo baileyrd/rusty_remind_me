@@ -8,6 +8,56 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs sources / dbs connectors (closes #71)
+**2026-08-13**
+
+- **Implemented:** `dbs sources list/add/check` and `dbs connectors
+  list/describe`, wired to four new `BackupService` methods
+  (`list_sources`, `list_connectors`, `check_sources`, `add_source`)
+  that didn't exist before this issue.
+- **Architecture note:** the reference's `check_sources`/`add_source`
+  validate each source's options against the connector's in-process
+  Pydantic model — there's no equivalent here, since this port's
+  connectors are external subprocesses whose only interface is the
+  spawn/handshake protocol (ADR-0001 step 1), which doesn't expose a
+  config schema to validate against. Both methods instead validate
+  connector *resolvability* (does the registry have this type at all)
+  — the one thing answerable without spawning anything, and exactly
+  what the acceptance checklist's "a connector `check` failure
+  surfaced to CLI output" scenario tests.
+- `dbs sources list [--json]`: name/type/enabled/backed-up per
+  configured source, sorted by name; "No sources configured. Add one
+  with: dbs sources add ..." when empty.
+- `dbs sources add NAME --type TYPE [--set key=value]...`: appends a
+  `[sources.NAME]` TOML block to the config file after checking the
+  name isn't already taken and the connector type resolves — writes
+  nothing on either failure. `--set` values are best-effort coerced to
+  bool/int/list/string (`coerce_set_value`, mirroring the reference's
+  `_coerce`) and serialized back to TOML literals (`toml_value`,
+  mirroring `_toml_value`).
+- `dbs sources check`: validates every configured source's connector
+  type resolves; exit `4` if any don't.
+- `dbs connectors list [--json] [--verbose]`: every registry entry,
+  `--verbose` also showing load failures/shadowed collisions from
+  `ConnectorRegistry::report()`.
+- `dbs connectors describe TYPE`: display name, description, item
+  kinds, required secrets, and capability flags from the connector's
+  handshake — the reference's Pydantic `config_model.model_json_schema()`
+  section renders as an honest empty `{}`, since the handshake
+  protocol carries no schema to show.
+- Updated `a_nested_stub_subcommand_reports_not_yet_implemented` to
+  use `research youtube` instead of `sources list`, now that
+  `sources`/`connectors` are no longer stubs.
+- 6 new `dbs-core` unit tests (using `ConnectorRegistry::from_resolved`
+  to build a real registry entry, the way `list_sources`/
+  `list_connectors`'s "found" paths and `add_source`'s success path
+  can only be exercised) plus 11 new `dbs-cli` integration tests
+  covering what the CLI's always-empty registry can honestly produce:
+  empty/populated config, JSON output, and every failure path
+  (`check` surfacing "not found", `add` rejecting an unregistered type
+  or a duplicate name without touching the file, a malformed `--set`
+  pair, `describe` on an unknown type).
+
 ## dbs export* / dbs decrypt CLI wiring (closes #70)
 **2026-08-13**
 

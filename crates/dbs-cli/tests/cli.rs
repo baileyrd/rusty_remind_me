@@ -162,9 +162,11 @@ fn a_stub_subcommand_reports_not_yet_implemented() {
 
 #[test]
 fn a_nested_stub_subcommand_reports_not_yet_implemented() {
+    // `sources`/`connectors` (#71) are no longer pure stubs — `research`
+    // still is.
     let output = Command::new(dbs_bin())
-        .arg("sources")
-        .arg("list")
+        .arg("research")
+        .arg("youtube")
         .output()
         .unwrap();
     assert!(!output.status.success());
