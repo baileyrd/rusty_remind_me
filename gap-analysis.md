@@ -128,7 +128,7 @@ not left as one oversized issue.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Web app skeleton + static SPA serving | fn | spec | both | `src/dbs/web/app.py` | rusty_http (unverified — likely client-only) | no | L | Done (#79) — new `dbs-web` crate (axum + tokio); serves the reference's real static SPA unmodified; `dbs serve` actually binds on loopback now. No `/api` routes yet — see Job manager/Auth/In-UI setup rows |
 | Job manager (background jobs + SSE progress) | fn | spec | both | `src/dbs/web/jobs.py` | — | no | M | Done (#80) — `dbs-web::jobs`: generic submit/track/cancel + SSE, tested with a fake job; no `/api/backup` wiring yet (needs Auth first) and no VPN-subprocess routing (`BackupService` already refuses `requires_vpn` outside the namespace instead) |
-| Auth / CSRF / Origin / Host protection | fn | spec | both | `src/dbs/web/app.py` (security gate) | — | no | M | Security-sensitive — implement carefully, don't skip the DNS-rebinding defense |
+| Auth / CSRF / Origin / Host protection | fn | spec | both | `src/dbs/web/app.py` (security gate) | — | no | M | Done (#81) — `dbs-web::auth::security_gate`, wired into `router()`/`dbs serve`; DNS-rebinding Host check, Origin-based CSRF defense, opt-in bearer token gating `/api`. `dbs serve` now binds off-loopback for real once `--token` is given |
 | `envfile.py` (scoped secrets writer) | fn | spec | both | `src/dbs/web/envfile.py` | — | no | S | |
 | In-UI setup (dependency install + browser-auth capture jobs) | fn | spec | both | `src/dbs/web/setup.py` | — | no | L | Depends on browser-automation strategy — see Connectors |
 

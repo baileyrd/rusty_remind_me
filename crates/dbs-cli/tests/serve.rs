@@ -1,13 +1,12 @@
 //! Integration tests for `dbs serve` (issues #75 flag wiring, #79 web
-//! app skeleton).
+//! app skeleton, #81 auth gate).
 //!
-//! A loopback bind now actually serves the app skeleton (#79) — those
-//! tests spawn the real binary, poll the port until it answers, check
-//! a real HTTP response, then kill the child. A non-loopback bind isn't
-//! wired to serve for real yet (no auth gate — #81), so those cases
-//! still quick-exit with a validation report, same as the off-
-//! localhost-without-token refusal and the `--allow-setup --no-setup`
-//! usage error.
+//! Every accepted bind — loopback, or non-loopback with `--token` now
+//! that the auth gate (#81) actually enforces it — spawns the real
+//! binary, polls the port until it answers, checks a real HTTP
+//! response, then kills the child. The off-localhost-without-token
+//! refusal and the `--allow-setup --no-setup` usage error still
+//! quick-exit, since neither ever starts a server.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -188,19 +187,27 @@ fn binding_off_localhost_without_a_token_is_refused() {
 }
 
 #[test]
-fn binding_off_localhost_with_a_token_is_validated_but_not_yet_served_for_real() {
-    let output = Command::new(dbs_bin())
+fn binding_off_localhost_with_a_token_is_actually_served_and_the_token_is_enforced() {
+    let child = Command::new(dbs_bin())
         .arg("serve")
         .arg("--host")
         .arg("0.0.0.0")
+        .arg("--port")
+        .arg("18127")
         .arg("--token")
         .arg("secret")
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .unwrap();
-    assert_eq!(output.status.code(), Some(4), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(!stderr.contains("Refusing to bind"), "{stderr}");
-    assert!(stderr.contains("not yet served for real"), "{stderr}");
+    let _guard = KillOnDrop(child);
+
+    // The static frontend stays reachable without the token...
+    let response = get(18127, "/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    // ...but an /api request without it is rejected.
+    let response = get(18127, "/api/whatever");
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
 }
 
 #[test]

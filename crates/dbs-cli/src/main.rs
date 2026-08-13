@@ -2379,21 +2379,6 @@ fn cmd_serve(
         return CONFIG_ERROR_EXIT_CODE;
     }
 
-    // Binding for real is only wired up for loopback today: the app
-    // skeleton (#79) has no auth gate yet (#81), so a non-loopback bind
-    // would actually be the unauthenticated API the refusal above warns
-    // about, token or not. Once #81 lands and this app enforces
-    // `--token` itself, this restriction can come out.
-    if !is_local_host(&host) {
-        eprintln!(
-            "dbs serve: {host} is validated but not yet served for real \u{2014} the auth gate \
-             that would actually enforce --token for a non-loopback bind isn't wired into the \
-             app skeleton yet (tracked in a follow-up issue). Bind to 127.0.0.1 (the default) \
-             to actually serve today."
-        );
-        return CONFIG_ERROR_EXIT_CODE;
-    }
-
     eprintln!("Serving rusty_dbs UI at http://{host}:{port}  (press Ctrl+C to stop)");
     if schedule {
         eprintln!(
@@ -2405,7 +2390,7 @@ fn cmd_serve(
         eprintln!("  (--no-setup noted, but there are no setup actions to disable yet)");
     }
     if token.is_some() {
-        eprintln!("  (--token noted, but nothing reads it yet on a loopback bind)");
+        eprintln!("  (token auth required on every /api request)");
     }
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -2418,7 +2403,7 @@ fn cmd_serve(
             return CONFIG_ERROR_EXIT_CODE;
         }
     };
-    match rt.block_on(dbs_web::serve(&host, port)) {
+    match rt.block_on(dbs_web::serve(&host, port, token)) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("dbs serve: {e}");
