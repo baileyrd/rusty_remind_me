@@ -85,6 +85,10 @@ enum Command {
         /// With --all: skip a source whose schedule cadence hasn't elapsed.
         #[arg(long)]
         only_due: bool,
+        /// With --all: run up to N sources concurrently (default: the
+        /// config's `parallel` key, itself defaulting to 1).
+        #[arg(long)]
+        parallel: Option<u32>,
         /// Full refetch, ignore cursor.
         #[arg(long)]
         force_full: bool,
@@ -184,6 +188,7 @@ fn main() {
             source,
             all_sources,
             only_due,
+            parallel,
             force_full,
             reconcile,
             dry_run,
@@ -193,6 +198,7 @@ fn main() {
             source,
             all_sources,
             only_due,
+            parallel,
             force_full,
             reconcile,
             dry_run,
@@ -301,6 +307,7 @@ fn cmd_backup(
     source: Option<String>,
     all_sources: bool,
     only_due: bool,
+    parallel: Option<u32>,
     force_full: bool,
     reconcile: bool,
     dry_run: bool,
@@ -335,6 +342,7 @@ fn cmd_backup(
             force_reconcile: reconcile,
             dry_run,
             limit,
+            parallel,
         };
         return match service.backup_all(&opts) {
             Ok(results) => {
