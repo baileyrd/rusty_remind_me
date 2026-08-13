@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs status / dbs history (closes #68)
+**2026-08-13**
+
+- **Implemented:** `dbs status` (per-source item counts, last run,
+  cursor watermark, schedule/due state) and `dbs history` (recent
+  runs, newest first), wired to `BackupService::status`/`history` —
+  both already existed in `dbs-core` from an earlier models-parity
+  pass; this issue is the CLI rendering on top of them.
+- `dbs status [SOURCE]`: one line per source (`name type on/off
+  items=… (deleted …) runs=… last=…`), plus a `! has interrupted
+  runs` line where applicable. An unknown `SOURCE` name is a
+  placeholder row (`type=?`, `enabled=off`), not an error — matches
+  the reference. No sources configured prints "No sources configured."
+  instead of an empty table.
+- `dbs history [SOURCE] [-n/--limit N]` (default 20): one line per run
+  (`started_at  source  status [mode] +created ~updated xdeleted
+  (fetched-failed)  duration`), plus an indented error/warning line
+  underneath where present.
+- Both support `--json` (the raw `SourceStatus`/run-row data via
+  `serde_json`, no reshaping) instead of the rendered table.
+- 10 new `dbs-cli` integration tests using a real `SqliteStorage` to
+  seed run rows directly (no connector-candidate discovery exists yet,
+  #85-100, so a real `dbs backup` run can't produce this history
+  itself): empty state, multiple sources, a seeded run reflected in
+  both commands, the unknown-source placeholder, `--json` shape,
+  newest-first ordering, `--limit`, and source-name filtering.
+
 ## dbs backup progress line + Ctrl+C handling (closes #67)
 **2026-08-13**
 

@@ -112,9 +112,24 @@ enum Command {
         no_progress: bool,
     },
     /// Show each configured source's last-run summary.
-    Status,
+    Status {
+        /// Limit to one source (omit for every configured source).
+        source: Option<String>,
+        /// Emit JSON.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Show recent run history.
-    History,
+    History {
+        /// Limit to one source (omit for every source).
+        source: Option<String>,
+        /// Show at most N runs.
+        #[arg(long, short = 'n', default_value_t = 20)]
+        limit: u32,
+        /// Emit JSON.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Browse backed-up items.
     Items,
     /// Aggregate item/source statistics.
@@ -217,6 +232,12 @@ fn main() {
             progress,
             no_progress,
         ),
+        Command::Status { source, json_out } => cmd_status(&cli.config, source, json_out),
+        Command::History {
+            source,
+            limit,
+            json_out,
+        } => cmd_history(&cli.config, source, limit, json_out),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -226,8 +247,8 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Init { .. } => "init",
         Command::Backup { .. } => "backup",
-        Command::Status => "status",
-        Command::History => "history",
+        Command::Status { .. } => "status",
+        Command::History { .. } => "history",
         Command::Items => "items",
         Command::Stats => "stats",
         Command::Export => "export",
@@ -511,6 +532,134 @@ fn cmd_backup(
             report_config_error(&e)
         }
     }
+}
+
+/// Mirrors the reference's `status` command: one line per source
+/// (`--json` for the raw `SourceStatus` list instead).
+fn cmd_status(config_path: &Path, source: Option<String>, json_out: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let statuses = match service.status(source.as_deref()) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+
+    if json_out {
+        match serde_json::to_string_pretty(&statuses) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode status as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+
+    if statuses.is_empty() {
+        println!("No sources configured.");
+        return 0;
+    }
+    for s in &statuses {
+        println!(
+            "{:<24} {:<10} {:<4} items={} (deleted {}) runs={} last={}",
+            s.name,
+            s.type_,
+            if s.enabled { "on" } else { "off" },
+            s.live_items,
+            s.deleted_items,
+            s.run_count,
+            s.last_run_status.as_deref().unwrap_or("-"),
+        );
+        if s.has_interrupted_runs {
+            println!("    ! has interrupted runs");
+        }
+    }
+    0
+}
+
+/// Mirrors the reference's `history` command: one line per run, newest
+/// first (`--json` for the raw run rows instead).
+fn cmd_history(config_path: &Path, source: Option<String>, limit: u32, json_out: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let runs = match service.history(source.as_deref(), limit) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+
+    if json_out {
+        match serde_json::to_string_pretty(&runs) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode history as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+
+    for run in &runs {
+        let get_str = |key: &str| run.get(key).and_then(|v| v.as_str()).unwrap_or("?");
+        let get_i64 = |key: &str| run.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+        let items_failed = get_i64("items_failed");
+        let failed = if items_failed > 0 {
+            format!(" !{items_failed}")
+        } else {
+            String::new()
+        };
+        let duration = run
+            .get("duration_ms")
+            .and_then(|v| v.as_i64())
+            .map(human_duration)
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{}  {:<20} {:<11} [{}] +{} ~{} x{}{failed}  {duration}",
+            get_str("started_at"),
+            get_str("source_name"),
+            get_str("status"),
+            get_str("mode"),
+            get_i64("items_created"),
+            get_i64("items_updated"),
+            get_i64("items_deleted"),
+        );
+        if let Some(error) = run.get("error").and_then(|v| v.as_str()) {
+            println!("    {error}");
+        }
+        if let Some(warnings) = run.get("warnings").and_then(|v| v.as_array()) {
+            for w in warnings {
+                if let Some(w) = w.as_str() {
+                    println!("    warning: {w}");
+                }
+            }
+        }
+    }
+    0
 }
 
 fn run_status_str(status: RunStatus) -> &'static str {
