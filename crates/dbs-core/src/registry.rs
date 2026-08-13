@@ -86,6 +86,12 @@ pub struct Handshake {
     /// `ExportProfile::default()`.
     #[serde(default)]
     pub export_profile: Option<crate::export_profile::ExportProfile>,
+    /// How to interactively capture this connector's login/session
+    /// (issue #76's `dbs capture`) — `None` for a connector with no
+    /// interactive auth (e.g. one authenticated purely by an API
+    /// token/secret).
+    #[serde(default)]
+    pub auth_capture: Option<crate::capabilities::AuthCapture>,
 }
 
 /// A successfully loaded, contract-valid connector.
@@ -425,6 +431,7 @@ mod tests {
             display_name: None,
             description: None,
             export_profile: None,
+            auth_capture: None,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -444,6 +451,7 @@ mod tests {
             display_name: None,
             description: None,
             export_profile: None,
+            auth_capture: None,
         };
         assert!(validate_contract(&h).is_err());
     }
@@ -463,6 +471,7 @@ mod tests {
             display_name: None,
             description: None,
             export_profile: None,
+            auth_capture: None,
         };
         let err = validate_contract(&h).unwrap_err();
         assert!(err.contains("incompatible"));
@@ -486,6 +495,7 @@ mod tests {
             display_name: None,
             description: None,
             export_profile: None,
+            auth_capture: None,
         };
         assert!(validate_contract(&h).is_ok());
     }
@@ -506,6 +516,7 @@ mod tests {
                 display_name: None,
                 description: None,
                 export_profile: None,
+                auth_capture: None,
             },
             command: PathBuf::from("dbs-connector-raindrop"),
             args: Vec::new(),

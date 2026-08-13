@@ -118,7 +118,7 @@ not left as one oversized issue.
 | `dbs update-ytdlp` | fn | spec | both | `cli.py` | — | no | S | Done (#73) — shells out to `python3 -m pip install --upgrade yt-dlp[default]`, per the Decisions section's subprocess strategy |
 | `dbs schedule` (cron/systemd snippets) | fn | spec | both | `cli.py` | — | no | S | Done (#74) — Linux branch ports the reference's cron+systemd snippets exactly; Windows branch generates a `schtasks` command, no reference equivalent |
 | `dbs serve` flag wiring | fn | spec | both | `cli.py` | — | no | S | Done (#75) — flags parse and validate for real; the actual server is still the Web tier row below |
-| `dbs capture` (headless login capture) | fn | spec | both | `cli.py`, `web/setup.py` | — | no | L | Depends on the browser-automation strategy decision (see Connectors) |
+| `dbs capture` (headless login capture) | fn | spec | both | `cli.py`, `web/setup.py` | — | no | L | Done (#76) — target resolution + default out-path per capture kind implemented; the actual browser-automation subprocess still depends on the strategy decision (see Connectors) |
 | `dbs research` subcommands | fn | spec | both | `cli.py`, `research/*` | — | no | L | Depends on NotebookLM client existing in Rust — see Research row |
 | `dbs version` | fn | spec | both | `cli.py` | — | no | S | |
 

@@ -50,7 +50,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::Value;
 
 use crate::cancel::CancelToken;
-use crate::capabilities::{Capabilities, ItemKind};
+use crate::capabilities::{AuthCapture, Capabilities, ItemKind};
 use crate::config::{Config, SourceConfig, VpnGuard};
 use crate::crypto::{
     decrypt_file, is_encrypted, resolve_passphrase, EncryptingWriter, DEFAULT_PASSPHRASE_ENV,
@@ -1089,6 +1089,35 @@ impl<'a> BackupService<'a> {
                 (name.clone(), err)
             })
             .collect()
+    }
+
+    /// Resolves a `dbs capture TARGET` argument: first as a connector
+    /// type directly, then (if that doesn't resolve) as a configured
+    /// source name whose own connector type is looked up. Mirrors the
+    /// reference's target resolution in the `capture` command. Errors
+    /// if neither resolves, or if the resolved connector declares no
+    /// [`AuthCapture`] (nothing to interactively capture — e.g. a
+    /// connector authenticated purely by an API token).
+    pub fn resolve_capture_target(
+        &self,
+        target: &str,
+    ) -> Result<(RegisteredConnector, AuthCapture), DbsError> {
+        let rc = match self.registry.get(target) {
+            Some(rc) => rc.clone(),
+            None => {
+                let sc = self.config.sources.get(target).ok_or_else(|| {
+                    DbsError::Config(format!("no such connector or source: {target:?}"))
+                })?;
+                self.registry
+                    .get(&sc.type_)
+                    .cloned()
+                    .ok_or_else(|| DbsError::Load(ConnectorLoadError::NotFound(sc.type_.clone())))?
+            }
+        };
+        let spec = rc.handshake.auth_capture.clone().ok_or_else(|| {
+            DbsError::Config(format!("{target:?} has no interactive auth capture"))
+        })?;
+        Ok((rc, spec))
     }
 
     /// Validates `name`/`type_` (name not already configured, `type_`
@@ -2465,6 +2494,7 @@ mod tests {
                 display_name: None,
                 description: None,
                 export_profile: None,
+                auth_capture: None,
             },
             command: std::path::PathBuf::from("dbs-connector-test"),
             args: Vec::new(),
@@ -3726,6 +3756,93 @@ mod tests {
             .add_source("a", "raindrop", &HashMap::new(), false, 0, false)
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    fn fake_connector_with_auth_capture(type_name: &str, kind: &str) -> RegisteredConnector {
+        let mut rc = fake_connector(type_name, true, true);
+        rc.handshake.auth_capture = Some(crate::capabilities::AuthCapture {
+            kind: kind.to_string(),
+            ..Default::default()
+        });
+        rc
+    }
+
+    #[test]
+    fn resolve_capture_target_finds_a_connector_type_directly() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([fake_connector_with_auth_capture(
+            "reddit",
+            "browser_cookies",
+        )]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let (rc, spec) = service.resolve_capture_target("reddit").unwrap();
+        assert_eq!(rc.type_, "reddit");
+        assert_eq!(spec.kind, "browser_cookies");
+    }
+
+    #[test]
+    fn resolve_capture_target_falls_back_to_a_configured_source_name() {
+        let mut sources = HashMap::new();
+        sources.insert(
+            "my-reddit".to_string(),
+            test_source_config("my-reddit", "reddit"),
+        );
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector_with_auth_capture(
+            "reddit",
+            "browser_session",
+        )]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let (rc, spec) = service.resolve_capture_target("my-reddit").unwrap();
+        assert_eq!(rc.type_, "reddit");
+        assert_eq!(spec.kind, "browser_session");
+    }
+
+    #[test]
+    fn resolve_capture_target_errors_when_neither_a_connector_nor_source_matches() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service.resolve_capture_target("nonexistent").unwrap_err();
+        assert!(err.to_string().contains("no such connector or source"));
+    }
+
+    #[test]
+    fn resolve_capture_target_errors_when_the_sources_connector_type_is_unregistered() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service.resolve_capture_target("a").unwrap_err();
+        assert!(matches!(
+            err,
+            DbsError::Load(crate::errors::ConnectorLoadError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_capture_target_errors_when_the_connector_has_no_auth_capture() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let err = service.resolve_capture_target("raindrop").unwrap_err();
+        assert!(err.to_string().contains("no interactive auth capture"));
     }
 
     #[test]
