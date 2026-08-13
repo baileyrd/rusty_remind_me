@@ -12,6 +12,7 @@ members = [
     "crates/dbs-connector-readwise",
     "crates/dbs-connector-mastodon",
     "crates/dbs-connector-bluesky",
+    "crates/dbs-connector-spotify",
 ]
 
 [workspace.package]
