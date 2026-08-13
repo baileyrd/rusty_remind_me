@@ -116,7 +116,7 @@ not left as one oversized issue.
 | `dbs sources` / `dbs connectors` (list/add/check/describe) | fn | spec | both | `cli.py` | — | no | M | Done (#71) — `check`/`add`/`describe` validate only connector *resolvability*, since a subprocess connector has no in-process config schema to validate against |
 | `dbs doctor` | fn | spec | both | `cli.py` | — | no | M | Done (#72) — Pydantic option/dependency validation and yt-dlp version checks have no equivalent in this port's architecture |
 | `dbs update-ytdlp` | fn | spec | both | `cli.py` | — | no | S | Done (#73) — shells out to `python3 -m pip install --upgrade yt-dlp[default]`, per the Decisions section's subprocess strategy |
-| `dbs schedule` (cron/systemd snippets) | fn | spec | both | `cli.py` | — | no | S | Windows needs a Task Scheduler snippet instead of systemd — cross-platform floor makes this two branches, not one |
+| `dbs schedule` (cron/systemd snippets) | fn | spec | both | `cli.py` | — | no | S | Done (#74) — Linux branch ports the reference's cron+systemd snippets exactly; Windows branch generates a `schtasks` command, no reference equivalent |
 | `dbs serve` flag wiring | fn | spec | both | `cli.py` | — | no | S | Thin; real work is the Web tier row below |
 | `dbs capture` (headless login capture) | fn | spec | both | `cli.py`, `web/setup.py` | — | no | L | Depends on the browser-automation strategy decision (see Connectors) |
 | `dbs research` subcommands | fn | spec | both | `cli.py`, `research/*` | — | no | L | Depends on NotebookLM client existing in Rust — see Research row |
