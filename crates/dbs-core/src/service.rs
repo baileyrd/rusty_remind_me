@@ -617,10 +617,7 @@ impl<'a> BackupService<'a> {
     ) -> Option<Result<Vec<RunResult>, DbsError>> {
         let mut worker_storages: Vec<Box<dyn Storage>> = Vec::with_capacity(workers);
         for _ in 0..workers {
-            match self.storage.spawn() {
-                Some(s) => worker_storages.push(s),
-                None => return None,
-            }
+            worker_storages.push(self.storage.spawn()?);
         }
 
         let config = self.config;
