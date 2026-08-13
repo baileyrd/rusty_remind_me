@@ -108,37 +108,30 @@ fn format_or(args: &serde_json::Value, default: ResponseFormat) -> ResponseForma
 }
 
 use remind_me_core::{
-    backup, capture,
-    consolidation::consolidate,
-    contradictions,
-    db::queries,
-    dbs_import, digest, entity, export, history, importer, mempalace_import, normalize,
-    recalibrate, saved_searches, stats, status,
-    sync::{SyncPeer, SyncWorker},
-    undo_import, updater, vectors, vitality, watcher,
-    webhook::Webhook,
-    wiki,
-    wiki_fs::Wiki,
-    wiki_import, AnnotateInput, AutoCaptureInput, BulkImportDirInput, ChatImportInput,
-    ConsolidateInput, ContradictionCandidatesInput, Database, DbsImportInput, DecomposeBatchInput,
-    DecomposeInput, DigestInput, EntityInput, EntityLookupInput, EntityTraverseInput, ExportInput,
-    ExtractBatchInput, FeedbackInput, HistoryInput, ListRemindersInput, MemoryAddInput,
-    MemoryListInput, MemorySearchInput, MemoryStatsInput, MemoryUpdateInput, MempalaceImportInput,
-    NormalizeApplyInput, NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput,
-    ReclassifyInput, ReconcilePeerInput, ResponseFormat, RevertInput, SaveSearchInput,
-    SavedSearchNameInput, SetReminderInput, SyncRepairInput, UndoImportInput, UpdateOutcome,
-    WikiDeleteOutcome, ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX,
-    CONSOLIDATE_LIMIT_MIN, CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN,
-    CONTRADICTION_LIMIT_MAX, CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN,
-    DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN,
-    ENTITY_LOOKUP_LIMIT_MAX, ENTITY_LOOKUP_LIMIT_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN,
-    EXTRACT_MODES, HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX,
-    IMPORT_MAX_LENGTH_MIN, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN,
-    NORMALIZE_APPLY_MAX, NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN,
-    PROMOTION_LIMIT_DEFAULT, PROMOTION_LIMIT_MAX, PROMOTION_LIMIT_MIN, RECALIBRATE_LIMIT_MAX,
-    RECALIBRATE_LIMIT_MIN, RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, REMINDER_LIMIT_MAX,
-    REMINDER_LIMIT_MIN, STALE_CANDIDATES_LIMIT_DEFAULT, STALE_CANDIDATES_LIMIT_MAX,
-    STALE_CANDIDATES_LIMIT_MIN, UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
+    backup, capture, consolidation::consolidate, contradictions, db::queries, dbs_import, digest,
+    entity, export, history, importer, mempalace_import, normalize, recalibrate, saved_searches,
+    stats, status, sync::SyncPeer, undo_import, updater, vectors, vitality, watcher,
+    webhook::Webhook, wiki, wiki_fs::Wiki, wiki_import, AnnotateInput, AutoCaptureInput,
+    BulkImportDirInput, ChatImportInput, ConsolidateInput, ContradictionCandidatesInput, Database,
+    DbsImportInput, DecomposeBatchInput, DecomposeInput, DigestInput, EntityInput,
+    EntityLookupInput, EntityTraverseInput, ExportInput, ExtractBatchInput, FeedbackInput,
+    HistoryInput, ListRemindersInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
+    MemoryStatsInput, MemoryUpdateInput, MempalaceImportInput, NormalizeApplyInput,
+    NormalizeBatchInput, RecalibrateCandidatesInput, ReclassifyBatchInput, ReclassifyInput,
+    ReconcilePeerInput, ResponseFormat, RevertInput, SaveSearchInput, SavedSearchNameInput,
+    SetReminderInput, SyncRepairInput, UndoImportInput, UpdateOutcome, WikiDeleteOutcome,
+    ANNOTATE_BATCH_MAX, ANNOTATE_BATCH_MIN, CONSOLIDATE_LIMIT_MAX, CONSOLIDATE_LIMIT_MIN,
+    CONSOLIDATE_SIMILARITY_MAX, CONSOLIDATE_SIMILARITY_MIN, CONTRADICTION_LIMIT_MAX,
+    CONTRADICTION_LIMIT_MIN, DBS_IMPORT_LIMIT_MAX, DBS_IMPORT_LIMIT_MIN, DECOMPOSE_BATCH_MAX,
+    DECOMPOSE_BATCH_MIN, DECOMPOSE_FACTS_MAX, DECOMPOSE_FACTS_MIN, ENTITY_LOOKUP_LIMIT_MAX,
+    ENTITY_LOOKUP_LIMIT_MIN, EXTRACT_BATCH_MAX, EXTRACT_BATCH_MIN, EXTRACT_MODES,
+    HISTORY_LIMIT_MAX, HISTORY_LIMIT_MIN, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
+    MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN, NORMALIZE_APPLY_MAX,
+    NORMALIZE_APPLY_MIN, NORMALIZE_BATCH_MAX, NORMALIZE_BATCH_MIN, PROMOTION_LIMIT_DEFAULT,
+    PROMOTION_LIMIT_MAX, PROMOTION_LIMIT_MIN, RECALIBRATE_LIMIT_MAX, RECALIBRATE_LIMIT_MIN,
+    RECLASSIFY_BATCH_MAX, RECLASSIFY_BATCH_MIN, REMINDER_LIMIT_MAX, REMINDER_LIMIT_MIN,
+    STALE_CANDIDATES_LIMIT_DEFAULT, STALE_CANDIDATES_LIMIT_MAX, STALE_CANDIDATES_LIMIT_MIN,
+    UNDO_IMPORT_LIMIT_MAX, UNDO_IMPORT_LIMIT_MIN,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -326,12 +319,19 @@ pub struct McpServer {
     /// thread, and that thread writes through the database. Listed after `db`
     /// it would still be sound — the thread holds its own `Arc` — but the
     /// connections would stay open until the thread noticed, which is the
-    /// shutdown ordering `SE-07` exists to pin down. `sync_peer` and
-    /// `sync_worker` hold their own serving/background threads for the same
-    /// reason and are declared before `db` for the same reason.
+    /// shutdown ordering `SE-07` exists to pin down. `sync_peer` holds its
+    /// own serving thread for the same reason and is declared before `db` for
+    /// the same reason.
+    ///
+    /// No `sync_worker` field here (unlike before this comment last changed):
+    /// `SyncWorker` is a background loop like the scheduler/watcher/promotion
+    /// nudge, none of which this struct owns either — `remind_me_cli::main`
+    /// starts all of them alongside, not through, an `McpServer`. `remind_me_
+    /// server_status` reads a live one via `remind_me_core::sync::sync_live_
+    /// status`, which answers for whichever process is actually running it,
+    /// not only one this instance happens to hold.
     webhook: Webhook,
     sync_peer: SyncPeer,
-    sync_worker: Option<SyncWorker>,
     db: Arc<Database>,
     wiki: Wiki,
 }
@@ -377,9 +377,6 @@ impl McpServer {
             // A no-op without `REMIND_ME_SYNC_SECRET` — accepting another
             // node's push/pull is off by default exactly like the webhook.
             sync_peer: SyncPeer::from_env(Arc::clone(&db)),
-            // `None` unless node id, hub URL, and secret are all configured —
-            // matching the reference's own `SYNC_ENABLED` gate exactly.
-            sync_worker: SyncWorker::from_env(Arc::clone(&db)),
             db,
             wiki,
         }
@@ -1800,27 +1797,26 @@ impl McpServer {
                     }
                     "remind_me_server_status" => match status::server_status(&conn) {
                         Ok(report) => {
-                            // The webhook's/sync peer's/sync worker's state
-                            // lives on these structs, not on the connection,
-                            // so they are merged in here rather than
-                            // gathered by `server_status`.
+                            // The webhook's/sync peer's state lives on these
+                            // structs, not on the connection, so they are
+                            // merged in here rather than gathered by
+                            // `server_status`. The sync worker's state does
+                            // not live on `self` at all -- unlike the webhook
+                            // and sync peer, it is not something this struct
+                            // owns (see the `McpServer` field doc), so its
+                            // status is read the same way
+                            // `remind_me_watch_status` already reads the
+                            // watcher's: a process-global "whichever one is
+                            // actually running" lookup, not an instance field.
                             let mut report = serde_json::to_value(&report).unwrap_or(json!({}));
                             report["webhook"] =
                                 serde_json::to_value(self.webhook.status()).unwrap_or(json!({}));
                             report["sync_peer"] =
                                 serde_json::to_value(self.sync_peer.status()).unwrap_or(json!({}));
                             report["sync"] = serde_json::to_value(
-                                self.sync_worker
-                                    .as_ref()
-                                    // `status_against` rather than `status`:
-                                    // a failure this process saw may already
-                                    // have been retried successfully by a
-                                    // sibling process sharing this database,
-                                    // and only the shared watermarks can say.
-                                    .map(|w| w.status_against(&conn))
-                                    .unwrap_or_else(
-                                        remind_me_core::sync::sync_worker_disabled_status,
-                                    ),
+                                remind_me_core::sync::sync_live_status(&conn).unwrap_or_else(
+                                    remind_me_core::sync::sync_worker_disabled_status,
+                                ),
                             )
                             .unwrap_or(json!({}));
                             // The remote MCP connector (FT-05, #85) has no
