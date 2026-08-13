@@ -119,7 +119,7 @@ not left as one oversized issue.
 | `dbs schedule` (cron/systemd snippets) | fn | spec | both | `cli.py` | — | no | S | Done (#74) — Linux branch ports the reference's cron+systemd snippets exactly; Windows branch generates a `schtasks` command, no reference equivalent |
 | `dbs serve` flag wiring | fn | spec | both | `cli.py` | — | no | S | Done (#75) — flags parse and validate for real; the actual server is still the Web tier row below |
 | `dbs capture` (headless login capture) | fn | spec | both | `cli.py`, `web/setup.py` | — | no | L | Done (#76) — target resolution + default out-path per capture kind implemented; the actual browser-automation subprocess still depends on the strategy decision (see Connectors) |
-| `dbs research` subcommands | fn | spec | both | `cli.py`, `research/*` | — | no | L | Depends on NotebookLM client existing in Rust — see Research row |
+| `dbs research` subcommands | fn | spec | both | `cli.py`, `research/*` | — | no | L | Done (#77) — flag surface + `youtube-backup`'s real video selection against the backup DB implemented; the NotebookLM synthesis step itself still depends on the NotebookLM client — see Research row |
 | `dbs version` | fn | spec | both | `cli.py` | — | no | S | |
 
 ## Web tier (`[web]` extra)

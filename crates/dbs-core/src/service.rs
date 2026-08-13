@@ -1120,6 +1120,65 @@ impl<'a> BackupService<'a> {
         Ok((rc, spec))
     }
 
+    /// Selects candidate YouTube videos from the backup database for
+    /// `dbs research youtube-backup`, mirroring the reference's
+    /// `research/from_backup.py::videos_from_rows`: queries already
+    /// backed-up items of kind `"video"` (optionally restricted to
+    /// `sources` by name), keeps only rows from `youtube`-type sources
+    /// with a parseable id in `raw`, optionally filters by
+    /// `raw.list_label` (`lists`, e.g. `watch-later`/`liked`/
+    /// `playlist:Music`), collapses the same video saved under
+    /// multiple lists to one row (first-seen-wins), then truncates to
+    /// `limit`.
+    ///
+    /// Returns full [`ItemRow`]s rather than a narrower video model —
+    /// the NotebookLM synthesis step that would need one doesn't exist
+    /// in this port yet (see gap-analysis.md's Research subsystem
+    /// row).
+    pub fn select_youtube_backup_videos(
+        &self,
+        sources: Option<&[String]>,
+        lists: Option<&[String]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ItemRow>, DbsError> {
+        let query = ExportQuery {
+            sources: sources.map(|s| s.to_vec()),
+            item_types: Some(vec!["video".to_string()]),
+            ..Default::default()
+        };
+        let rows = self.storage.iter_items(&query)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for row in rows {
+            if row.get("type").and_then(Value::as_str) != Some("youtube") {
+                continue;
+            }
+            let Some(raw) = row.get("raw").and_then(Value::as_object) else {
+                continue;
+            };
+            let vid = raw.get("id").and_then(Value::as_str).unwrap_or("").trim();
+            if vid.is_empty() {
+                continue;
+            }
+            if let Some(lists) = lists {
+                let list_label = raw.get("list_label").and_then(Value::as_str);
+                if !list_label.is_some_and(|l| lists.iter().any(|x| x == l)) {
+                    continue;
+                }
+            }
+            if !seen.insert(vid.to_string()) {
+                continue;
+            }
+            out.push(row);
+            if let Some(limit) = limit {
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Validates `name`/`type_` (name not already configured, `type_`
     /// resolvable in the registry) and, if `self.config.source_path` is
     /// set, appends a `[sources.NAME]` block to that file. Mirrors the
@@ -3843,6 +3902,197 @@ mod tests {
 
         let err = service.resolve_capture_target("raindrop").unwrap_err();
         assert!(err.to_string().contains("no interactive auth capture"));
+    }
+
+    fn seed_video_item(
+        storage: &mut crate::storage::sqlite_storage::SqliteStorage,
+        source: &str,
+        source_type: &str,
+        external_id: &str,
+        video_id: &str,
+        list_label: Option<&str>,
+    ) {
+        let existing = storage
+            .upsert_source(source, source_type, source_type, "{}", 1)
+            .unwrap();
+        let run_id = storage
+            .begin_run(existing.id, source_type, "full", None)
+            .unwrap();
+        let mut raw = serde_json::Map::new();
+        raw.insert("id".to_string(), Value::from(video_id));
+        if let Some(label) = list_label {
+            raw.insert("list_label".to_string(), Value::from(label));
+        }
+        let item = PreparedItem {
+            external_id: external_id.to_string(),
+            item_kind: "video".to_string(),
+            title: Some(format!("video {video_id}")),
+            url: Some(format!("https://www.youtube.com/watch?v={video_id}")),
+            body: None,
+            tags: vec![],
+            item_created_at: Some(iso_z(Utc::now())),
+            item_updated_at: Some(iso_z(Utc::now())),
+            content_hash: format!("hash-{external_id}"),
+            raw_json: serde_json::to_string(&Value::Object(raw)).unwrap(),
+            deleted: false,
+            media: Vec::new(),
+        };
+        storage
+            .upsert_items(existing.id, run_id, &[item], false, 0)
+            .unwrap();
+        storage
+            .finish_run(
+                run_id,
+                "success",
+                &BatchResult::default(),
+                1,
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+    }
+
+    fn open_test_storage() -> crate::storage::sqlite_storage::SqliteStorage {
+        let mut storage = crate::storage::sqlite_storage::SqliteStorage::open(":memory:").unwrap();
+        storage.migrate().unwrap();
+        storage
+    }
+
+    #[test]
+    fn select_youtube_backup_videos_keeps_only_youtube_type_sources() {
+        let mut storage = open_test_storage();
+        seed_video_item(&mut storage, "yt", "youtube", "yt:v1", "v1", None);
+        seed_video_item(&mut storage, "rd", "raindrop", "rd:v2", "v2", None);
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let videos = service
+            .select_youtube_backup_videos(None, None, None)
+            .unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0]["raw"]["id"], Value::from("v1"));
+    }
+
+    #[test]
+    fn select_youtube_backup_videos_dedups_the_same_video_across_lists() {
+        let mut storage = open_test_storage();
+        seed_video_item(
+            &mut storage,
+            "yt",
+            "youtube",
+            "yt:watch-later:v1",
+            "v1",
+            Some("watch-later"),
+        );
+        seed_video_item(
+            &mut storage,
+            "yt",
+            "youtube",
+            "yt:liked:v1",
+            "v1",
+            Some("liked"),
+        );
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let videos = service
+            .select_youtube_backup_videos(None, None, None)
+            .unwrap();
+        assert_eq!(videos.len(), 1);
+    }
+
+    #[test]
+    fn select_youtube_backup_videos_filters_by_list_label() {
+        let mut storage = open_test_storage();
+        seed_video_item(
+            &mut storage,
+            "yt",
+            "youtube",
+            "yt:watch-later:v1",
+            "v1",
+            Some("watch-later"),
+        );
+        seed_video_item(
+            &mut storage,
+            "yt",
+            "youtube",
+            "yt:liked:v2",
+            "v2",
+            Some("liked"),
+        );
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let lists = vec!["liked".to_string()];
+        let videos = service
+            .select_youtube_backup_videos(None, Some(&lists), None)
+            .unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0]["raw"]["id"], Value::from("v2"));
+    }
+
+    #[test]
+    fn select_youtube_backup_videos_truncates_to_limit() {
+        let mut storage = open_test_storage();
+        for i in 0..5 {
+            seed_video_item(
+                &mut storage,
+                "yt",
+                "youtube",
+                &format!("yt:v{i}"),
+                &format!("v{i}"),
+                None,
+            );
+        }
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let videos = service
+            .select_youtube_backup_videos(None, None, Some(2))
+            .unwrap();
+        assert_eq!(videos.len(), 2);
+    }
+
+    #[test]
+    fn select_youtube_backup_videos_restricts_to_the_given_source_names() {
+        let mut storage = open_test_storage();
+        seed_video_item(&mut storage, "a", "youtube", "a:v1", "v1", None);
+        seed_video_item(&mut storage, "b", "youtube", "b:v2", "v2", None);
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let sources = vec!["b".to_string()];
+        let videos = service
+            .select_youtube_backup_videos(Some(&sources), None, None)
+            .unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0]["raw"]["id"], Value::from("v2"));
+    }
+
+    #[test]
+    fn select_youtube_backup_videos_with_no_matches_returns_empty() {
+        let mut storage = open_test_storage();
+        seed_video_item(&mut storage, "rd", "raindrop", "rd:v1", "v1", None);
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let videos = service
+            .select_youtube_backup_videos(None, None, None)
+            .unwrap();
+        assert!(videos.is_empty());
     }
 
     #[test]

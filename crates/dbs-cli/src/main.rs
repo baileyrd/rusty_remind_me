@@ -387,11 +387,77 @@ enum ConnectorsCommand {
 
 #[derive(Subcommand)]
 enum ResearchCommand {
-    /// Ad-hoc YouTube research (not a backup source).
-    Youtube,
-    /// Back up ad-hoc YouTube research results.
+    /// Search YouTube, feed videos into a NotebookLM notebook, write a
+    /// markdown research report.
+    Youtube {
+        /// Research topic, e.g. "claude code skills".
+        topic: String,
+        /// Search query variant (repeatable). Default: one query derived
+        /// from TOPIC.
+        #[arg(long, short = 'q')]
+        query: Vec<String>,
+        /// Results to fetch per search query.
+        #[arg(long, default_value_t = 10)]
+        per_query_count: u32,
+        /// Final video count after dedup/rank.
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        /// Recency filter in months; 0 disables it.
+        #[arg(long, default_value_t = 6)]
+        months: u32,
+        /// Repeatable; replaces the default 5-question analysis set.
+        #[arg(long)]
+        question: Vec<String>,
+        /// Also generate a NotebookLM infographic.
+        #[arg(long)]
+        infographic: bool,
+        #[arg(long, default_value = "landscape")]
+        infographic_orientation: String,
+        /// Output markdown path (default: ./<slug>.md).
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        notebook_name: Option<String>,
+        /// NotebookLM storageState JSON (default: the web UI's captured
+        /// login, else `notebooklm login`'s own file).
+        #[arg(long)]
+        auth_state: Option<PathBuf>,
+    },
+    /// Send already backed-up YouTube videos through NotebookLM and write
+    /// a markdown research report.
     #[command(name = "youtube-backup")]
-    YoutubeBackup,
+    YoutubeBackup {
+        /// Research topic, e.g. "claude code skills".
+        topic: String,
+        /// Configured YouTube source name (repeatable). Default: every
+        /// youtube source.
+        #[arg(long, short = 's')]
+        source: Vec<String>,
+        /// Only videos from this list (watch-later, liked,
+        /// playlist:<title>). Repeatable.
+        #[arg(long, short = 'l')]
+        list: Vec<String>,
+        /// Max videos to send to NotebookLM.
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        /// Repeatable; replaces the default 5-question analysis set.
+        #[arg(long)]
+        question: Vec<String>,
+        /// Also generate a NotebookLM infographic.
+        #[arg(long)]
+        infographic: bool,
+        #[arg(long, default_value = "landscape")]
+        infographic_orientation: String,
+        /// Output markdown path (default: ./<slug>.md).
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        notebook_name: Option<String>,
+        /// NotebookLM storageState JSON (default: the web UI's captured
+        /// login, else `notebooklm login`'s own file).
+        #[arg(long)]
+        auth_state: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -531,6 +597,59 @@ fn main() {
             no_schedule: _,
         } => cmd_serve(host, port, allow_setup && !no_setup, token, schedule),
         Command::Capture { target, out } => cmd_capture(&cli.config, &target, out),
+        Command::Research(sub) => match sub {
+            ResearchCommand::Youtube {
+                topic,
+                query,
+                per_query_count,
+                count,
+                months,
+                question,
+                infographic,
+                infographic_orientation,
+                out,
+                notebook_name,
+                auth_state,
+            } => cmd_research_youtube(YoutubeResearchArgs {
+                topic,
+                query,
+                per_query_count,
+                count,
+                months,
+                question,
+                infographic,
+                infographic_orientation,
+                out,
+                notebook_name,
+                auth_state,
+            }),
+            ResearchCommand::YoutubeBackup {
+                topic,
+                source,
+                list,
+                count,
+                question,
+                infographic,
+                infographic_orientation,
+                out,
+                notebook_name,
+                auth_state,
+            } => cmd_research_youtube_backup(
+                &cli.config,
+                YoutubeBackupResearchArgs {
+                    topic,
+                    source,
+                    list,
+                    count,
+                    question,
+                    infographic,
+                    infographic_orientation,
+                    out,
+                    notebook_name,
+                    auth_state,
+                },
+            ),
+        },
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -2321,6 +2440,198 @@ fn cmd_capture(config_path: &Path, target: &str, out: Option<PathBuf>) -> i32 {
         spec.kind,
         out_path.display()
     );
+    CONFIG_ERROR_EXIT_CODE
+}
+
+/// Mirrors the reference's `_slugify`: lowercase, runs of non-`[a-z0-9]`
+/// collapse to a single `-`, leading/trailing `-` trimmed; `"research"`
+/// if that leaves nothing.
+fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in text.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "research".to_string()
+    } else {
+        slug
+    }
+}
+
+struct YoutubeResearchArgs {
+    topic: String,
+    query: Vec<String>,
+    per_query_count: u32,
+    count: u32,
+    months: u32,
+    question: Vec<String>,
+    infographic: bool,
+    infographic_orientation: String,
+    out: Option<PathBuf>,
+    notebook_name: Option<String>,
+    auth_state: Option<PathBuf>,
+}
+
+/// Mirrors the reference's `research youtube` command's flag surface
+/// and its default output path (`./<slug>.md`). The pipeline itself —
+/// a live YouTube search feeding a NotebookLM notebook — isn't
+/// implemented in this port yet: it depends on the research subsystem
+/// (gap-analysis.md's Research subsystem row, not yet its own issue)
+/// and the NotebookLM integration strategy (gap-analysis.md's
+/// Decisions section item 4: shell out to `nlm`/`notebooklm-mcp` as a
+/// subprocess or MCP client). So once flags parse, this reports what
+/// it would do instead of pretending to run a real search.
+fn cmd_research_youtube(args: YoutubeResearchArgs) -> i32 {
+    let slug = slugify(&args.topic);
+    let out_path = args
+        .out
+        .unwrap_or_else(|| PathBuf::from(format!("{slug}.md")));
+    let queries = if args.query.is_empty() {
+        vec![args.topic.clone()]
+    } else {
+        args.query
+    };
+
+    eprintln!(
+        "dbs research youtube: the research pipeline isn't implemented in this port yet (see \
+         gap-analysis.md's Research subsystem row) \u{2014} would search {:?} ({} results/query, \
+         {} final, {}-month recency) and write a report to {}",
+        queries,
+        args.per_query_count,
+        args.count,
+        args.months,
+        out_path.display()
+    );
+    if !args.question.is_empty() {
+        eprintln!(
+            "  ({} custom analysis question(s) given)",
+            args.question.len()
+        );
+    }
+    if args.infographic {
+        eprintln!(
+            "  (would also generate a {} infographic)",
+            args.infographic_orientation
+        );
+    }
+    if let Some(name) = &args.notebook_name {
+        eprintln!("  (notebook name: {name})");
+    }
+    if let Some(path) = &args.auth_state {
+        eprintln!("  (auth state: {})", path.display());
+    }
+    CONFIG_ERROR_EXIT_CODE
+}
+
+struct YoutubeBackupResearchArgs {
+    topic: String,
+    source: Vec<String>,
+    list: Vec<String>,
+    count: u32,
+    question: Vec<String>,
+    infographic: bool,
+    infographic_orientation: String,
+    out: Option<PathBuf>,
+    notebook_name: Option<String>,
+    auth_state: Option<PathBuf>,
+}
+
+/// Mirrors the reference's `research youtube-backup` command: unlike
+/// `research youtube`, video *selection* is real — it queries already
+/// backed-up items via [`BackupService::select_youtube_backup_videos`]
+/// and reports the reference's own "no videos matched" error when
+/// nothing does. Sending the selected videos through NotebookLM is the
+/// same not-yet-implemented pipeline step as `research youtube` (see
+/// that function's doc-comment) — reported once selection succeeds.
+fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchArgs) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = ConnectorRegistry::from_resolved([]);
+    let runner = UnimplementedRunner;
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let sources = if args.source.is_empty() {
+        None
+    } else {
+        Some(args.source.as_slice())
+    };
+    let lists = if args.list.is_empty() {
+        None
+    } else {
+        Some(args.list.as_slice())
+    };
+    let videos =
+        match service.select_youtube_backup_videos(sources, lists, Some(args.count as usize)) {
+            Ok(v) => v,
+            Err(e) => return report_config_error(&e),
+        };
+    if videos.is_empty() {
+        let scope = if args.source.is_empty() {
+            "any youtube source".to_string()
+        } else {
+            format!("source(s) {}", args.source.join(", "))
+        };
+        let list_note = if args.list.is_empty() {
+            String::new()
+        } else {
+            format!(", list(s) {}", args.list.join(", "))
+        };
+        eprintln!(
+            "No backed-up YouTube videos matched ({scope}{list_note}). Run `dbs backup` on a \
+             youtube source first."
+        );
+        return CONFIG_ERROR_EXIT_CODE;
+    }
+
+    let slug = slugify(&args.topic);
+    let out_path = args
+        .out
+        .unwrap_or_else(|| PathBuf::from(format!("{slug}.md")));
+
+    eprintln!(
+        "dbs research youtube-backup: the research pipeline isn't implemented in this port yet \
+         (see gap-analysis.md's Research subsystem row) \u{2014} {} backed-up video(s) selected, \
+         would write a report to {}",
+        videos.len(),
+        out_path.display()
+    );
+    if !args.question.is_empty() {
+        eprintln!(
+            "  ({} custom analysis question(s) given)",
+            args.question.len()
+        );
+    }
+    if args.infographic {
+        eprintln!(
+            "  (would also generate a {} infographic)",
+            args.infographic_orientation
+        );
+    }
+    if let Some(name) = &args.notebook_name {
+        eprintln!("  (notebook name: {name})");
+    }
+    if let Some(path) = &args.auth_state {
+        eprintln!("  (auth state: {})", path.display());
+    }
     CONFIG_ERROR_EXIT_CODE
 }
 
