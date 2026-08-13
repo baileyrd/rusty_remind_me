@@ -48,7 +48,7 @@ not left as one oversized issue.
 | Managed HTTP client (backoff, `Retry-After`, rate limit) | fn | spec | both | `src/dbs/core/http.py` | rusty_http / rusty_request (unverified) | no | M | |
 | Timeutil helpers | fn | spec | both | `src/dbs/core/timeutil.py` | — | no | S | |
 | `CORE_API_VERSION` gating | fn | spec | both | `src/dbs/core/versioning.py` | — | no | S | |
-| Cooperative cancellation (Ctrl+C → finish in-flight, no new starts) | fn | spec | both | `src/dbs/core/cancel.py` | — | no | S | |
+| Cooperative cancellation (Ctrl+C → finish in-flight, no new starts) | fn | spec | both | `src/dbs/core/cancel.py` | — | no | S | Done (#10, #67) — `CancelToken` primitive landed in #10; `backup_all`/CLI wiring landed in #67 |
 | `netns` helper | fn | spec | linux | `src/dbs/core/netns.py` | — | no | S | Confirm Linux-only scope when picked up — name suggests network-namespace, may not need a Windows counterpart |
 | `BackupService` (UI-agnostic façade: `backup_source`/`backup_all`, connector instantiation via the registry, VPN guard checks, status/history rendering, once-per-call crash-recovery reap threading) | type+fn | spec | both | `src/dbs/core/service.py` | — | no | L | Done (#21 reap-once slice, #46 the rest) |
 | Engine — `run_source` orchestrator / connector run-stream bridge (drives one connector's actual fetch: writes a `RunContext`, reads the `FetchEvent` stream back over ADR-0001's subprocess protocol — steps 2-3, not yet implemented; #45 only did step 1/4 handshake+discovery) | fn | spec | both | `src/dbs/core/engine.py` (`Engine.run_source`) | — | no | M | **Discovered while implementing #46** — `BackupService.backup_source` calls `self.engine.run_source(rc, ctx, ...)` in the reference, and nothing in this port does that job yet. #46 introduced a `ConnectorRunner` trait as the seam (`UnimplementedRunner` is the production stand-in today) specifically so this row didn't have to block #46's own scope. Whoever picks this up implements a real `ConnectorRunner`: write the `RunContext` JSON line, read `FetchEvent` lines back, drive `engine::{prepare, commit_checkpoint, sweep_deletions}` per event, same as the reference's fetch loop. |
@@ -109,7 +109,7 @@ not left as one oversized issue.
 | `dbs backup` — single-source run | fn | spec | both | `cli.py` | — | no | M | Done (#64) — every source currently reports "connector not found" since no on-disk connector-candidate discovery exists yet (implicit connectors-cluster prerequisite) |
 | `dbs backup --all --only-due` scheduling gate | fn | spec | both | `cli.py` | — | no | S | Done (#65) |
 | `dbs backup --parallel N` worker pool | fn | spec | both | `cli.py` | — | no | L | Done (#66) — sync `std::thread::scope` pool, consistent with #22's `reqwest::blocking` choice |
-| `dbs backup` progress line + Ctrl+C handling | fn | spec | both | `cli.py` | — | no | S | |
+| `dbs backup` progress line + Ctrl+C handling | fn | spec | both | `cli.py` | — | no | S | Done (#67) — only `SourceStart`/`SourceDone` are emitted (no run/stream protocol yet for per-item progress) |
 | `dbs status` / `dbs history` | fn | spec | both | `cli.py` | — | no | S | |
 | `dbs items` / `dbs stats` (browse + FTS5 CLI) | fn | spec | both | `cli.py` | — | no | M | |
 | `dbs export*` / `dbs decrypt` CLI wiring | fn | spec | both | `cli.py` | — | no | M | |
