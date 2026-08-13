@@ -583,6 +583,18 @@ name = "dbs-connector-support"
 version = "0.1.0"
 
 [[package]]
+name = "dbs-connector-udemy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbs-connector-support",
+ "dbs-core",
+ "mockito",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "dbs-connector-vimeo"
 version = "0.1.0"
 dependencies = [
