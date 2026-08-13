@@ -8,6 +8,44 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `pinboard` connector (closes #87)
+**2026-08-13**
+
+- **New `dbs-connector-pinboard` crate** — backs up bookmarks via
+  Pinboard's API, token auth (`PINBOARD_TOKEN`, the `username:HEXTOKEN`
+  value from Settings → Password). Mirrors `dbs.connectors.pinboard`'s
+  cheapest-possible incremental strategy: Pinboard exposes a global
+  change signal, `posts/update`, returning the account's last-modified
+  timestamp. If it hasn't moved since the stored cursor, the run ends
+  after that one request — no listing, no hashing. When it has moved,
+  `posts/all?fromdt=<watermark minus overlap>` returns only the
+  added/updated posts (the idempotent upsert dedups the overlap).
+  Identity is Pinboard's own `hash` (an md5 of the URL, stable across
+  title/tag edits), so there are no volatile fields. Deletion detection
+  needs the full listing, so full/reconcile runs page `posts/all`
+  (already a single response — Pinboard doesn't paginate it) and yield
+  one `ReconcileMarker`.
+- **Extracted `posts_all_params` as a pure function** — whether a run
+  sends `fromdt` (and its value) is the one bit of real request-shaping
+  logic in this connector; pulling it out of `fetch()` makes "a full
+  run never sends `fromdt`, even with a stale watermark" a plain
+  `assert_eq!` against the function's return value instead of an HTTP
+  mock query-string match — `mockito`'s matcher uses the `regex` crate
+  under the hood, which can't express the negative assertion that
+  behavior needs.
+- **Not wired up:** same boundary as `raindrop` (#85) and `github`
+  (#86) — this struct isn't reachable from a real `dbs backup` run yet;
+  the plugin registry's run/stream bridge doesn't exist.
+- 12 new `dbs-connector-pinboard` tests against a `mockito` fixture
+  server plus direct unit tests of `posts_all_params`: missing-managed-
+  http/missing-token errors, an unchanged watermark short-circuiting to
+  zero requests and zero events, an incremental run sending the correct
+  `fromdt`, a full run ignoring a stale cursor and yielding a reconcile
+  marker (with title falling back to `href` when `description` is
+  empty), a hash-less post being skipped, both HTTP status
+  classifications (401 vs. other), and connector metadata matching the
+  reference.
+
 ## `github` connector (closes #86)
 **2026-08-13**
 
