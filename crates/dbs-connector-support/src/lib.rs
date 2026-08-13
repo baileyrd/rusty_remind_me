@@ -14,7 +14,18 @@
 //! library API, so this Python-library-specific helper has no Rust
 //! equivalent to write. `ext_for_mime` is deferred to whichever media/
 //! export issue actually needs it — out of scope for this one.
+//!
+//! `python_launch` (issue #99) is new infrastructure this crate's other
+//! modules don't have a direct source-file counterpart for: the
+//! reference's `_playwright.py` drives Playwright in-process, which has
+//! no Rust equivalent, so browser-automation connectors here instead
+//! shell out to a separate Python/Playwright script — this module is the
+//! generic launcher half of that split.
 
+pub mod python_launch;
 pub mod watchdog;
 
+pub use python_launch::{
+    find_python, run_python_script, run_python_script_using, PythonLaunchError,
+};
 pub use watchdog::{run_with_watchdog, WatchdogError, WatchdogTimeout};
