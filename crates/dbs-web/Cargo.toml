@@ -1,0 +1,15 @@
+[package]
+name = "dbs-web"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Web app skeleton for rusty_dbs, mirroring dbs.web.app in baileyrd/Daily-Backup-System"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.4", features = ["util"] }
