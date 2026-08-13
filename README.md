@@ -13,13 +13,142 @@
 - **ACT-R Memory Vitality Model**: Time-based exponential decay, write-time priors by category/source, and bridge protection (decay rate halved for frequently accessed memories).
 - **Forward-Compatible Model Context Protocol (MCP) Server**: Stdio JSON-RPC MCP server with dynamic protocol version negotiation (supporting `2024-11-05` through upcoming 2026 releases), resources, prompts, dynamic tool change notifications (`listChanged`), and tool execution.
 - **Automated Client Setup**: Built-in `configure` command & scripts for 1-click MCP setup across **Claude Desktop**, **Antigravity**, **Cursor**, and **Codex**.
-- **REST API Server**: Async HTTP daemon (`rusty_http` / `tokio`) exposing endpoints for health checks, memory storage, FTS5 retrieval, and stats.
+- **REST API Server**: Synchronous HTTP daemon hand-rolled on `std::net::TcpListener` (no framework, not even `tokio`) exposing endpoints for health checks, memory storage, FTS5 retrieval, and stats.
 - **Multi-Node Sync & Remote Connector**: Push/pull sync against a hub or discovered peers (static list or Tailscale), plus a Streamable HTTP remote MCP connector (secret-path/bearer or OAuth 2.1) for network-reachable clients like claude.ai.
 - **Knowledge Graph Entities**: Canonical entity deduplication, alias resolution, and relation traversal up to 3 hops.
 - **Markdown Wiki Synthesis**: Topic-based wiki page compilation, queryable topic search, and
   bulk import of Markdown directories (`wiki-import`) — the ingestion path for
   [`dbs export-wiki`](https://github.com/baileyrd/Daily-Backup-System).
 - **Rusty Mill Ecosystem**: Part of the `Rusty Mill` project family; no `rusty_*` crates are wired in as dependencies yet — current dependencies are ordinary crates.io crates (`serde`, `tokio`, `rusqlite`, `chrono`, `uuid`).
+
+---
+
+## Installation & Setup
+
+A full walkthrough from a clean clone to a working setup — build, connect a
+client (Claude Code plugin or any other MCP client), verify it, then
+optionally add multi-node sync and the other off-by-default features.
+
+### Prerequisites
+
+- **Rust 1.94+** with Cargo (`rust-version` in the workspace `Cargo.toml`).
+- Nothing else is required for the base install. Semantic search's `ollama`
+  backend and HyDE query expansion need a running
+  [Ollama](https://ollama.com) daemon — optional, see [Search
+  Quality](#search-quality-embeddings-reranking--query-expansion) below.
+
+### 1. Clone & build
+
+```bash
+git clone https://github.com/baileyrd/rusty_remind_me
+cd rusty_remind_me
+cargo build --release -p rusty-remind-me
+```
+
+This produces `target/release/rusty-remind-me`. Put it on `PATH` either by
+adding `target/release` to it, or by installing it directly:
+
+```bash
+cargo install --path crates/remind_me_cli
+```
+
+Verify it's reachable:
+
+```bash
+rusty-remind-me stats
+```
+
+A fresh install prints an empty store's stats rather than erroring — that's
+expected; the database (`~/.remind-me/memory.db` by default) is created on
+first use.
+
+### 2. Connect it to a client
+
+**Claude Code plugin** (recommended if you're using Claude Code): this repo
+ships its own single-plugin marketplace (`.claude-plugin/marketplace.json`,
+pointing at the plugin manifest described in [Claude Code
+Plugin](#claude-code-plugin) below), so no separate marketplace repo is
+needed —
+
+```bash
+claude plugin marketplace add baileyrd/rusty_remind_me
+claude plugin install rusty-remind-me@rusty-remind-me
+```
+
+`rusty-remind-me` must already be on `PATH` (step 1) — the plugin's
+`.mcp.json` runs it as a subprocess, it isn't bundled. Verify with
+`claude plugin list` (shows `enabled`) and `claude mcp list` (shows the
+`rusty-remind-me` server `Connected`); a fresh Claude Code session should
+then show recent memories injected by the `SessionStart` hook, and
+`/rusty-remind-me:remember`/`/rusty-remind-me:recall` should work as slash
+commands.
+
+**Any other MCP client** (Claude Desktop, Antigravity, Cursor, Codex, or a
+generic MCP-config-reading client): run the auto-configurator, which merges
+the `rusty-remind-me` MCP server entry into every client config it finds —
+
+```bash
+rusty-remind-me configure
+```
+
+See [Automated Client
+Setup](#automated-client-setup-claude-desktop-antigravity-cursor-codex)
+below for the PowerShell/Python equivalents and exactly which config files
+this touches. Restart the client afterward — a running MCP client does not
+pick up a new stdio server until it restarts.
+
+### 3. Verify end to end
+
+```bash
+rusty-remind-me add "Installed rusty_remind_me" --category general
+rusty-remind-me search "installed"
+```
+
+Through whichever client you connected in step 2, ask it to recall something
+you just added — that exercises the actual MCP tool path, not just the CLI.
+
+### 4. Optional: multi-node sync via a hub
+
+Everything above is a complete, fully-functional single-machine install —
+sync is entirely opt-in. To share memories across machines, stand up a hub
+once and point every node at it:
+
+```bash
+# On the hub machine — SQLite backend, no separate database server:
+crates/remind_me_hub/setup.sh --sqlite install
+# Prints the generated SYNC_SECRET every client below needs.
+
+# On each client machine:
+REMIND_ME_SYNC_SECRET=<printed secret> rusty-remind-me configure \
+    --node-id my-laptop --hub-url http://<hub-host>:8765
+```
+
+`crates/remind_me_hub/setup.sh install` (without `--sqlite`) instead brings
+up Postgres in a rootless Podman container, and `crates/remind_me_hub/client-setup.sh
+--node-id my-laptop --tunnel me@hub-host` automates the SSH-tunnel case.
+Docker Compose, Fly.io, and Railway deployments are under
+`crates/remind_me_hub/deploy/`. See [`crates/remind_me_hub/README.md`](crates/remind_me_hub/README.md)
+for the full reference (routes, security posture, backends) and [Multi-Node
+Sync, Hub & Remote Connector](#multi-node-sync-hub--remote-connector) below
+for every client-side environment variable this `configure` call sets.
+
+If you installed as a Claude Code plugin (step 2), see [Multi-node sync
+through the plugin](#multi-node-sync-through-the-plugin) — the short version
+is that ambient environment inheritance (shell export, or Claude Code
+`settings.json`'s `env` key) is the supported way to get these three
+variables into the plugin's MCP server process.
+
+### 5. Optional: everything else
+
+Each of these is independently off by default and documented in its own
+section — enable only what you need:
+
+| Want | See |
+| --- | --- |
+| Semantic/vector search, cross-encoder reranking, HyDE query expansion | [Search Quality](#search-quality-embeddings-reranking--query-expansion) |
+| A network-reachable MCP endpoint (e.g. for `claude.ai`'s custom connector) | [Remote MCP connector](#remote-mcp-connector-remind_me_remote-rusty-remind-me-remote) |
+| The REST API / dashboard | [REST API Endpoints](#rest-api-endpoints) — `rusty-remind-me api [port]` |
+| Sharing a database with the Python `remind_me` reference | [Substituting for the `remind_me` MCP server](#substituting-for-the-remind_me-mcp-server) |
 
 ---
 
