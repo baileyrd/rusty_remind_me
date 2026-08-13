@@ -105,7 +105,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| CLI skeleton + `dbs init` | fn | spec | both | `cli.py` | — | no | M | New dependency: CLI-parsing crate (`clap` or similar) |
+| CLI skeleton + `dbs init` | fn | spec | both | `cli.py` | — | no | M | Done (#63) — new `dbs-cli` binary crate; added the `clap` dependency named in this row |
 | `dbs backup` — single-source run | fn | spec | both | `cli.py` | — | no | M | |
 | `dbs backup --all --only-due` scheduling gate | fn | spec | both | `cli.py` | — | no | S | |
 | `dbs backup --parallel N` worker pool | fn | spec | both | `cli.py` | — | no | L | Needs an async-runtime/threading decision — split further at filing |

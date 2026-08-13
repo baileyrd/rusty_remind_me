@@ -1,1 +1,10 @@
 /target
+
+# `dbs init`-generated local scaffolding (manual dbs-cli testing/dev runs)
+/dbs.toml
+/dbs.sqlite3
+/.env.example
+/.env
+/crates/*/dbs.toml
+/crates/*/dbs.sqlite3
+/crates/*/.env.example

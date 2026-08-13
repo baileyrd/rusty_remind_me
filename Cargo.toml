@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dbs-core", "crates/dbs-connector-support"]
+members = ["crates/dbs-core", "crates/dbs-connector-support", "crates/dbs-cli"]
 
 [workspace.package]
 edition = "2021"
