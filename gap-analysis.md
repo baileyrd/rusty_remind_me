@@ -136,7 +136,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Research pipeline (YouTube search → NotebookLM synthesis → report) | fn | spec | both | `src/dbs/research/*` | — | no | L | Needs an authenticated NotebookLM client in Rust, which doesn't exist anywhere in the platform directory. Highest-risk row in this table — likely needs its own scoping conversation before issues are filed for it. |
+| Research pipeline (YouTube search → NotebookLM synthesis → report) | fn | spec | both | `src/dbs/research/*` | — | no | L | Done (#84) — new `dbs-research` crate: YouTube search (real, yt-dlp subprocess) + report rendering are fully real; NotebookLM sits behind a `NotebookLmClient` trait whose concrete `nlm`/`notebooklm-mcp` adapter (Decision 4) is deferred pending that tool's confirmed CLI surface. Not yet wired into `dbs-cli`'s `dbs research` (#77) stubs |
 
 ## Connectors (14 — each a natural one-issue unit; "template" per README's own A/B split)
 
