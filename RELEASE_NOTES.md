@@ -8,6 +8,52 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-support`/`dbs-connector-raindrop`: real subprocess binary (closes #161)
+**2026-08-13**
+
+- **New `dbs_connector_support::subprocess_main` module** — the
+  connector-side counterpart to `dbs-core::run_stream` (#157), which
+  only implemented the host side. `run_connector_main(connector: &mut
+  dyn Connector)` is meant to be a `dbs-connector-<type>` binary's
+  entire `main.rs`: it writes the handshake line (built entirely from
+  `Connector`'s own trait methods — no per-connector code needed),
+  then blocks reading one line from stdin. A discovery-only spawn
+  (`ConnectorRegistry::discover`, #45) never writes one and gets
+  killed after its handshake is read, so this returns cleanly on EOF;
+  a real run (`run_connector_subprocess`) writes a `WireRunContext`
+  right after spawn, and once that arrives this reconstructs an
+  in-process `RunContext` (building a `Secrets` accessor scoped to
+  exactly the connector's declared keys, and a real `ManagedHttpClient`
+  when `wants_managed_http()`) and drives `open`/`fetch`/`close`,
+  streaming the result back.
+- **Fixed a real protocol bug this surfaced:** `run_connector_subprocess`
+  (#157) never expected the handshake line a real connector always
+  writes first — its first read would try to parse the handshake JSON
+  as a `WireLine` and fail as a contract violation. Fixed by having it
+  read and discard exactly one line (the handshake — the caller already
+  has it from an earlier discovery call) before entering the
+  `WireLine` loop; `test_connector_fixture`'s `run` scenarios were
+  updated to emit a handshake line first too, so they keep exercising
+  the real shape.
+- **`dbs-connector-raindrop` gets a real `src/main.rs`** — the first of
+  the 14 built-in connectors to actually be a `dbs-connector-<type>`
+  binary, proving the pattern end to end. `DBS_RAINDROP_TEST_BASE_URL`
+  is a test-only env var override for pointing a real spawned binary at
+  a mock HTTP server instead of the live API.
+- 2 new integration tests (`dbs-connector-raindrop/tests/subprocess_binary_integration.rs`)
+  spawning the actual compiled binary: its handshake discovers cleanly
+  and matches the connector's real contract, and a full run against a
+  mock Raindrop API commits real items through the complete subprocess
+  boundary — discovery, run-context write, `FetchEvent` stream, and
+  storage commit, with nothing faked.
+- **Wiring up the remaining 13 connectors is intentionally out of
+  scope here** — mechanical repetition of the same `main.rs` shape now
+  that the pattern and shared helper exist, left as follow-up work.
+  `dbs-cli` still passes an always-empty `ConnectorRegistry::from_resolved([])`
+  (#160) — real candidate discovery isn't wired up yet either, so
+  `dbs backup` still can't reach a real connector end to end even with
+  this issue done.
+
 ## `dbs-core`: connector run-stream bridge (closes #157)
 **2026-08-13**
 

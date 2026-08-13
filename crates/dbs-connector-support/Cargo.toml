@@ -7,4 +7,6 @@ repository.workspace = true
 description = "Shared helpers for rusty_dbs connector implementations — not part of the dbs-core public contract, matching dbs.connectors._util in the reference"
 
 [dependencies]
+dbs-core = { path = "../dbs-core" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_json = "1"

@@ -218,19 +218,19 @@ pub fn run_connector_subprocess(
     }
 
     let stdout = child.stdout.take().expect("stdout was piped");
-    let reader = BufReader::new(stdout);
+    let mut reader = BufReader::new(stdout);
 
-    // `reader.lines()` below blocks the calling thread inside the read
-    // syscall — checking `cancel` between successfully-read lines (as a
-    // naive port of the reference's per-item poll would) can never fire
-    // while the connector has gone quiet (e.g. hung), which is exactly
-    // when cancellation matters most. So a cancelled run is detected by
-    // a background thread instead, which kills the child directly —
-    // that closes its stdout pipe, which is what actually unblocks the
-    // read. `child` moves into an `Arc<Mutex<_>>` only for this; `stdin`/
-    // `stdout` were already taken above, so the read loop and the killer
-    // thread never contend over anything but the kill/wait calls
-    // themselves.
+    // `reader.lines()`/`read_line()` below block the calling thread
+    // inside the read syscall — checking `cancel` between successfully-
+    // read lines (as a naive port of the reference's per-item poll
+    // would) can never fire while the connector has gone quiet (e.g.
+    // hung), which is exactly when cancellation matters most. So a
+    // cancelled run is detected by a background thread instead, which
+    // kills the child directly — that closes its stdout pipe, which is
+    // what actually unblocks the read. `child` moves into an
+    // `Arc<Mutex<_>>` only for this; `stdin`/`stdout` were already taken
+    // above, so the reads and the killer thread never contend over
+    // anything but the kill/wait calls themselves.
     let child = std::sync::Arc::new(std::sync::Mutex::new(child));
     let killer = cancel.map(|c| {
         let child = std::sync::Arc::clone(&child);
@@ -248,6 +248,34 @@ pub fn run_connector_subprocess(
         });
         (handle, stop)
     });
+
+    // Every connector spawn — discovery or a real run alike, per
+    // ADR-0001 — starts by writing its handshake line (step 1) before
+    // anything else. The caller already has that connector's handshake
+    // from an earlier discovery call (`connector.handshake`); this
+    // fresh spawn writes its own copy first regardless, so it has to be
+    // read and discarded here before the `WireLine` stream (steps 2-3)
+    // actually begins.
+    let mut handshake_line = String::new();
+    let handshake_read = reader.read_line(&mut handshake_line);
+    if !matches!(handshake_read, Ok(n) if n > 0) {
+        if let Some((handle, stop)) = killer {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = handle.join();
+        }
+        let error = match handshake_read {
+            Ok(_) => "connector subprocess exited before writing its handshake line".to_string(),
+            Err(e) => format!("failed to read connector handshake line: {e}"),
+        };
+        let mut child = child.lock().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(ConnectorRunOutcome {
+            status: RunStatus::Failed,
+            error: Some(error),
+            ..ConnectorRunOutcome::default()
+        });
+    }
 
     let mut buffer: Vec<PreparedItem> = Vec::new();
     let mut items_seen: u64 = 0;
