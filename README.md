@@ -443,14 +443,31 @@ rusty-remind-me stats
 
 ## REST API Endpoints
 
-When running `rusty-remind-me api [port]`, the HTTP server exposes the following endpoints:
+When running `rusty-remind-me api [port]`, the HTTP server exposes the routes
+below (`crates/remind_me_api/src/routes.rs`'s `ROUTES` table is the
+authoritative list — this table summarizes it, so check that file directly
+for anything not covered here, e.g. the dashboard/knowledge-graph/wiki
+surfaces):
 
-| Method | Endpoint | Description | Request Body | Response |
-| ------ | -------- | ----------- | ------------ | -------- |
-| `GET` | `/health` | Server health check | N/A | `{"status": "ok", "version": "0.1.0"}` |
-| `GET` | `/stats` | Memory count & statistics | N/A | `{"total_memories": 42}` |
-| `POST` | `/api/v1/memories` | Store a new memory | `MemoryAddInput` JSON | Created `Memory` JSON |
-| `POST` | `/api/v1/search` | Search memories | `MemorySearchInput` JSON | Array of `MemorySearchResult` JSON |
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| `GET` | `/health` | Server health check — `{"status": "ok", "version": "0.1.0"}` |
+| `GET` | `/api/stats` | Dashboard-level memory statistics |
+| `GET` | `/api/memories` | List memories |
+| `POST` | `/api/memories` | Store a new memory (`MemoryAddInput` JSON body) |
+| `GET` | `/api/memories/{memory_id}` | Fetch one memory by ID |
+| `PUT`, `PATCH` | `/api/memories/{memory_id}` | Update a memory |
+| `DELETE` | `/api/memories/{memory_id}` | Delete a memory |
+| `GET` | `/api/memories/search?q=...&limit=...` | Search memories — query params, not a POST body |
+| `POST` | `/api/memories/bulk/delete`, `/bulk/tag`, `/bulk/reclassify` | Bulk operations over a set of memory IDs |
+| `GET` | `/api/vitality` | Vitality report |
+| `GET` | `/api/versions` | Version history |
+| `GET` | `/api/analytics/trend` | Analytics trend data |
+| `POST` | `/api/import` | Import memories |
+| `GET` | `/api/export` | Export memories |
+| `GET` | `/api/entity`, `/api/entities`, `/api/entity/traverse` | Knowledge-graph entity endpoints |
+| `GET` | `/api/wiki`, `/api/wiki/search`, `/api/wiki/load`, `/api/wiki/status`, `/api/wiki/{slug}` | Markdown wiki endpoints |
+| `GET` | `/metrics`, `/manifest.json`, `/` | Metrics, PWA manifest, and the dashboard itself |
 
 ---
 
