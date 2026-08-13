@@ -8,6 +8,38 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `readwise` connector (closes #88)
+**2026-08-13**
+
+- **New `dbs-connector-readwise` crate** — backs up books/articles and
+  highlights via Readwise's v2 API, token auth (`READWISE_TOKEN`, sent
+  as `Authorization: Token <token>`). Mirrors
+  `dbs.connectors.readwise`: the cleanest delta of the connector set
+  so far — both `/books/` and `/highlights/` accept a real
+  `updated__gt=<ISO>` server-side filter, so incremental mode queries
+  a per-kind watermark directly (minus an overlap the idempotent
+  upsert dedups), unlike `github`'s stars (#86), which have no
+  server-side filter and rely on a client-side early-stop. Pagination
+  follows the server's own `next` URL from the standard
+  `{"count", "next", "results"}` shape rather than reconstructing page
+  numbers. A full/reconcile run enumerates both kinds and yields one
+  combined `ReconcileMarker`, withheld entirely if either kind is
+  disabled — same partial-enumeration-never-sweeps rule as `github`.
+- **Not wired up:** same boundary as `raindrop` (#85), `github` (#86),
+  and `pinboard` (#87) — this struct isn't reachable from a real
+  `dbs backup` run yet; the plugin registry's run/stream bridge
+  doesn't exist.
+- 12 new `dbs-connector-readwise` tests against a `mockito` fixture
+  server: missing-managed-http/missing-token errors, a full fetch
+  yielding both item kinds and a combined reconcile marker, a
+  reconcile run with one kind disabled withholding the marker, an
+  incremental run sending `updated__gt` with the overlap applied,
+  pagination following the server's `next` URL across pages, a
+  title/url fallback when a book has no title, a highlight title
+  truncating to 120 chars, a record with no id being skipped, both
+  HTTP status classifications (401 vs. other), and connector metadata
+  matching the reference.
+
 ## `pinboard` connector (closes #87)
 **2026-08-13**
 
