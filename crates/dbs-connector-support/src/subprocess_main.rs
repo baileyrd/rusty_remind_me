@@ -20,12 +20,16 @@
 //!    returns cleanly on EOF. A real run
 //!    ([`dbs_core::run_connector_subprocess`]) writes a
 //!    [`dbs_core::WireRunContext`] line right after spawn; once that
-//!    arrives, this reconstructs an in-process
-//!    [`dbs_core::RunContext`] from it and drives
+//!    arrives, this applies its `config` map to the connector via
+//!    [`dbs_core::Connector::configure`] (ADR-0002 — a no-op for a
+//!    connector that declared no override), reconstructs an in-process
+//!    [`dbs_core::RunContext`] from the rest of it, and drives
 //!    `connector.open`/`fetch`/`close`, streaming each event back as a
 //!    [`dbs_core::WireLine`] and finishing with exactly one
 //!    [`dbs_core::WireOutcome`] — precisely what
-//!    `run_connector_subprocess` reads.
+//!    `run_connector_subprocess` reads. A `configure` failure short-
+//!    circuits straight to a `WireOutcome::Error`, the same as a
+//!    failing `open` does.
 
 use std::cell::RefCell;
 use std::io::{BufRead, Write};
@@ -44,6 +48,11 @@ pub fn run_connector_main(connector: &mut dyn Connector) {
     let Some(wire_ctx) = read_wire_context() else {
         return;
     };
+
+    if let Err(e) = connector.configure(&wire_ctx.config) {
+        write_line(&WireLine::Done(error_outcome(&e)));
+        return;
+    }
 
     let ctx = build_run_context(connector, wire_ctx);
     run_and_stream(connector, &ctx);
@@ -209,6 +218,7 @@ mod tests {
             store_media: false,
             max_media_bytes: 0,
             download_dir: None,
+            config: std::collections::HashMap::new(),
         }
     }
 

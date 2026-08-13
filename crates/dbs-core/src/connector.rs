@@ -186,6 +186,24 @@ pub trait Connector {
         (true, String::new())
     }
 
+    /// Applies this source's `[sources.NAME]` config (every key not
+    /// reserved by `crate::config::SourceConfig`, e.g. `instance` for
+    /// `dbs-connector-mastodon` or `feeds` for `dbs-connector-podcast`)
+    /// to the connector's own fields, before `open`/`fetch`. Called once
+    /// a real run's context has been received (never during a
+    /// discovery-only spawn, which never sends one — see ADR-0002).
+    /// Default no-op: most connectors need nothing beyond secrets and
+    /// their own `Default` config. A connector that does need a value
+    /// should pull it out of `options` by name, type-check/coerce it,
+    /// and return `ConnectorError::Config` for a required-but-missing or
+    /// malformed key.
+    fn configure(
+        &mut self,
+        _options: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
     /// Optional: acquire sessions / validate auth eagerly. Default no-op.
     fn open(&mut self, _ctx: &RunContext) -> Result<(), ConnectorError> {
         Ok(())
@@ -279,7 +297,7 @@ mod tests {
 
     #[test]
     fn defaults_match_the_reference_class_level_defaults() {
-        let connector = FakeConnector {
+        let mut connector = FakeConnector {
             emitted_checkpoint: false,
         };
         assert_eq!(connector.core_api_version(), CORE_API_VERSION);
@@ -289,6 +307,11 @@ mod tests {
         assert!(!connector.wants_managed_http());
         assert!(connector.auth_capture().is_none());
         assert_eq!(connector.check_ready(), (true, String::new()));
+        // ADR-0002: a connector that declares no override inherits a
+        // no-op `configure` — a source's config map is simply ignored,
+        // never an error, regardless of what it contains.
+        let options = std::collections::HashMap::from([("anything".to_string(), json!(1))]);
+        assert!(connector.configure(&options).is_ok());
     }
 
     #[test]

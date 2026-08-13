@@ -13,12 +13,19 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use dbs_core::{
     run_connector_subprocess, ConnectorCandidate, ConnectorRegistry, Cursor, SqliteStorage,
     Storage, WireRunContext,
 };
+
+/// `DBS_PODCAST_TEST_FEED_URL` is process-global, and two tests in
+/// this file now set/clear it. Rust runs `#[test]` functions in
+/// parallel by default, so both tests take this lock for their full
+/// duration to serialize access instead.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_dbs-connector-podcast"))
@@ -74,6 +81,7 @@ const RSS_FEED: &str = r#"<?xml version="1.0"?>
 
 #[test]
 fn a_real_run_against_a_mock_feed_commits_items_through_the_full_subprocess_boundary() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let mut server = mockito::Server::new();
     let _m = server
         .mock("GET", "/feed.xml")
@@ -124,6 +132,7 @@ fn a_real_run_against_a_mock_feed_commits_items_through_the_full_subprocess_boun
         store_media: false,
         max_media_bytes: 0,
         download_dir: None,
+        config: HashMap::new(),
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
@@ -136,5 +145,72 @@ fn a_real_run_against_a_mock_feed_commits_items_through_the_full_subprocess_boun
     // The external id is `{feed-namespace}:{guid}` — the namespace is a
     // stable hash of the feed URL (see `feed_ns` in `src/lib.rs`), so
     // only the guid suffix is predictable here.
+    assert!(live.iter().any(|id| id.ends_with(":ep-1")), "{live:?}");
+}
+
+/// ADR-0002: proves the *real* per-source config path — `WireRunContext.config`
+/// → `Connector::configure` → `self.config.feeds` — works end to end,
+/// deliberately *without* touching `DBS_PODCAST_TEST_FEED_URL` (that env var
+/// only exists so a test can inject a feed at construction time; this test
+/// instead exercises the production path a real `dbs backup` run takes: the
+/// host reading a source's `[sources.NAME]` `feeds = [...]` config key and
+/// carrying it across the subprocess boundary). Without this, `main.rs`
+/// constructs `PodcastConfig::default()` (`feeds: []`), and the run would
+/// silently find nothing.
+#[test]
+fn a_real_run_gets_its_feeds_from_wire_config_with_no_test_env_var_set() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("GET", "/feed.xml")
+        .with_status(200)
+        .with_body(RSS_FEED)
+        .create();
+
+    // Deliberately not set — this is the point of the test.
+    std::env::remove_var("DBS_PODCAST_TEST_FEED_URL");
+
+    let mut registry = ConnectorRegistry::new();
+    {
+        let report = registry.discover(&[candidate()], &HashMap::new(), Duration::from_secs(5));
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+    }
+    let rc = registry.get("podcast").unwrap().clone();
+
+    let mut storage = SqliteStorage::open(":memory:").unwrap();
+    storage.migrate().unwrap();
+    let source = storage
+        .upsert_source("my-podcasts", "podcast", &rc.plugin_id, "{}", 1)
+        .unwrap();
+    let run_id = storage
+        .begin_run(source.id, &rc.plugin_id, "full", None)
+        .unwrap();
+
+    let wire_ctx = WireRunContext {
+        source_id: source.id,
+        source_name: "my-podcasts".to_string(),
+        cursor: Some(Cursor {
+            value: serde_json::json!(null),
+        }),
+        since: None,
+        secrets: HashMap::new(),
+        run_id,
+        mode: "full".to_string(),
+        full_refresh: true,
+        limit: None,
+        store_media: false,
+        max_media_bytes: 0,
+        download_dir: None,
+        config: HashMap::from([(
+            "feeds".to_string(),
+            serde_json::json!([format!("{}/feed.xml", server.url())]),
+        )]),
+    };
+
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(outcome.items_seen, 1);
+    let live = storage.live_external_ids(source.id, None).unwrap();
     assert!(live.iter().any(|id| id.ends_with(":ep-1")), "{live:?}");
 }

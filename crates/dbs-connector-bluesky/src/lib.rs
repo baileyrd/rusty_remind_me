@@ -251,6 +251,27 @@ impl Connector for BlueskyConnector {
         }
     }
 
+    /// Reads `identifier` (the handle or DID to authenticate as) from
+    /// this source's `[sources.NAME]` config (ADR-0002). Unlike
+    /// `instance`/`feeds` on the mastodon/podcast connectors, an empty
+    /// `identifier` doesn't block a run today (nothing validates it
+    /// before the `createSession` call), but a real backup still needs
+    /// the right one to authenticate as the right account.
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = options.get("identifier") {
+            let identifier = v.as_str().ok_or_else(|| {
+                ConnectorError::Config(format!(
+                    "sources.<name>.identifier must be a string, got {v}"
+                ))
+            })?;
+            self.config.identifier = identifier.to_string();
+        }
+        Ok(())
+    }
+
     fn fetch<'a>(
         &'a mut self,
         ctx: &'a RunContext,
@@ -407,6 +428,26 @@ mod tests {
         iter: Box<dyn Iterator<Item = Result<FetchEvent, ConnectorError>> + '_>,
     ) -> Vec<FetchEvent> {
         iter.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn configure_applies_a_string_identifier_from_options() {
+        let mut connector = BlueskyConnector::new(BlueskyConfig::default());
+        assert_eq!(connector.config.identifier, "");
+        let options = HashMap::from([(
+            "identifier".to_string(),
+            serde_json::json!("alice.bsky.social"),
+        )]);
+        connector.configure(&options).unwrap();
+        assert_eq!(connector.config.identifier, "alice.bsky.social");
+    }
+
+    #[test]
+    fn configure_rejects_a_non_string_identifier() {
+        let mut connector = BlueskyConnector::new(BlueskyConfig::default());
+        let options = HashMap::from([("identifier".to_string(), serde_json::json!(42))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 
     #[test]
