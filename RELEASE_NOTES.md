@@ -8,6 +8,45 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs backup --all --parallel N: worker pool (closes #66)
+**2026-08-13**
+
+- **Implemented:** `dbs backup --all --parallel N`, running the
+  work-list on a bounded thread pool instead of one source at a time.
+  Added `BackupAllOptions.parallel: Option<u32>` (`None` falls back to
+  the config's `parallel` key, itself defaulting to `1`) and a private
+  `BackupService::backup_all_parallel`.
+- **Sync-threadpool-vs-tokio decision (required by this issue):** this
+  crate already chose `reqwest::blocking` over `tokio` for the HTTP
+  client (#22) — the worker pool stays consistent with that and uses
+  plain `std::thread::scope`, no new dependency. Each worker gets its
+  own `Storage::spawn()` connection (SQLite's WAL mode + `busy_timeout`
+  arbitrate the single writer slot; the existing per-source lock table
+  still prevents double-running a source), pulling work off a shared
+  queue so a fast source's worker doesn't sit idle behind a slow one.
+  `Storage` gained a `Send` supertrait (a spawned connection is owned
+  by exactly one thread) and `ConnectorRunner` gained `Send + Sync`
+  (one runner is shared read-only across workers) to make this
+  possible; the `ScriptedRunner` test double moved from `RefCell` to
+  `Mutex` to satisfy the new bound.
+- When the storage backend can't provide `N` independent connections
+  (an in-memory database), `backup_all` falls back to the existing
+  sequential path rather than failing — same fallback contract as the
+  reference's `_backup_all_parallel` returning `None`.
+- A dry run, a single-source work-list, or `--parallel 1` all skip the
+  thread pool entirely and take the plain sequential path — nothing to
+  parallelize in the first two cases, and no behavioral difference in
+  the third.
+- 4 new `dbs-core` unit tests (2 with `FakeStorage` covering the
+  fallback and `N=1` cases, 2 with a real file-backed `SqliteStorage`
+  actually exercising concurrent workers — one all-succeed, one
+  isolating a failing source among successful ones under
+  `continue_on_error`) plus 3 new `dbs-cli` integration tests
+  confirming `--parallel` is wired through the CLI end to end.
+- The progress line + Ctrl+C handling this issue's acceptance
+  checklist references (`on_progress`/`CancelToken` in the reference)
+  remain out of scope — filed separately as #67.
+
 ## dbs backup --all --only-due: scheduling gate (closes #65)
 **2026-08-13**
 

@@ -162,8 +162,11 @@ impl Default for ExportQuery {
     }
 }
 
-/// Persistence contract for the engine/service.
-pub trait Storage {
+/// Persistence contract for the engine/service. `Send` so a
+/// `spawn()`ed connection can be handed to a `backup --all --parallel N`
+/// worker thread — never touched by more than one thread at a time, so
+/// `Sync` isn't required.
+pub trait Storage: Send {
     /// Applies any pending schema migrations. Idempotent.
     fn migrate(&mut self) -> Result<(), DbsError>;
 

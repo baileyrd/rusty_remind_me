@@ -40,9 +40,11 @@
 //! `finish_run` exactly once, translating a runner error into a `Failed`
 //! result instead.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
@@ -218,7 +220,10 @@ pub struct ConnectorRunOutcome {
 /// stands in for the reference's `Engine.run_source` until ADR-0001's
 /// run/stream protocol (steps 2-3) has an implementation. See the
 /// module doc-comment's scope note.
-pub trait ConnectorRunner {
+///
+/// `Send + Sync` so a single runner can be shared read-only across the
+/// worker threads `backup --all --parallel N` spawns.
+pub trait ConnectorRunner: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn run_connector(
         &self,
@@ -283,12 +288,10 @@ impl Default for BackupSourceOptions {
     }
 }
 
-/// Options for [`BackupService::backup_all`]. `--parallel N` and
-/// `--only-due` are separate filed issues — this always runs every
-/// enabled source sequentially, in name-sorted order (the reference
-/// preserves TOML declaration order via a Python dict; this crate's
-/// `Config::sources` is a `HashMap`, so sorted-by-name is the
-/// deterministic substitute).
+/// Options for [`BackupService::backup_all`], run in name-sorted order
+/// (the reference preserves TOML declaration order via a Python dict;
+/// this crate's `Config::sources` is a `HashMap`, so sorted-by-name is
+/// the deterministic substitute).
 #[derive(Debug, Clone)]
 pub struct BackupAllOptions {
     /// Skip a source whose `schedule` cadence hasn't elapsed since its
@@ -301,6 +304,12 @@ pub struct BackupAllOptions {
     pub force_reconcile: bool,
     pub dry_run: bool,
     pub limit: Option<u32>,
+    /// Worker-pool size for concurrent source backups. `None` falls
+    /// back to `Config::parallel`. A resolved value of `1` (or a
+    /// single-source work-list, or `dry_run`) runs the plain
+    /// sequential path — mirrors the reference's `parallel` param on
+    /// `backup_all`.
+    pub parallel: Option<u32>,
 }
 
 impl Default for BackupAllOptions {
@@ -312,6 +321,7 @@ impl Default for BackupAllOptions {
             force_reconcile: false,
             dry_run: false,
             limit: None,
+            parallel: None,
         }
     }
 }
@@ -506,10 +516,11 @@ impl<'a> BackupService<'a> {
         Ok(is_due(last_started, &schedule, now))
     }
 
-    /// Backs up every enabled source sequentially (see
-    /// [`BackupAllOptions`] for what's deferred to other issues).
-    /// Reaps once, up front — a per-source reap mid-batch would flip a
-    /// sibling's genuinely-running row once `--parallel N` lands.
+    /// Backs up every enabled source, in name-sorted order — sequentially,
+    /// or on a bounded worker pool when `--parallel N` resolves above 1
+    /// (see [`Self::backup_all_parallel`]). Reaps once, up front, while no
+    /// run of ours is live yet — a per-source reap mid-batch would flip a
+    /// sibling's genuinely-running row.
     pub fn backup_all(&mut self, opts: &BackupAllOptions) -> Result<Vec<RunResult>, DbsError> {
         self.storage.reap_interrupted_runs()?;
 
@@ -542,6 +553,21 @@ impl<'a> BackupService<'a> {
             reap: false,
         };
 
+        let requested_workers = opts.parallel.unwrap_or(self.config.parallel).max(1);
+        // A dry-run only resolves each source's chosen mode — no connector
+        // runs, so there is nothing to parallelize; keep it on the simple
+        // sequential path (which threads dry_run through to backup_source).
+        if requested_workers > 1 && names.len() > 1 && !opts.dry_run {
+            let workers = (requested_workers as usize).min(names.len());
+            if let Some(outcome) =
+                self.backup_all_parallel(&names, workers, &per_source, opts.continue_on_error)
+            {
+                return outcome;
+            }
+            // Storage can't provide worker connections (e.g. an in-memory
+            // database) — fall through to the sequential path below.
+        }
+
         let mut results = Vec::with_capacity(names.len());
         for name in &names {
             match self.backup_source(name, &per_source) {
@@ -555,6 +581,106 @@ impl<'a> BackupService<'a> {
             }
         }
         Ok(results)
+    }
+
+    /// Runs `names` on a bounded thread pool (`--parallel N`), one
+    /// [`BackupSourceOptions`] shared across all of them. Returns `None`
+    /// when the storage backend can't provide `workers` independent
+    /// connections (e.g. an in-memory database) — the caller falls back
+    /// to the sequential path.
+    ///
+    /// **Sync-threadpool decision (issue #66):** this crate already
+    /// chose `reqwest::blocking` over `tokio` for the HTTP client
+    /// (#22); a worker pool built on plain `std::thread::scope` keeps
+    /// that same synchronous model rather than pulling in an async
+    /// runtime (or `rayon`) for this one feature. Each worker thread
+    /// gets its own [`Storage::spawn`] connection — SQLite's WAL mode
+    /// plus `busy_timeout` arbitrate the single writer slot, and the
+    /// existing per-source lock table (`acquire_lock`) still prevents
+    /// double-running a source — so nothing but the read-only
+    /// `Config`/`ConnectorRegistry`/`ConnectorRunner` references cross
+    /// a thread boundary; `self.storage` (this call's own connection)
+    /// is never touched by a worker. Work is pulled from a shared
+    /// queue (rather than statically chunked) so a fast source doesn't
+    /// leave its worker idle while a slow one is still running
+    /// elsewhere. Per-source failures are isolated exactly as in the
+    /// sequential path: `continue_on_error` turns them into a `Failed`
+    /// [`RunResult`] instead of aborting the batch; when it's `false`,
+    /// the first error stops new work from being dequeued (sources
+    /// already in flight still finish) and is returned as `Err`.
+    fn backup_all_parallel(
+        &self,
+        names: &[String],
+        workers: usize,
+        per_source: &BackupSourceOptions,
+        continue_on_error: bool,
+    ) -> Option<Result<Vec<RunResult>, DbsError>> {
+        let mut worker_storages: Vec<Box<dyn Storage>> = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            match self.storage.spawn() {
+                Some(s) => worker_storages.push(s),
+                None => return None,
+            }
+        }
+
+        let config = self.config;
+        let registry = self.registry;
+        let runner = self.runner;
+        let queue: Mutex<VecDeque<(usize, String)>> =
+            Mutex::new(names.iter().cloned().enumerate().collect());
+        let results: Mutex<Vec<Option<RunResult>>> = Mutex::new(vec![None; names.len()]);
+        let first_error: Mutex<Option<DbsError>> = Mutex::new(None);
+        let stop = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            for mut storage in worker_storages {
+                let queue = &queue;
+                let results = &results;
+                let first_error = &first_error;
+                let stop = &stop;
+                scope.spawn(move || {
+                    loop {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let next = queue.lock().unwrap().pop_front();
+                        let (idx, name) = match next {
+                            Some(v) => v,
+                            None => break,
+                        };
+                        let mut svc =
+                            BackupService::new(storage.as_mut(), config, registry, runner);
+                        match svc.backup_source(&name, per_source) {
+                            Ok(r) => results.lock().unwrap()[idx] = Some(r),
+                            Err(e) => {
+                                if continue_on_error {
+                                    let now = Utc::now();
+                                    results.lock().unwrap()[idx] =
+                                        Some(RunResult::failed(&name, now, e.to_string()));
+                                } else {
+                                    stop.store(true, Ordering::Relaxed);
+                                    let mut first_error = first_error.lock().unwrap();
+                                    if first_error.is_none() {
+                                        *first_error = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    storage.close();
+                });
+            }
+        });
+
+        if let Some(e) = first_error.into_inner().unwrap() {
+            return Some(Err(e));
+        }
+        Some(Ok(results
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect()))
     }
 
     /// One [`SourceStatus`] per named source (every configured source if
@@ -1765,13 +1891,13 @@ mod tests {
     }
 
     struct ScriptedRunner {
-        result: std::cell::RefCell<Result<ConnectorRunOutcome, String>>,
+        result: std::sync::Mutex<Result<ConnectorRunOutcome, String>>,
     }
 
     impl ScriptedRunner {
         fn success(stats: BatchResult, items_seen: u64) -> Self {
             Self {
-                result: std::cell::RefCell::new(Ok(ConnectorRunOutcome {
+                result: std::sync::Mutex::new(Ok(ConnectorRunOutcome {
                     status: RunStatus::Success,
                     stats,
                     items_seen,
@@ -1783,7 +1909,7 @@ mod tests {
         }
         fn failing(msg: &str) -> Self {
             Self {
-                result: std::cell::RefCell::new(Err(msg.to_string())),
+                result: std::sync::Mutex::new(Err(msg.to_string())),
             }
         }
     }
@@ -1798,7 +1924,7 @@ mod tests {
             _cursor: Option<&Cursor>,
             _since: Option<DateTime<Utc>>,
         ) -> Result<ConnectorRunOutcome, DbsError> {
-            match &*self.result.borrow() {
+            match &*self.result.lock().unwrap() {
                 Ok(outcome) => Ok(outcome.clone()),
                 Err(msg) => Err(DbsError::Connector(ConnectorError::Transient(msg.clone()))),
             }
@@ -2075,6 +2201,126 @@ mod tests {
         };
         let results = service.backup_all(&opts).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn backup_all_parallel_falls_back_to_sequential_when_storage_cannot_spawn() {
+        // FakeStorage doesn't override `spawn` (defaults to `None`, like
+        // an in-memory SQLite database), so a `parallel` request above 1
+        // must still produce correct results via the sequential fallback.
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "raindrop"));
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let opts = BackupAllOptions {
+            parallel: Some(4),
+            ..BackupAllOptions::default()
+        };
+        let results = service.backup_all(&opts).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.status == RunStatus::Success));
+    }
+
+    #[test]
+    fn backup_all_parallel_of_one_is_equivalent_to_sequential() {
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        sources.insert("b".to_string(), test_source_config("b", "raindrop"));
+
+        let mut storage = FakeStorage::default();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let opts = BackupAllOptions {
+            parallel: Some(1),
+            ..BackupAllOptions::default()
+        };
+        let results = service.backup_all(&opts).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.status == RunStatus::Success));
+    }
+
+    fn parallel_test_db_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "dbs-core-backup-all-parallel-{label}-{}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn backup_all_parallel_runs_multiple_sources_concurrently() {
+        // A real, file-backed SqliteStorage — the only kind `spawn()`
+        // returns `Some` for — actually exercises the thread pool
+        // instead of the sequential fallback every other test here
+        // takes via FakeStorage.
+        let db_path = parallel_test_db_path("multi");
+        std::fs::remove_file(&db_path).ok();
+        let mut storage =
+            crate::storage::sqlite_storage::SqliteStorage::open(db_path.to_str().unwrap()).unwrap();
+        storage.migrate().unwrap();
+
+        let mut sources = HashMap::new();
+        for name in ["a", "b", "c", "d"] {
+            sources.insert(name.to_string(), test_source_config(name, "raindrop"));
+        }
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let opts = BackupAllOptions {
+            parallel: Some(4),
+            ..BackupAllOptions::default()
+        };
+        let results = service.backup_all(&opts).unwrap();
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(|r| r.status == RunStatus::Success));
+        let mut names: Vec<&str> = results.iter().map(|r| r.source.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a", "b", "c", "d"]);
+
+        storage.close();
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn backup_all_parallel_continue_on_error_isolates_one_sources_failure() {
+        let db_path = parallel_test_db_path("isolate-failure");
+        std::fs::remove_file(&db_path).ok();
+        let mut storage =
+            crate::storage::sqlite_storage::SqliteStorage::open(db_path.to_str().unwrap()).unwrap();
+        storage.migrate().unwrap();
+
+        let mut sources = HashMap::new();
+        sources.insert("a".to_string(), test_source_config("a", "raindrop"));
+        // "b" has no registered connector, so backup_source errors for it.
+        sources.insert("b".to_string(), test_source_config("b", "unregistered"));
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 1);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let opts = BackupAllOptions {
+            parallel: Some(2),
+            ..BackupAllOptions::default()
+        };
+        let results = service.backup_all(&opts).unwrap();
+        assert_eq!(results.len(), 2);
+        let b_result = results.iter().find(|r| r.source == "b").unwrap();
+        assert_eq!(b_result.status, RunStatus::Failed);
+        let a_result = results.iter().find(|r| r.source == "a").unwrap();
+        assert_eq!(a_result.status, RunStatus::Success);
+
+        storage.close();
+        std::fs::remove_file(&db_path).ok();
     }
 
     #[test]
