@@ -11,6 +11,7 @@ name = "dbs"
 path = "src/main.rs"
 
 [dependencies]
+chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 ctrlc = "3"
 dbs-core = { path = "../dbs-core" }

@@ -8,6 +8,44 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs items / dbs stats (closes #69)
+**2026-08-13**
+
+- **Implemented:** `dbs items` (browse/search/filter, or one item's
+  full detail by id) and `dbs stats` (aggregate item/media/revision
+  metrics), wired to three new thin `BackupService` delegations —
+  `browse_items`/`get_item`/`metrics` — over the existing
+  `Storage::browse_items`/`get_item`/`metrics`.
+- **Not gated on FTS5**, unlike this issue's original framing: the
+  filed gap assumed FTS5 search was still pending its own storage
+  issue, but `Storage::browse_items` already tries an FTS5 MATCH query
+  first (all-words, prefix match on the last token) and only falls
+  back to a plain `LIKE` scan when the SQLite build lacks the FTS5
+  module — so `dbs items --search` gets full search parity today, no
+  follow-up needed.
+- `dbs items [ID] [--source NAME]... [--type KIND]... [--search Q]
+  [--since DATE] [--until DATE] [--include-deleted] [-n LIMIT]
+  [--offset N] [--json]`: newest-first listing with a `1-50 of N (next
+  page: --offset 50)` footer, or (with `ID`) the reference's full item
+  detail view — source/kind/tags/timestamps, a truncated body preview,
+  the media list, and the raw payload. `--since`/`--until` accept
+  either a bare `YYYY-MM-DD` or full ISO-8601 (ported as
+  `parse_date_arg`, a CLI-local complement to `dbs_core::parse_iso`
+  for the date-only case the core parser doesn't handle).
+- `dbs stats [--json]`: total live/deleted item counts, revision
+  count, archived media count + size (`human_bytes`, e.g. `"3.4
+  KiB"`), then a per-source/per-kind breakdown table.
+- Updated `a_stub_subcommand_reports_not_yet_implemented` to use
+  `export` instead of `items`, now that `items`/`stats` are no longer
+  stubs.
+- 12 new `dbs-cli` integration tests using a real `SqliteStorage` to
+  seed genuine item rows via `upsert_items` (no connector-candidate
+  discovery exists yet, #85-100, so a real `dbs backup` run can't
+  produce this data itself): empty DB, populated DB with source/text
+  filters, pagination, the JSON envelope, item detail by id (found and
+  not-found), an invalid `--since` date, and `stats`'s empty vs.
+  populated output.
+
 ## dbs status / dbs history (closes #68)
 **2026-08-13**
 

@@ -946,6 +946,32 @@ impl<'a> BackupService<'a> {
         self.storage.recent_runs(source_id, limit)
     }
 
+    /// Paginated, filterable, searchable item listing — the CLI/web
+    /// counterpart of the Browse tab. Delegates to
+    /// [`Storage::browse_items`] (FTS5 when the backend has it, LIKE
+    /// otherwise — see [`crate::storage::sqlite_storage`]'s doc-comment).
+    pub fn browse_items(
+        &self,
+        query: &ExportQuery,
+        text: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<ItemRow>, u64), DbsError> {
+        self.storage.browse_items(query, text, limit, offset)
+    }
+
+    /// Full detail for one item (raw payload + its media list), by
+    /// internal id. Delegates to [`Storage::get_item`].
+    pub fn get_item(&self, item_id: i64) -> Result<Option<ItemRow>, DbsError> {
+        self.storage.get_item(item_id)
+    }
+
+    /// Aggregate item/media/revision counts — the CLI/web counterpart
+    /// of the metrics strip. Delegates to [`Storage::metrics`].
+    pub fn metrics(&self) -> Result<ItemRow, DbsError> {
+        self.storage.metrics()
+    }
+
     /// Replays an export (archive zip or raw-bearing ndjson) into the
     /// DB. Mirrors the reference's `BackupService.restore`.
     ///

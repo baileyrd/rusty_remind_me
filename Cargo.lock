@@ -403,6 +403,7 @@ dependencies = [
 name = "dbs-cli"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "ctrlc",
  "dbs-core",
