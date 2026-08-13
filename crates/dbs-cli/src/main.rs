@@ -282,7 +282,11 @@ enum Command {
     },
     /// Update the bundled yt-dlp build.
     #[command(name = "update-ytdlp")]
-    UpdateYtdlp,
+    UpdateYtdlp {
+        /// Print the command; run nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Run scheduled maintenance (VACUUM, revision pruning, ...).
     Maintain,
     /// Print a cron/systemd (or Task Scheduler) snippet for unattended runs.
@@ -477,6 +481,7 @@ fn main() {
             ConnectorsCommand::Describe { type_ } => cmd_connectors_describe(&cli.config, type_),
         },
         Command::Doctor { json_out } => cmd_doctor(&cli.config, json_out),
+        Command::UpdateYtdlp { dry_run } => cmd_update_ytdlp(dry_run),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -498,7 +503,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Restore => "restore",
         Command::Decrypt { .. } => "decrypt",
         Command::Doctor { .. } => "doctor",
-        Command::UpdateYtdlp => "update-ytdlp",
+        Command::UpdateYtdlp { .. } => "update-ytdlp",
         Command::Maintain => "maintain",
         Command::Schedule => "schedule",
         Command::Serve => "serve",
@@ -2071,6 +2076,51 @@ fn cmd_doctor(config_path: &Path, json_out: bool) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Finds a Python interpreter on `PATH` to run `pip` through — this
+/// binary has no `sys.executable` of its own (it isn't running inside
+/// a Python process), and yt-dlp is only ever invoked as a subprocess
+/// by the yt-dlp-dependent connectors/`dbs capture` (gap-analysis.md's
+/// Decisions section, item 3), never linked into this binary. Tries
+/// `python3` before `python`, matching most systems' convention of
+/// `python3` being the unambiguous name.
+fn find_python() -> Option<&'static str> {
+    ["python3", "python"].into_iter().find(|candidate| {
+        std::process::Command::new(candidate)
+            .arg("--version")
+            .output()
+            .is_ok()
+    })
+}
+
+/// Mirrors the reference's `update-ytdlp` command: `pip install
+/// --upgrade "yt-dlp[default]"` through whichever Python interpreter
+/// is on `PATH`.
+fn cmd_update_ytdlp(dry_run: bool) -> i32 {
+    let Some(python) = find_python() else {
+        eprintln!("no python3/python found on PATH \u{2014} needed to run pip");
+        return CONFIG_ERROR_EXIT_CODE;
+    };
+    let pip_args = ["-m", "pip", "install", "--upgrade", "yt-dlp[default]"];
+    println!("$ {python} {}", pip_args.join(" "));
+    if dry_run {
+        return 0;
+    }
+
+    match std::process::Command::new(python).args(pip_args).status() {
+        Ok(status) => {
+            let code = status.code().unwrap_or(1);
+            if code == 0 {
+                println!("yt-dlp upgraded. Restart any running `dbs serve` to pick it up.");
+            }
+            code
+        }
+        Err(e) => {
+            eprintln!("failed to run {python}: {e}");
+            CONFIG_ERROR_EXIT_CODE
+        }
     }
 }
 
