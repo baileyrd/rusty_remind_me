@@ -8,6 +8,50 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `reddit` connector (closes #96)
+**2026-08-13**
+
+- **New `dbs-connector-reddit` crate** — scaffolds the connector for
+  your saved Reddit posts/comments, but its acquisition step is
+  **honestly blocked**, not implemented: the reference walks
+  `saved.json` via a same-origin `fetch` evaluated *inside a real
+  Chromium page* on reddit.com, because Reddit's edge fingerprints
+  plain HTTP clients and 403s them even with valid cookies — only an
+  actual browser carries a genuine TLS/HTTP2 fingerprint. This port
+  has no Playwright launch helper yet (`dbs-web`'s own
+  `run_capture_job` already documents the identical gap, pointing at
+  the same issue #99), so `fetch()` performs every check that
+  *doesn't* need a browser — `session_dir_env` is declared correctly,
+  the `REDDIT_SESSION_DIR` secret is set, the session directory
+  actually exists on disk — and then returns a clear `Config` error
+  naming #99, instead of a full run.
+- **Everything that doesn't need a browser is implemented and tested
+  as pure functions**, ready for #99's future acquisition step to call
+  into directly: the raw Reddit listing → record mapping (`t3`
+  post/`t1` comment, self-post outbound-URL suppression, non-URL
+  thumbnail token filtering), the record → `BackupItem` mapping, and
+  the opportunistic outbound-link fetch (`archive_outbound_link`,
+  gated on `store_media` — a single plain HTTP hop with no session
+  cookies needed, unlike the primary walk).
+- Config, capabilities, `item_kinds`, `volatile_fields`
+  (`extracted_at`/`score`/`num_comments`, since vote counts tick on
+  every live thread), `export_profile` (group by subreddit/flair), and
+  `auth_capture` (`browser_session`, matching the reference's capture
+  metadata) are all ported in full.
+- **Not wired up:** same boundary as `raindrop` (#85) through `udemy`
+  (#95) for the registry run/stream bridge — and, separately, blocked
+  on issue #99 for acquisition specifically, as described above.
+- 17 new `dbs-connector-reddit` tests: the four `fetch()` validation
+  stages in order (undeclared `session_dir_env`, missing secret,
+  nonexistent session directory, and the final #99-blocked error with
+  an otherwise-valid config), `record_from_child` mapping both a post
+  and a comment, unknown listing kinds and missing fullnames being
+  skipped, a self post's outbound URL/thumbnail token being
+  suppressed, `abs_permalink`'s relative/absolute handling,
+  `to_item`'s post/comment mapping and its id-required rejection, the
+  outbound-link fetch firing only when `archive_outbound_link` and
+  `store_media` are both on, and `ext_for_mime`'s fallback.
+
 ## `udemy` connector (closes #95)
 **2026-08-13**
 
