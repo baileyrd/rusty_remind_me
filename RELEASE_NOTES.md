@@ -8,6 +8,41 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `spotify` connector (closes #91)
+**2026-08-13**
+
+- **New `dbs-connector-spotify` crate** — backs up liked songs and
+  playlist catalog metadata via the Web API. The one genuinely
+  OAuth-shaped auth flow in the connector set: access tokens live ~1
+  hour, so the durable secret is a refresh token
+  (`SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET`/
+  `SPOTIFY_REFRESH_TOKEN`), exchanged for a fresh access token via
+  `POST /api/token` (HTTP Basic client auth, `reqwest`'s
+  `basic_auth()` — no new `base64` dependency needed) at the start of
+  every run. Mirrors `dbs.connectors.spotify`: `/v1/me/tracks` returns
+  liked songs newest-first with an `added_at` per entry, so
+  incremental mode early-stops below the stored watermark (with
+  overlap) — `github`'s stars fast path (#86). Playlists are a small
+  catalog listed fully every run via offset pagination. `track` /
+  playlist `snapshot_id`/`images`/`tracks` are declared volatile
+  (popularity scores, rotating CDN image URLs, count wrappers churn
+  constantly) while the semantic projection (title/url/body) still
+  hashes meaningful changes. A full/reconcile run yields one combined
+  `ReconcileMarker` across both kinds, withheld if either is disabled.
+- **Not wired up:** same boundary as `raindrop` (#85), `github` (#86),
+  `pinboard` (#87), `readwise` (#88), `mastodon` (#89), and `bluesky`
+  (#90) — this struct isn't reachable from a real `dbs backup` run
+  yet; the plugin registry's run/stream bridge doesn't exist.
+- 11 new `dbs-connector-spotify` tests against a `mockito` fixture
+  server: missing-managed-http/missing-secrets errors, a rejected
+  token refresh classified as an auth error, a full fetch yielding
+  both item kinds and a combined reconcile marker, a reconcile run
+  with one kind disabled withholding the marker, incremental tracks
+  early-stopping past the watermark, a track with no catalog id
+  (local file) being skipped, a playlist with no id being skipped,
+  both HTTP status classifications (401 vs. other) on the API, and
+  connector metadata matching the reference.
+
 ## `bluesky` connector (closes #90)
 **2026-08-13**
 
