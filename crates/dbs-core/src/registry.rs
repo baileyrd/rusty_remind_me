@@ -92,6 +92,13 @@ pub struct Handshake {
     /// token/secret).
     #[serde(default)]
     pub auth_capture: Option<crate::capabilities::AuthCapture>,
+    /// Raw-field names to strip before content-hashing an item (issue
+    /// #157's run-stream bridge, which is the first consumer of this —
+    /// `engine::prepare`'s hashing already took `volatile_fields` as a
+    /// parameter since #17, but nothing populated it from a real
+    /// handshake until now). Empty for a connector that declares none.
+    #[serde(default)]
+    pub volatile_fields: Vec<String>,
     /// `pip install` package specs this connector needs before it can
     /// run (issue #83's in-UI dependency-install job) — empty when it
     /// has none beyond the base install.
@@ -442,6 +449,7 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
         };
@@ -464,6 +472,7 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
         };
@@ -486,6 +495,7 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
         };
@@ -512,6 +522,7 @@ mod tests {
             description: None,
             export_profile: None,
             auth_capture: None,
+            volatile_fields: Vec::new(),
             pip_requirements: Vec::new(),
             needs_playwright_browser: false,
         };
@@ -535,6 +546,7 @@ mod tests {
                 description: None,
                 export_profile: None,
                 auth_capture: None,
+                volatile_fields: Vec::new(),
                 pip_requirements: Vec::new(),
                 needs_playwright_browser: false,
             },

@@ -21,6 +21,7 @@ pub mod netns;
 pub mod notes_export;
 pub mod registry;
 pub mod restore;
+pub mod run_stream;
 pub mod secrets;
 pub mod service;
 pub mod storage;
@@ -65,8 +66,12 @@ pub use restore::{
     iter_export_rows, prepared_item_from_row, read_manifest, skipped_extras, verify_archive,
     ArchiveIntegrity,
 };
+pub use run_stream::{
+    run_connector_subprocess, SubprocessRunner, WireErrorKind, WireLine, WireOutcome,
+    WireRunContext,
+};
 pub use secrets::Secrets;
-pub use service::reap_once;
+pub use service::{reap_once, ConnectorRunOutcome, ConnectorRunner, UnimplementedRunner};
 pub use storage::sqlite::open_connection;
 pub use storage::sqlite_storage::SqliteStorage;
 pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};

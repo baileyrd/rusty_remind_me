@@ -468,6 +468,7 @@ mod tests {
                 description: None,
                 export_profile: None,
                 auth_capture: None,
+                volatile_fields: Vec::new(),
                 pip_requirements: pip_requirements.to_vec(),
                 needs_playwright_browser,
             },

@@ -250,9 +250,16 @@ pub struct ConnectorRunOutcome {
 }
 
 /// Drives one connector's fetch given a resolved run — the seam that
-/// stands in for the reference's `Engine.run_source` until ADR-0001's
-/// run/stream protocol (steps 2-3) has an implementation. See the
-/// module doc-comment's scope note.
+/// stands in for the reference's `Engine.run_source`. [`crate::run_stream::SubprocessRunner`]
+/// (issue #157) is the production implementation, driving ADR-0001's
+/// run/stream protocol (steps 2-3) over the connector subprocess;
+/// [`UnimplementedRunner`] is a stub for callers with no connector to
+/// actually run, and tests use a scripted fake.
+///
+/// Takes `storage` directly (rather than a runner-held reference)
+/// because a real implementation commits buffered items *during* the
+/// run, at each checkpoint — mirroring the reference's `Engine`, which
+/// holds its own `Storage` reference for exactly this reason.
 ///
 /// `Send + Sync` so a single runner can be shared read-only across the
 /// worker threads `backup --all --parallel N` spawns.
@@ -260,35 +267,44 @@ pub trait ConnectorRunner: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn run_connector(
         &self,
+        storage: &mut dyn Storage,
         connector: &RegisteredConnector,
         run_id: i64,
         source_id: i64,
+        source_name: &str,
         mode: &str,
         cursor: Option<&Cursor>,
         since: Option<DateTime<Utc>>,
+        limit: Option<u32>,
+        cancel: Option<&CancelToken>,
     ) -> Result<ConnectorRunOutcome, DbsError>;
 }
 
-/// Production stand-in for [`ConnectorRunner`] until the connector
-/// run/stream bridge exists — every call fails clearly (a `Failed`
-/// [`RunResult`] with an explanatory message) instead of silently
-/// returning bogus data.
+/// Stub [`ConnectorRunner`] for callers with no connector subprocess to
+/// actually run (e.g. a command that only needs `BackupService` for
+/// something other than `backup_source`/`backup_all`) — every call
+/// fails clearly (a `Failed` [`RunResult`] with an explanatory message)
+/// instead of silently returning bogus data. [`crate::run_stream::SubprocessRunner`]
+/// is the real implementation `dbs-cli`'s backup commands use.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnimplementedRunner;
 
 impl ConnectorRunner for UnimplementedRunner {
     fn run_connector(
         &self,
+        _storage: &mut dyn Storage,
         connector: &RegisteredConnector,
         _run_id: i64,
         _source_id: i64,
+        _source_name: &str,
         _mode: &str,
         _cursor: Option<&Cursor>,
         _since: Option<DateTime<Utc>>,
+        _limit: Option<u32>,
+        _cancel: Option<&CancelToken>,
     ) -> Result<ConnectorRunOutcome, DbsError> {
         Err(DbsError::Connector(ConnectorError::Contract(format!(
-            "connector run/stream protocol not implemented yet — cannot run \
-             {:?} (ADR-0001 steps 2-3, follow-up to issue #45)",
+            "this ConnectorRunner cannot run {:?} — use SubprocessRunner",
             connector.type_
         ))))
     }
@@ -369,6 +385,14 @@ pub struct BackupSourceOptions<'a> {
     /// for this source's run — see [`ProgressSink`] for what's emitted
     /// today and why.
     pub on_progress: Option<&'a dyn ProgressSink>,
+    /// Checked by [`ConnectorRunner`] implementations between fetched
+    /// items/lines — a cancelled token halts the connector at that
+    /// boundary instead of waiting for it to finish on its own.
+    /// `backup_all` deliberately leaves this `None` on the per-source
+    /// options it builds ("in-flight sources still finish and commit",
+    /// per [`BackupAllOptions::cancel`]'s doc); a plain `dbs backup NAME`
+    /// invocation is free to wire its own Ctrl+C token through here.
+    pub cancel: Option<CancelToken>,
 }
 
 impl<'a> Default for BackupSourceOptions<'a> {
@@ -380,6 +404,7 @@ impl<'a> Default for BackupSourceOptions<'a> {
             dry_run: false,
             limit: None,
             reap: true,
+            cancel: None,
             on_progress: None,
         }
     }
@@ -567,9 +592,20 @@ impl<'a> BackupService<'a> {
 
         let since = watermark
             .map(|w| w - ChronoDuration::seconds(self.config.default_overlap_seconds as i64));
-        let outcome =
-            self.runner
-                .run_connector(&rc, run_id, source.id, &chosen_mode, cursor.as_ref(), since);
+        let runner = self.runner;
+        let storage: &mut dyn Storage = self.storage;
+        let outcome = runner.run_connector(
+            storage,
+            &rc,
+            run_id,
+            source.id,
+            name,
+            &chosen_mode,
+            cursor.as_ref(),
+            since,
+            opts.limit,
+            opts.cancel.as_ref(),
+        );
         let finished_at = Utc::now();
 
         // Each cleanup step is best-effort and independent, mirroring
@@ -703,6 +739,13 @@ impl<'a> BackupService<'a> {
             dry_run: opts.dry_run,
             limit: opts.limit,
             reap: false,
+            // Deliberately not `opts.cancel`: between-source cancellation
+            // (checked above and in `backup_all_parallel`'s worker loop)
+            // already stops the batch from *starting* new sources — a
+            // source already in flight finishes and commits rather than
+            // being cut off mid-run. See `BackupSourceOptions::cancel`'s
+            // doc.
+            cancel: None,
             on_progress: None,
         };
 
@@ -2554,6 +2597,7 @@ mod tests {
                 description: None,
                 export_profile: None,
                 auth_capture: None,
+                volatile_fields: Vec::new(),
                 pip_requirements: Vec::new(),
                 needs_playwright_browser: false,
             },
@@ -2589,12 +2633,16 @@ mod tests {
     impl ConnectorRunner for ScriptedRunner {
         fn run_connector(
             &self,
+            _storage: &mut dyn Storage,
             _connector: &RegisteredConnector,
             _run_id: i64,
             _source_id: i64,
+            _source_name: &str,
             _mode: &str,
             _cursor: Option<&Cursor>,
             _since: Option<DateTime<Utc>>,
+            _limit: Option<u32>,
+            _cancel: Option<&CancelToken>,
         ) -> Result<ConnectorRunOutcome, DbsError> {
             match &*self.result.lock().unwrap() {
                 Ok(outcome) => Ok(outcome.clone()),
