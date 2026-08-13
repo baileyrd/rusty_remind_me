@@ -126,7 +126,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Web app skeleton + static SPA serving | fn | spec | both | `src/dbs/web/app.py` | rusty_http (unverified — likely client-only) | no | L | New dependency: async web framework (`axum` or similar) + async runtime — flagged below |
+| Web app skeleton + static SPA serving | fn | spec | both | `src/dbs/web/app.py` | rusty_http (unverified — likely client-only) | no | L | Done (#79) — new `dbs-web` crate (axum + tokio); serves the reference's real static SPA unmodified; `dbs serve` actually binds on loopback now. No `/api` routes yet — see Job manager/Auth/In-UI setup rows |
 | Job manager (background jobs + SSE progress) | fn | spec | both | `src/dbs/web/jobs.py` | — | no | M | |
 | Auth / CSRF / Origin / Host protection | fn | spec | both | `src/dbs/web/app.py` (security gate) | — | no | M | Security-sensitive — implement carefully, don't skip the DNS-rebinding defense |
 | `envfile.py` (scoped secrets writer) | fn | spec | both | `src/dbs/web/envfile.py` | — | no | S | |

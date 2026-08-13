@@ -8,6 +8,53 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Web app skeleton + static SPA serving (closes #79)
+**2026-08-13**
+
+- **New dependencies:** `axum` (0.7) + `tokio` (async runtime), per
+  gap-analysis.md's Decisions section item 1/the issue's own framing —
+  the workspace's first async code. New `dbs-web` crate.
+- **Implemented:** an Axum router serving the reference's actual static
+  SPA — `crates/dbs-web/static/{index.html,app.js,style.css}` are an
+  unmodified copy of `dbs/web/static/*`. `GET /` renders `index.html`
+  with its `{{v}}` cache-bust placeholder substituted (process-start
+  timestamp, since these assets are compiled into the binary rather
+  than read from disk — no mtime to read); `GET /static/<name>` serves
+  `app.js`/`style.css` with the right content type. `dbs serve` now
+  actually binds and runs this for a loopback host (default, or
+  `--host localhost`), blocking until interrupted, instead of just
+  validating flags and exiting.
+- **Sync/async boundary, decided here (doc-commented in
+  `dbs-web/src/lib.rs`):** `dbs-cli` stays synchronous everywhere except
+  `cmd_serve`, which builds a dedicated Tokio runtime to drive the
+  server. Nothing here calls into `dbs-core` yet (no `/api` routes
+  exist until #80/#81/#83 land), but the decision for when that need
+  arrives is made now: async handlers will cross into `dbs-core`'s
+  synchronous `Storage` API via `tokio::task::spawn_blocking` at the
+  call site, not by growing `dbs-core` an async-facing wrapper.
+- **Deliberately scoped:** a non-loopback bind (`--host 0.0.0.0`, etc.)
+  still validates `--token` as before but doesn't actually serve for
+  real yet — there's no auth gate wired into the app skeleton (#81),
+  and starting an unauthenticated listener on a non-loopback interface
+  the moment `--token` is merely *present* would be the exact hole the
+  original validation exists to close. It reports as much and exits 4;
+  this restriction comes out once #81 lands.
+- The SPA's `app.js` calls a `/api/*` surface that mostly doesn't exist
+  in this port yet — every route it drives is a later web-tier issue
+  (#80 job manager, #81 auth, #83 in-UI setup, plus the export/research
+  API routes those depend on). Shipping the real frontend now,
+  unmodified, means each of those issues lands against a frontend
+  that's already real instead of needing its own follow-up port.
+- 6 new `dbs-web` unit/integration tests (index renders with the
+  placeholder substituted, `/static/app.js` and `/static/style.css`
+  serve with the right content type, unknown static asset and unknown
+  route both 404, a real ephemeral-port bind answers a real HTTP
+  request) plus a rewrite of the `dbs-cli` `serve` integration tests:
+  loopback binds now spawn the real binary, poll the port, and check a
+  real HTTP response (with a kill-on-drop guard so a failing assertion
+  never leaks the child process); the non-loopback and usage-error
+  cases stay quick-exit.
+
 ## dbs version (closes #78)
 **2026-08-13**
 
