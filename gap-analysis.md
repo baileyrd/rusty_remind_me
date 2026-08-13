@@ -110,7 +110,7 @@ not left as one oversized issue.
 | `dbs backup --all --only-due` scheduling gate | fn | spec | both | `cli.py` | — | no | S | Done (#65) |
 | `dbs backup --parallel N` worker pool | fn | spec | both | `cli.py` | — | no | L | Done (#66) — sync `std::thread::scope` pool, consistent with #22's `reqwest::blocking` choice |
 | `dbs backup` progress line + Ctrl+C handling | fn | spec | both | `cli.py` | — | no | S | Done (#67) — only `SourceStart`/`SourceDone` are emitted (no run/stream protocol yet for per-item progress) |
-| `dbs status` / `dbs history` | fn | spec | both | `cli.py` | — | no | S | |
+| `dbs status` / `dbs history` | fn | spec | both | `cli.py` | — | no | S | Done (#68) |
 | `dbs items` / `dbs stats` (browse + FTS5 CLI) | fn | spec | both | `cli.py` | — | no | M | |
 | `dbs export*` / `dbs decrypt` CLI wiring | fn | spec | both | `cli.py` | — | no | M | |
 | `dbs sources` / `dbs connectors` (list/add/check/describe) | fn | spec | both | `cli.py` | — | no | M | |

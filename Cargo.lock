@@ -406,6 +406,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "dbs-core",
+ "serde_json",
 ]
 
 [[package]]
