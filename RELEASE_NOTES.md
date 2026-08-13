@@ -8,6 +8,56 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-support`: shared Playwright launch helper (closes #99)
+**2026-08-13**
+
+- **New `python_launch` module in `dbs-connector-support`.** The
+  reference's `connectors/_playwright.py` has one function,
+  `launch_scrubbed_context(pw, session_dir, *, headless)`, that drives
+  Playwright **in-process**: it takes an already-imported
+  `playwright.sync_api` handle and calls
+  `pw.chromium.launch_persistent_context(...)` directly, then probes
+  and scrubs the `HeadlessChrome` UA token. That has no Rust
+  equivalent — there's no Rust Playwright binding, and per
+  gap-analysis.md's Connectors-cluster decision 3, there isn't going
+  to be one. So this ports the module's *role* rather than its code:
+  `reddit`/`skool`/`youtube`/`dbs capture` will shell out to a
+  **separate** Python script that itself imports Playwright and does
+  the real browser driving, and `python_launch` is the generic,
+  Playwright-agnostic half of that split.
+- **API surface:** `find_python()` resolves `python3` then `python`
+  off `PATH` (same order `dbs-cli`'s `update-ytdlp` command already
+  uses); `run_python_script(script, args, timeout)` runs
+  `<python> <script> <args...>` to completion using that resolved
+  interpreter; `run_python_script_using(interpreter, ...)` is the
+  interpreter-injectable form the former delegates to, split out so
+  callers (and tests) aren't forced to depend on what's actually
+  installed. Both capture stdout/stderr verbatim and have no opinion
+  on their format — a browser-automation script might emit a JSON
+  result line, for instance, but that's the caller's concern.
+- **Reuses `run_with_watchdog`** (the same primitive `vimeo` #94 and
+  `udemy` #95 use for their `yt-dlp` downloads) for the stall/wall-
+  clock timeout: a hung browser launch must not block a scheduled run
+  forever. A zero timeout disables the watchdog and runs inline to
+  completion, matching that primitive's existing convention
+  elsewhere in the crate. On timeout the subprocess is abandoned, not
+  force-killed — the same constraint `run_with_watchdog` already
+  documents for its worker thread.
+- 7 new tests, run through `/bin/sh` standing in for a Python
+  interpreter (the launcher genuinely doesn't care what interpreter
+  it invokes, so this avoids any dependency on Python being present
+  in the test/CI environment): stdout capture on success, nonzero
+  exit code + stderr capture, argument pass-through, a missing-
+  interpreter spawn error, a stalled process abandoned past its
+  timeout, a zero-timeout inline run, and a smoke test that
+  `find_python`'s real `PATH` resolution doesn't panic.
+- Not yet wired up: `reddit` (#96) and `skool` (#97) still return
+  their own "blocked on #99" `ConnectorError::Config`, since actually
+  calling into this helper needs the not-yet-written Python/Playwright
+  scripts those connectors would shell out to — that's follow-on work
+  for whichever issue re-opens those connectors' acquisition step, not
+  this one.
+
 ## `youtube` connector (closes #98)
 **2026-08-13**
 
