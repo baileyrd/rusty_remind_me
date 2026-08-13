@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## dbs schedule (closes #74)
+**2026-08-13**
+
+- **Implemented:** `dbs schedule [--interval daily|hourly]`, printing
+  a ready-to-paste unattended-run snippet. The Linux branch ports the
+  reference's cron line + systemd service/timer unit text exactly
+  (down to matching its own quirk: the systemd timer's `OnCalendar`
+  isn't parameterized by `--interval` either, in the reference or
+  here — not a bug this port introduced). The Windows branch is new
+  (no reference equivalent): a `schtasks /Create` command, the
+  standard CLI-scriptable equivalent of cron/systemd there — needed
+  for this repo's cross-platform floor (gap-analysis.md), which
+  covers Windows from round 1.
+- `render_schedule(config_path, interval, windows)` takes the
+  platform as a plain argument rather than checking
+  `cfg!(target_os = ...)` internally, so both branches are exercisable
+  from a single test run regardless of which OS actually built the
+  binary; `cmd_schedule` passes the real `cfg!(target_os = "windows")`
+  at its one call site. The printed config path is absolutized via
+  `std::path::absolute` (lexical, unlike `canonicalize`, so it doesn't
+  require the config file to already exist — `dbs schedule` is
+  commonly run before `dbs init`).
+- 6 new `render_schedule` unit tests (Linux daily/hourly content,
+  cross-contamination checks in both directions) plus 2 new `dbs-cli`
+  integration tests confirming the compiled binary wires the command
+  up end to end.
+
 ## dbs update-ytdlp (closes #73)
 **2026-08-13**
 

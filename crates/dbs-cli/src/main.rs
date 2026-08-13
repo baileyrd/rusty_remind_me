@@ -290,7 +290,11 @@ enum Command {
     /// Run scheduled maintenance (VACUUM, revision pruning, ...).
     Maintain,
     /// Print a cron/systemd (or Task Scheduler) snippet for unattended runs.
-    Schedule,
+    Schedule {
+        /// cron preset: daily|hourly.
+        #[arg(long, default_value = "daily")]
+        interval: String,
+    },
     /// Run the optional local web UI.
     Serve,
     /// Headless browser-session capture for connectors that need one.
@@ -482,6 +486,7 @@ fn main() {
         },
         Command::Doctor { json_out } => cmd_doctor(&cli.config, json_out),
         Command::UpdateYtdlp { dry_run } => cmd_update_ytdlp(dry_run),
+        Command::Schedule { interval } => cmd_schedule(&cli.config, &interval),
         other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
@@ -505,7 +510,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Doctor { .. } => "doctor",
         Command::UpdateYtdlp { .. } => "update-ytdlp",
         Command::Maintain => "maintain",
-        Command::Schedule => "schedule",
+        Command::Schedule { .. } => "schedule",
         Command::Serve => "serve",
         Command::Capture => "capture",
         Command::Version => "version",
@@ -2124,6 +2129,63 @@ fn cmd_update_ytdlp(dry_run: bool) -> i32 {
     }
 }
 
+/// Builds the `dbs schedule` snippet text for `config_path`/`interval`
+/// on the given platform. Pure and platform-parameterized (rather than
+/// `cfg!`-gated) so both branches are exercisable from a single test
+/// run regardless of which OS actually built the binary; `cmd_schedule`
+/// passes the real `cfg!(target_os = "windows")` at the only call site
+/// that needs to know.
+///
+/// The Windows branch mirrors the reference's Linux cron+systemd
+/// snippets in spirit (a ready-to-paste unattended-run recipe) but has
+/// no reference to port from — this repo's cross-platform floor
+/// (gap-analysis.md) covers Windows from round 1, and `schtasks` is
+/// the standard CLI-scriptable equivalent of cron/systemd there.
+fn render_schedule(config_path: &Path, interval: &str, windows: bool) -> String {
+    let cfg_display = config_path.display();
+    if windows {
+        let schtasks_schedule = if interval == "hourly" {
+            "/SC HOURLY".to_string()
+        } else {
+            "/SC DAILY /ST 03:00".to_string()
+        };
+        format!(
+            "# Windows Task Scheduler (run from an elevated PowerShell or Command Prompt):\n\
+             schtasks /Create /TN \"DailyBackupSystem\" /TR \"dbs --config {cfg_display} backup --all\" {schtasks_schedule} /F\n\
+             # remove with: schtasks /Delete /TN \"DailyBackupSystem\" /F\n"
+        )
+    } else {
+        let cron_time = if interval == "hourly" {
+            "0 * * * *"
+        } else {
+            "0 3 * * *"
+        };
+        format!(
+            "# crontab -e   (runs the backup and logs output)\n\
+             {cron_time} dbs --config {cfg_display} backup --all >> ~/dbs.log 2>&1\n\
+             \n\
+             # systemd: ~/.config/systemd/user/dbs.service\n\
+             [Unit]\nDescription=Daily Backup System\n\n[Service]\nType=oneshot\n\
+             ExecStart=dbs --config {cfg_display} backup --all\n\
+             \n\
+             # systemd timer: ~/.config/systemd/user/dbs.timer\n\
+             [Unit]\nDescription=Run dbs daily\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\n\
+             Persistent=true\n\n[Install]\nWantedBy=timers.target\n\
+             # enable with: systemctl --user enable --now dbs.timer\n"
+        )
+    }
+}
+
+/// Mirrors the reference's `schedule` command.
+fn cmd_schedule(config_path: &Path, interval: &str) -> i32 {
+    let absolute = std::path::absolute(config_path).unwrap_or_else(|_| config_path.to_path_buf());
+    print!(
+        "{}",
+        render_schedule(&absolute, interval, cfg!(target_os = "windows"))
+    );
+    0
+}
+
 fn run_status_str(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Success => "success",
@@ -2262,5 +2324,80 @@ mod progress_renderer_tests {
             renderer.emit(&event(phase, None, None));
         }
         assert!(!renderer.dirty.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    //! `render_schedule` takes `windows` as a plain argument (not a
+    //! `cfg!(target_os = ...)` check inside the function) specifically
+    //! so both platform branches are testable in one run, regardless
+    //! of which OS actually built and ran the test binary.
+
+    use super::*;
+
+    #[test]
+    fn linux_daily_prints_cron_systemd_service_and_timer_with_the_config_path() {
+        let out = render_schedule(Path::new("/home/me/dbs.toml"), "daily", false);
+        assert!(out.contains("crontab -e"), "{out}");
+        assert!(
+            out.contains("0 3 * * * dbs --config /home/me/dbs.toml backup --all"),
+            "{out}"
+        );
+        assert!(out.contains("~/.config/systemd/user/dbs.service"), "{out}");
+        assert!(out.contains("Type=oneshot"), "{out}");
+        assert!(
+            out.contains("ExecStart=dbs --config /home/me/dbs.toml backup --all"),
+            "{out}"
+        );
+        assert!(out.contains("~/.config/systemd/user/dbs.timer"), "{out}");
+        assert!(out.contains("OnCalendar=*-*-* 03:00:00"), "{out}");
+        assert!(out.contains("WantedBy=timers.target"), "{out}");
+    }
+
+    #[test]
+    fn linux_hourly_changes_only_the_cron_time() {
+        let out = render_schedule(Path::new("/home/me/dbs.toml"), "hourly", false);
+        assert!(
+            out.contains("0 * * * * dbs --config /home/me/dbs.toml backup --all"),
+            "{out}"
+        );
+        // The systemd timer isn't parameterized by interval, matching
+        // the reference exactly (its own inconsistency, not a bug to
+        // "fix" in the port).
+        assert!(out.contains("OnCalendar=*-*-* 03:00:00"), "{out}");
+    }
+
+    #[test]
+    fn linux_snippet_has_no_windows_content() {
+        let out = render_schedule(Path::new("/home/me/dbs.toml"), "daily", false);
+        assert!(!out.contains("schtasks"), "{out}");
+    }
+
+    #[test]
+    fn windows_daily_prints_a_schtasks_create_command_with_the_config_path() {
+        let out = render_schedule(Path::new(r"C:\Users\me\dbs.toml"), "daily", true);
+        assert!(out.contains("schtasks /Create"), "{out}");
+        assert!(
+            out.contains(r#"/TR "dbs --config C:\Users\me\dbs.toml backup --all""#),
+            "{out}"
+        );
+        assert!(out.contains("/SC DAILY"), "{out}");
+        assert!(out.contains("/ST 03:00"), "{out}");
+        assert!(out.contains("schtasks /Delete"), "{out}");
+    }
+
+    #[test]
+    fn windows_hourly_uses_the_hourly_schedule_flag() {
+        let out = render_schedule(Path::new(r"C:\Users\me\dbs.toml"), "hourly", true);
+        assert!(out.contains("/SC HOURLY"), "{out}");
+        assert!(!out.contains("/SC DAILY"), "{out}");
+    }
+
+    #[test]
+    fn windows_snippet_has_no_cron_or_systemd_content() {
+        let out = render_schedule(Path::new(r"C:\Users\me\dbs.toml"), "daily", true);
+        assert!(!out.contains("crontab"), "{out}");
+        assert!(!out.contains("systemd"), "{out}");
     }
 }
