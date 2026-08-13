@@ -8,6 +8,38 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Auth / CSRF / Origin / Host protection (closes #81)
+**2026-08-13**
+
+- **New dependency:** `url` (narrowly-scoped, standard Rust URL
+  parser — already in the workspace's dependency graph transitively via
+  `reqwest`; added directly here for robust `Origin` header parsing on
+  a security-sensitive path rather than hand-rolling it).
+- **Implemented:** `dbs-web::auth::security_gate` — the reference's
+  `_security_gate` middleware, mirrored check-for-check: (1) the `Host`
+  header must name this machine (`localhost`/`127.0.0.1`/`::1`) unless
+  a `--token` is configured — the DNS-rebinding defense; (2) a
+  state-changing request (non-`GET`/`HEAD`/`OPTIONS`) carrying a
+  cross-origin `Origin` header is rejected unless it's already
+  token-authenticated — the CSRF defense (Origin-based, matching the
+  reference exactly — there's no server-side session to bind an issued
+  CSRF token to, since the bearer token already serves that role); (3)
+  once `--token` is configured, every `/api` request needs it (bearer
+  header or `?token=` query param, for `EventSource`/download links
+  that can't set headers), timing-safe compared. The static SPA itself
+  stays reachable without a token so it can load and prompt for one.
+- Wired into `router()`/`serve()` (both now take the configured
+  token) and, in `dbs-cli`, `cmd_serve` — which can now actually bind
+  off-loopback for real once `--token` is given, closing the gap #79's
+  `cmd_serve` left open ("validated but not yet served for real").
+- 16 new `dbs-web` tests (Host/Origin parsing edge cases — ports,
+  bracketed IPv6, scheme; each of the three checks' accept/reject
+  paths over real HTTP; constant-time comparison; the gate is actually
+  wired into `router()`) plus a `dbs-cli` `serve` integration test
+  rewrite for the now-real off-loopback+token path, verifying the
+  static frontend stays reachable while an unauthenticated `/api`
+  request is rejected.
+
 ## Job manager (background jobs + SSE progress) (closes #80)
 **2026-08-13**
 

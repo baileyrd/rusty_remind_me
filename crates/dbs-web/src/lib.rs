@@ -1,10 +1,12 @@
 //! Web app skeleton for `dbs serve` (issue #79), mirroring the shape of
 //! the reference's `dbs.web.app.create_app` — minus everything that
-//! hangs off of it (auth gate, in-UI setup, API routes), which are
-//! separate, later issues (#81/#83). The [`jobs`] module (issue #80)
-//! adds the background-job manager + SSE primitive those issues build
-//! on. Today this crate root only serves the static single-page app:
-//! `GET /` renders `index.html` with its `{{v}}` cache-bust placeholder
+//! hangs off of it (in-UI setup, API routes), which are separate,
+//! later issues (#83). The [`jobs`] module (issue #80) adds the
+//! background-job manager + SSE primitive those issues build on; the
+//! [`auth`] module (issue #81) adds the security gate every route in
+//! this router — including the static SPA below — now runs behind.
+//! Today this crate root serves the static single-page app: `GET /`
+//! renders `index.html` with its `{{v}}` cache-bust placeholder
 //! substituted (mirroring the reference's `index()` route), and
 //! `GET /static/<name>` serves the SPA's other assets.
 //!
@@ -34,14 +36,19 @@
 //! the call site, not by growing `dbs-core` an async-facing wrapper.
 //! `dbs-core` has no reason to know Tokio exists.
 
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod auth;
 pub mod jobs;
+
+use auth::SecurityConfig;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
@@ -84,12 +91,19 @@ fn cache_stamp_now() -> String {
 }
 
 /// Builds the app skeleton's router: `GET /` (the SPA shell) and
-/// `GET /static/<name>` (its JS/CSS). No `/api` routes yet — see the
-/// module doc-comment.
-pub fn router() -> Router {
+/// `GET /static/<name>` (its JS/CSS), behind the [`auth::security_gate`]
+/// — `token` is `dbs serve --token`; `None` means the DNS-rebinding
+/// Host check stays strict (loopback only). No `/api` routes yet — see
+/// the module doc-comment.
+pub fn router(token: Option<String>) -> Router {
+    let security_config = Arc::new(SecurityConfig { token });
     Router::new()
         .route("/", get(index))
         .route("/static/:name", get(static_asset))
+        .layer(axum::middleware::from_fn_with_state(
+            security_config,
+            auth::security_gate,
+        ))
         .with_state(AppState {
             cache_stamp: cache_stamp_now(),
         })
@@ -130,14 +144,14 @@ async fn static_asset(AxumPath(name): AxumPath<String>) -> Response {
 /// literal `127.0.0.1` here so the bind address is deterministic
 /// regardless of resolver configuration; any other host (an explicit
 /// IP, or a real non-loopback name) passes through unchanged.
-pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
+pub async fn serve(host: &str, port: u16, token: Option<String>) -> std::io::Result<()> {
     let host = if host.is_empty() || host == "localhost" {
         "127.0.0.1"
     } else {
         host
     };
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    axum::serve(listener, router()).await
+    axum::serve(listener, router(token)).await
 }
 
 #[cfg(test)]
@@ -155,8 +169,14 @@ mod tests {
 
     #[tokio::test]
     async fn index_serves_the_spa_shell_with_the_cache_bust_placeholder_substituted() {
-        let response = router()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        let response = router(None)
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -177,10 +197,11 @@ mod tests {
 
     #[tokio::test]
     async fn static_serves_app_js_with_a_javascript_content_type() {
-        let response = router()
+        let response = router(None)
             .oneshot(
                 Request::builder()
                     .uri("/static/app.js")
+                    .header(header::HOST, "127.0.0.1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -204,10 +225,11 @@ mod tests {
 
     #[tokio::test]
     async fn static_serves_style_css_with_a_css_content_type() {
-        let response = router()
+        let response = router(None)
             .oneshot(
                 Request::builder()
                     .uri("/static/style.css")
+                    .header(header::HOST, "127.0.0.1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -226,10 +248,11 @@ mod tests {
 
     #[tokio::test]
     async fn static_asset_that_does_not_exist_is_a_404() {
-        let response = router()
+        let response = router(None)
             .oneshot(
                 Request::builder()
                     .uri("/static/nope.js")
+                    .header(header::HOST, "127.0.0.1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -240,10 +263,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_route_is_a_404() {
-        let response = router()
+        let response = router(None)
             .oneshot(
                 Request::builder()
                     .uri("/nonexistent")
+                    .header(header::HOST, "127.0.0.1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -259,7 +283,7 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(listener, router()).await.unwrap();
+            axum::serve(listener, router(None)).await.unwrap();
         });
 
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -275,5 +299,24 @@ mod tests {
         assert!(response.contains("<!DOCTYPE html"), "{response}");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_security_gate_is_actually_wired_into_the_router() {
+        // Full coverage of the gate's own logic lives in `auth`'s tests;
+        // this just confirms `router()` really applies it rather than
+        // leaving the middleware unattached.
+        let response = router(None)
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "attacker.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(response).await.contains("DNS-rebinding"));
     }
 }
