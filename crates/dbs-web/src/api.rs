@@ -31,8 +31,8 @@ use serde_json::{json, Value};
 
 use dbs_core::service::{BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink};
 use dbs_core::{
-    build_registry, in_named_netns, named_netns_exists, CancelToken, DbsError, ExportQuery,
-    ItemRow, ProgressEvent, SqliteStorage, Storage, SubprocessRunner, VpnGuard,
+    build_registry, get_exporter, in_named_netns, named_netns_exists, CancelToken, DbsError,
+    ExportQuery, ItemRow, ProgressEvent, SqliteStorage, Storage, SubprocessRunner, VpnGuard,
     CURRENT_API_VERSION,
 };
 
@@ -111,6 +111,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/sources/:name/capture", post(capture_source))
         .route("/api/connectors/:type/import", post(import_connector))
         .route("/api/sources/:name/import", post(import_source))
+        .route("/api/export", get(export_download))
+        .route("/api/export-notes", post(export_notes_route))
 }
 
 async fn meta(State(state): State<AppState>) -> Json<Value> {
@@ -1204,4 +1206,155 @@ async fn import_source(
     multipart: Multipart,
 ) -> Result<Json<Value>, ApiError> {
     import_capture(&state, name, multipart).await
+}
+
+// -- export (issue #176) --------------------------------------------------
+
+/// `GET /api/export` — a real file download, not JSON: the `export`
+/// form (`app.js`) submits by navigating the browser straight to this
+/// URL (`window.location.assign`), so the response has to carry its
+/// own `Content-Type`/`Content-Disposition`, matching what a `dbs
+/// export --out ...` run on the CLI would produce for the same
+/// `format`. `dbs_core::Exporter::media_type`/`file_ext` already exist
+/// for exactly this — their own doc-comments call out "the seam a
+/// future web layer would use" — so there's no format→extension table
+/// to invent here. No `encrypt`/passphrase support: the shipped
+/// frontend's export form has no such field (`app.js` never references
+/// one), so `BackupService::export`'s `encrypt_passphrase` parameter is
+/// simply never used from this route.
+async fn export_download(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, ApiError> {
+    let q = MultiQuery::parse(raw.as_deref());
+    let format = q.one("format").unwrap_or_else(|| "json".to_string());
+    let sources = q.all("source");
+    let item_types = q.all("type");
+    let since = parse_date_param(q.one("since"))?;
+    let until = parse_date_param(q.one("until"))?;
+    let include_deleted = q.one("include_deleted").as_deref() == Some("true");
+    let include_revisions = q.one("include_revisions").as_deref() == Some("true");
+    let no_raw = q.one("no_raw").as_deref() == Some("true");
+
+    // `get_exporter` just validates `format` and hands back a lookup
+    // table entry — extract the two `String`s this handler actually
+    // needs and drop the `Box<dyn Exporter>` immediately: it isn't
+    // `Send`, and holding it live across the `spawn_blocking` `.await`
+    // below would make this handler's future non-`Send`, which axum
+    // requires.
+    let (media_type, ext) = {
+        let exporter = get_exporter(&format)?;
+        (
+            exporter.media_type().to_string(),
+            exporter.file_ext().to_string(),
+        )
+    };
+    let ext_for_job = ext.clone();
+
+    let config = state.config.clone();
+    let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let query = ExportQuery {
+            sources: (!sources.is_empty()).then_some(sources),
+            item_types: (!item_types.is_empty()).then_some(item_types),
+            since,
+            until,
+            include_deleted,
+            include_revisions,
+            include_raw: !no_raw,
+            ..Default::default()
+        };
+        // Mirrors `notes_export.rs`'s own `temp_zip_path` convention —
+        // a process-id + nanosecond-timestamp temp name, cleaned up
+        // right after being read back below.
+        let tmp_path = std::env::temp_dir().join(format!(
+            "dbs-web-export-{}-{}{ext_for_job}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        ));
+        service.export(&query, &format, &tmp_path, None)?;
+        let data = std::fs::read(&tmp_path)
+            .map_err(|e| DbsError::Storage(format!("failed to read export file: {e}")))?;
+        let _ = std::fs::remove_file(&tmp_path);
+        Ok(data)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, media_type),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"export{ext}\""),
+            ),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+/// Request body for `POST /api/export-notes` — `app.js`'s notes-export
+/// form submit sends exactly `{out_dir, source, type, since, full}`.
+#[derive(Deserialize)]
+struct ExportNotesRequest {
+    out_dir: String,
+    #[serde(default)]
+    source: Vec<String>,
+    #[serde(rename = "type", default)]
+    item_type: Vec<String>,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    full: bool,
+}
+
+/// `POST /api/export-notes` — bridges `dbs_core::export_notes` (one
+/// Markdown note per live item, written directly into `out_dir` rather
+/// than a single downloadable file, so this returns JSON summarizing
+/// the write instead of streaming a response like `/api/export`).
+/// `full` inverted is `incremental`, exactly mirroring `cmd_export_notes`'s
+/// (`dbs-cli/src/main.rs`) own `!full` wiring. `out_dir` is used as
+/// given, same trust boundary as every other `dbs serve` mutation
+/// (loopback-only by default, an optional bearer token otherwise) —
+/// the CLI's own `export-notes` command accepts an arbitrary directory
+/// from its caller too.
+async fn export_notes_route(
+    State(state): State<AppState>,
+    Json(body): Json<ExportNotesRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let since = parse_date_param(body.since)?;
+    let config = state.config.clone();
+    let out_dir = PathBuf::from(&body.out_dir);
+    let sources = body.source;
+    let item_types = body.item_type;
+    let incremental = !body.full;
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let sources_opt = (!sources.is_empty()).then_some(sources);
+        let item_types_opt = (!item_types.is_empty()).then_some(item_types);
+        let result = dbs_core::export_notes(
+            &service,
+            &out_dir,
+            sources_opt.as_deref(),
+            item_types_opt.as_deref(),
+            since,
+            incremental,
+        )?;
+        Ok(json!({
+            "item_count": result.item_count,
+            "path": result.path,
+            "since": result.extra.get("since").and_then(Value::as_str).unwrap_or(""),
+        }))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(result))
 }

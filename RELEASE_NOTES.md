@@ -8,6 +8,35 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real `/api` export routes (closes #176)
+**2026-08-14**
+
+- **`GET /api/export`** is a real file download, not JSON — the
+  shipped export form (`app.js`) submits by navigating the browser
+  straight to this URL, so the response carries its own
+  `Content-Type`/`Content-Disposition`. `dbs_core::Exporter::media_type`/
+  `file_ext` already existed for exactly this (their own doc-comments
+  call out "the seam a future web layer would use"), so there's no
+  format→extension table to invent — `format`/`source`(repeatable)/
+  `type`(repeatable)/`since`/`until`/`include_deleted`/
+  `include_revisions`/`no_raw` all map straight onto `ExportQuery`,
+  same as `/api/items`. No `encrypt`/passphrase support: the shipped
+  frontend's export form has no such field, so
+  `BackupService::export`'s `encrypt_passphrase` parameter is simply
+  never used from this route.
+- **`POST /api/export-notes`** bridges `dbs_core::export_notes`
+  directly (`full` inverted is `incremental`, mirroring
+  `cmd_export_notes`'s own `!full` wiring) — writes one Markdown note
+  per live item into a caller-given `out_dir` and returns
+  `{item_count, path, since}`, same trust boundary as every other
+  `dbs serve` mutation (the CLI's own `export-notes` command accepts
+  an arbitrary directory from its caller too).
+- 3 new router-level tests, including a real download round-trip
+  (`GET /api/export?format=json` against a seeded two-item database,
+  asserting the actual `Content-Type`/`Content-Disposition` headers
+  and body content) and an unzipped notes-export writing real
+  `.md` files to a temp directory.
+
 ## `dbs-web`: real in-UI setup & browser-auth capture routes (closes #175)
 **2026-08-14**
 
