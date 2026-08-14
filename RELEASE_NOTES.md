@@ -8,6 +8,40 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real `/api` secrets management routes (closes #173)
+**2026-08-14**
+
+- **`GET /api/secrets`** returns `secrets` (one entry per secret key a
+  *configured* source's connector actually needs — `name`/`set`/
+  `in_env_file`/`in_process_env`/`sources`, matching `loadSecrets`'s
+  (`app.js`) per-row rendering) and `allowed` (every secret key any
+  *registered* connector declares, configured or not — the wider list
+  its "Set another key" picker draws from), plus `env_file` (the `.env`
+  path being read/written). Pure `envfile` (#82) plumbing — no CLI
+  equivalent to mirror, unlike every other `/api` slice so far.
+- **`POST /api/secrets`** writes one secret via `envfile::set_var`,
+  after checking the name against the registered-connector allow-list
+  (rejecting an arbitrary env var name). Returns
+  `shadowed_by_process_env`, mirroring `resolve_passphrase`'s own
+  precedence note that a process-env value of the same name wins over
+  `.env` at runtime — `saveSecret` (`app.js`) surfaces this as an
+  informational toast, not an error.
+- **`DELETE /api/secrets/:name`** removes one secret via
+  `envfile::unset_var` — unlike the POST route, not checked against the
+  allow-list, so clearing a stray/no-longer-declared key still works.
+- `Config` gained an `env_file_path()` method (`<config file's
+  directory>/.env`) so `dbs-web` reads/writes the identical file a
+  `dbs backup` invocation's `resolve_passphrase` would, rather than a
+  second, drifting path convention — `dbs-cli`'s own private
+  `load_env_secret_store` helper already computed the same thing
+  ad hoc and was left as-is (three call sites, one of which doesn't
+  otherwise load a `Config`, so unifying them wasn't worth the risk).
+- 8 new router-level tests, including a real spawnable
+  `dbs-connector-fixture` handshake declaring `requires_auth`/
+  `secret_keys` (extending #172's fixture technique) and a
+  temp-directory `Config::base_dir` override so secrets tests never
+  touch a real `./.env` next to wherever `cargo test` happens to run.
+
 ## `dbs-web`: real `/api` sources & connectors routes (closes #172)
 **2026-08-14**
 

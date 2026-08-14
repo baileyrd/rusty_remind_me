@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Redirect, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::Router;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -95,6 +95,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/thumb/:id", get(thumb))
         .route("/api/connectors", get(connectors))
         .route("/api/sources", get(sources).post(create_source))
+        .route("/api/secrets", get(secrets).post(set_secret))
+        .route("/api/secrets/:name", delete(delete_secret))
 }
 
 async fn meta(State(state): State<AppState>) -> Json<Value> {
@@ -597,4 +599,159 @@ async fn create_source(
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(Json(json!({"name": name, "type": type_})))
+}
+
+// -- secrets (issue #173) ------------------------------------------------
+
+/// `type -> secret_keys` for every registered connector.
+type SecretKeysByType = HashMap<String, Vec<String>>;
+
+/// Every secret key any *registered* connector declares (sorted,
+/// deduped), alongside a `type -> secret_keys` map used to figure out
+/// which configured *sources* need which key. Shared by every `/api/secrets`
+/// handler so "is this a real secret key" is answered from one place —
+/// the live registry, not a hardcoded list this module would have to
+/// keep in sync by hand.
+fn allowed_secret_keys(
+    config: &dbs_core::Config,
+) -> Result<(Vec<String>, SecretKeysByType), DbsError> {
+    let mut storage = open_storage(config)?;
+    let (registry, _report) = build_registry(config);
+    let runner = SubprocessRunner::new(config);
+    let service = BackupService::new(&mut storage, config, &registry, &runner);
+    let connectors = service.list_connectors();
+
+    let mut keys_by_type = HashMap::new();
+    let mut allowed: Vec<String> = Vec::new();
+    for c in &connectors {
+        keys_by_type.insert(c.type_.clone(), c.secret_keys.clone());
+        for key in &c.secret_keys {
+            if !allowed.contains(key) {
+                allowed.push(key.clone());
+            }
+        }
+    }
+    allowed.sort();
+    Ok((allowed, keys_by_type))
+}
+
+/// `GET /api/secrets` — `secrets`: one entry per secret key a
+/// *configured* source's connector actually needs (`name`/`set`/
+/// `in_env_file`/`in_process_env`/`sources`, matching `loadSecrets`'s
+/// (`app.js`) per-row rendering exactly); `allowed`: every secret key
+/// any *registered* connector declares, configured or not — the wider
+/// list `loadSecrets`' "Set another key" picker draws from. `env_file`
+/// is the `.env` path being read/written, shown as-is in the UI.
+async fn secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
+        let (allowed, keys_by_type) = allowed_secret_keys(&config)?;
+
+        let mut sources_by_key: HashMap<String, Vec<String>> = HashMap::new();
+        let mut names: Vec<&String> = config.sources.keys().collect();
+        names.sort();
+        for name in names {
+            let sc = &config.sources[name];
+            for key in keys_by_type.get(&sc.type_).into_iter().flatten() {
+                sources_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+
+        let env_path = config.env_file_path();
+        let in_env_file = crate::envfile::read_keys(&env_path);
+        let mut needed: Vec<&String> = sources_by_key.keys().collect();
+        needed.sort();
+        let secrets: Vec<Value> = needed
+            .into_iter()
+            .map(|key| {
+                let is_in_env_file = in_env_file.contains(key);
+                let is_in_process_env = std::env::var(key).is_ok();
+                json!({
+                    "name": key,
+                    "set": is_in_env_file || is_in_process_env,
+                    "in_env_file": is_in_env_file,
+                    "in_process_env": is_in_process_env,
+                    "sources": sources_by_key[key],
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "env_file": env_path.to_string_lossy(),
+            "secrets": secrets,
+            "allowed": allowed,
+        }))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(result))
+}
+
+/// Request body for `POST /api/secrets` — `app.js`'s `saveSecret` sends
+/// exactly `{name, value}`.
+#[derive(Deserialize)]
+struct SetSecretRequest {
+    name: String,
+    value: String,
+}
+
+/// `POST /api/secrets` — writes one secret to the `.env` file via
+/// [`crate::envfile::set_var`], after checking `name` is a key some
+/// registered connector actually declares (rejecting an arbitrary env
+/// var name a client might try to inject). `shadowed_by_process_env`
+/// mirrors `dbs_core::resolve_passphrase`'s own precedence: a
+/// process-env value of the same name wins over `.env` at runtime, so
+/// saving here wouldn't actually take effect until that's unset —
+/// `saveSecret` (`app.js`) surfaces this as an informational toast, not
+/// an error.
+async fn set_secret(
+    State(state): State<AppState>,
+    Json(body): Json<SetSecretRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let name = body.name.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
+        let (allowed, _keys_by_type) = allowed_secret_keys(&config)?;
+        if !allowed.contains(&body.name) {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "{:?} is not a secret key any registered connector declares",
+                    body.name
+                ),
+            ));
+        }
+        crate::envfile::set_var(&config.env_file_path(), &body.name, &body.value)
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let shadowed_by_process_env = std::env::var(&name).is_ok();
+    Ok(Json(
+        json!({"name": name, "shadowed_by_process_env": shadowed_by_process_env}),
+    ))
+}
+
+/// `DELETE /api/secrets/:name` — removes one secret from the `.env`
+/// file via [`crate::envfile::unset_var`]. Unlike `set_secret`, `name`
+/// isn't checked against the registered-connector allow-list: clearing
+/// a stray/no-longer-declared key someone previously saved should still
+/// work, matching `unset_var`'s own "missing key is a no-op, not an
+/// error" contract.
+async fn delete_secret(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let name_for_task = name.clone();
+    let removed = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
+        crate::envfile::unset_var(&config.env_file_path(), &name_for_task)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(json!({"name": name, "removed": removed})))
 }

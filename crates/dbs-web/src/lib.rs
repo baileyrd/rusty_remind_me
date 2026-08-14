@@ -1003,6 +1003,235 @@ mod tests {
         assert!(written.contains("type = \"fixture\""));
     }
 
+    // -- /api/secrets (issue #173) ---------------------------------------
+
+    /// A temp directory to use as `Config::base_dir` — `test_config()`'s
+    /// default (`"."`) would otherwise point `Config::env_file_path` at
+    /// a real `./.env` next to wherever `cargo test` happens to run,
+    /// which a secrets test must never read from or write to.
+    fn temp_base_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-secrets-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Like `connectors_dir_with_a_fixture_connector`, but the fixture
+    /// declares `requires_auth: true` and one `secret_key` — the shape
+    /// `/api/secrets` needs something to actually list.
+    #[cfg(unix)]
+    fn connectors_dir_with_a_fixture_connector_requiring_auth(
+        label: &str,
+        secret_key: &str,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-secrets-connectors-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("dbs-connector-fixture");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho '{{\"type\":\"fixture\",\"core_api_version\":{},\"schema_version\":1,\"capabilities\":{{\"requires_auth\":true}},\"item_kinds\":[\"item\"],\"secret_keys\":[\"{secret_key}\"]}}'\nexit 0\n",
+                dbs_core::CURRENT_API_VERSION
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_secrets_with_no_configured_sources_reports_no_secrets_but_lists_allowed() {
+        let connectors_dir = connectors_dir_with_a_fixture_connector_requiring_auth(
+            "none-configured",
+            "FIXTURE_TOKEN",
+        );
+        let mut config = test_config();
+        config.connectors_dir = Some(connectors_dir);
+        config.base_dir = temp_base_dir("none-configured");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/secrets").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["secrets"], serde_json::json!([]));
+        assert_eq!(body["allowed"], serde_json::json!(["FIXTURE_TOKEN"]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_secrets_lists_a_configured_sources_required_key_as_not_set() {
+        let connectors_dir =
+            connectors_dir_with_a_fixture_connector_requiring_auth("configured", "FIXTURE_TOKEN");
+        let mut config = test_config();
+        config.connectors_dir = Some(connectors_dir);
+        config.base_dir = temp_base_dir("configured");
+        config.sources.insert(
+            "a".to_string(),
+            dbs_core::SourceConfig {
+                name: "a".to_string(),
+                type_: "fixture".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/secrets").await;
+        assert_eq!(status, StatusCode::OK);
+        let secrets = body["secrets"].as_array().unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0]["name"], "FIXTURE_TOKEN");
+        assert_eq!(secrets[0]["set"], false);
+        assert_eq!(secrets[0]["in_env_file"], false);
+        assert_eq!(secrets[0]["in_process_env"], false);
+        assert_eq!(secrets[0]["sources"], serde_json::json!(["a"]));
+    }
+
+    #[tokio::test]
+    async fn api_set_secret_rejects_an_unrecognized_key_name() {
+        let mut config = test_config();
+        config.base_dir = temp_base_dir("reject-unknown");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = post_json(
+            router(None, opts),
+            "/api/secrets",
+            serde_json::json!({"name": "NOPE", "value": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("NOPE"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_set_secret_writes_the_env_file_and_a_later_get_reflects_it() {
+        let connectors_dir =
+            connectors_dir_with_a_fixture_connector_requiring_auth("set", "FIXTURE_TOKEN");
+        let mut config = test_config();
+        config.connectors_dir = Some(connectors_dir);
+        config.base_dir = temp_base_dir("set");
+        config.sources.insert(
+            "a".to_string(),
+            dbs_core::SourceConfig {
+                name: "a".to_string(),
+                type_: "fixture".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let env_path = config.env_file_path();
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/secrets",
+            serde_json::json!({"name": "FIXTURE_TOKEN", "value": "abc123"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "FIXTURE_TOKEN");
+        assert_eq!(body["shadowed_by_process_env"], false);
+        let written = std::fs::read_to_string(&env_path).unwrap();
+        assert!(written.contains("FIXTURE_TOKEN=\"abc123\""));
+
+        let (status, body) = get_json(router, "/api/secrets").await;
+        assert_eq!(status, StatusCode::OK);
+        let secrets = body["secrets"].as_array().unwrap();
+        assert_eq!(secrets[0]["set"], true);
+        assert_eq!(secrets[0]["in_env_file"], true);
+    }
+
+    #[tokio::test]
+    async fn api_delete_secret_removes_it_from_the_env_file() {
+        let mut config = test_config();
+        config.base_dir = temp_base_dir("delete");
+        let env_path = config.env_file_path();
+        envfile::set_var(&env_path, "SOME_KEY", "value").unwrap();
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let response = router(None, opts)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/secrets/SOME_KEY")
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        assert_eq!(body["removed"], true);
+        let written = std::fs::read_to_string(&env_path).unwrap();
+        assert!(!written.contains("SOME_KEY"));
+    }
+
+    #[tokio::test]
+    async fn api_delete_secret_on_a_key_never_set_reports_removed_false() {
+        let mut config = test_config();
+        config.base_dir = temp_base_dir("delete-absent");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let response = router(None, opts)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/secrets/NEVER_SET")
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        assert_eq!(body["removed"], false);
+    }
+
     #[tokio::test]
     async fn api_requests_require_the_token_when_one_is_configured() {
         let response = router(Some("secret".to_string()), test_opts())
