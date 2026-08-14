@@ -1798,6 +1798,96 @@ mod tests {
         assert!(body["detail"].as_str().unwrap().contains("--no-setup"));
     }
 
+    // -- /api/export, /api/export-notes (issue #176) ---------------------
+
+    #[tokio::test]
+    async fn api_export_downloads_a_json_file_with_the_right_content_type() {
+        let seeded = seed_db("export-json");
+        let opts = ServeOptions {
+            config: seeded.config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let response = router(None, opts)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/export?format=json")
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(content_type, "application/json");
+        let disposition = response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(disposition.contains("export.json"), "{disposition}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn api_export_rejects_an_unknown_format() {
+        let (status, body) = get_json(router(None, test_opts()), "/api/export?format=bogus").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("bogus"));
+    }
+
+    #[tokio::test]
+    async fn api_export_notes_writes_markdown_files_and_reports_the_count() {
+        let seeded = seed_db("export-notes");
+        let out_dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-export-notes-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let opts = ServeOptions {
+            config: seeded.config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = post_json(
+            router(None, opts),
+            "/api/export-notes",
+            serde_json::json!({
+                "out_dir": out_dir.to_str().unwrap(),
+                "source": [],
+                "type": [],
+                "since": null,
+                "full": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["item_count"], 2);
+        assert_eq!(body["path"], out_dir.to_str().unwrap());
+        let entries: Vec<_> = std::fs::read_dir(&out_dir).unwrap().collect();
+        assert!(
+            entries.iter().any(|e| e
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|e| e == "md")),
+            "{entries:?}"
+        );
+        std::fs::remove_dir_all(&out_dir).ok();
+    }
+
     #[tokio::test]
     async fn api_requests_require_the_token_when_one_is_configured() {
         let response = router(Some("secret".to_string()), test_opts())
