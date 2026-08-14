@@ -8,6 +8,41 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-reddit`: wire fetch() to a real Playwright acquisition script (closes #187)
+**2026-08-14**
+
+- **`RedditConnector::fetch()`** now really acquires the saved feed
+  instead of returning a canned "blocked on #99" error. It shells out
+  (via #99's `dbs_connector_support::python_launch`) to a new
+  `scripts/acquire.py`, embedded into the binary at compile time and
+  staged to a temp file at run time. The script's only job is browser
+  automation: launch the captured session as a scrubbed-UA Chromium
+  context (ported from the reference's `_playwright.launch_scrubbed_context`),
+  establish the reddit.com origin, verify login via `/api/me.json`,
+  and page the cookie-authenticated `saved.json` feed via a same-origin
+  in-page `fetch` — Reddit's edge 403s a separate HTTP client even with
+  valid cookies, so the fetch has to run inside a real page. It hands
+  back the raw, undecoded listing `children`; Rust's existing
+  `record_from_child`/`to_item` (already written and tested against
+  fixture data) do the actual record mapping, so that logic lives in
+  exactly one place.
+- Script result contract: one line of JSON on stdout —
+  `{"ok": true, "account": ..., "children": [...]}` on success, or
+  `{"ok": false, "kind": "auth"|"config"|"transient"|"rate_limited",
+  "message": ...}` on failure — mapped straight to the matching
+  `ConnectorError` variant.
+- `fetch()` still validates everything that doesn't need a browser
+  first (config, secret, session directory) before ever spawning the
+  script, unchanged from before.
+- Tested against a fake acquisition-script stub (a shell script
+  standing in for the Python interpreter, mirroring
+  `dbs_connector_support::python_launch`'s own tests and
+  `dbs-connector-youtube`'s fake-yt-dlp convention) — no real
+  Playwright or network access needed in CI.
+- A real end-to-end run still needs a captured login session; that
+  capture flow (`dbs-web::setup::run_capture_job`) is #99's other
+  remaining unwired caller, out of scope here.
+
 ## `dbs-cli`: wire `dbs research` to the real pipeline (closes #189)
 **2026-08-14**
 

@@ -6,27 +6,27 @@
 //! `dbs-cli` would.
 //!
 //! Unlike `dbs-connector-raindrop`'s equivalent test file, there is no
-//! "a real run against a mock API commits items" test here, and there
-//! never can be one until issue #99 (the shared Playwright launch
-//! helper) lands: as `src/lib.rs`'s module doc-comment and `src/
-//! main.rs`'s doc-comment both explain, this connector's `fetch()`
-//! unconditionally returns a `ConnectorError::Config` pointing at
-//! issue #99 — even given a fully valid, existing session directory
-//! and a set secret — because acquisition itself (paging Reddit's
-//! cookie-authenticated saved.json feed from inside a real browser
-//! context) isn't implemented yet. No items ever land in storage for
-//! this connector today.
+//! "a real run against a mock API commits items" test here: since
+//! #187, `fetch()` really does shell out to a Playwright-driven Python
+//! script (see `src/lib.rs`'s module doc-comment), but this sandbox
+//! has neither a captured Reddit session nor (usually) Playwright
+//! itself installed, so a real run still can't succeed — it just fails
+//! for a real reason now (no session cookies, no Playwright package,
+//! or no live network) instead of a canned "not implemented yet"
+//! message. No items ever land in storage for this connector in CI.
 //!
 //! So the second test below builds exactly the same "fully valid
 //! input" the in-process unit test
-//! `fetch_with_a_valid_session_dir_is_blocked_pending_the_playwright_helper`
+//! `fetch_with_a_valid_but_empty_session_dir_fails_cleanly`
 //! (`src/lib.rs`) does — a real temp directory standing in for a
 //! captured session, with the `REDDIT_SESSION_DIR` secret set and
 //! pointing at it — and proves that when it's driven through the real
-//! subprocess boundary instead of an in-process `fetch()` call, the
-//! same `ConnectorError::Config` still comes back out the other side:
-//! the run/stream bridge correctly relays a connector-level error
-//! end to end. That's the only thing provable about a real run today.
+//! subprocess boundary instead of an in-process `fetch()` call, a
+//! connector-level error still comes back out the other side: the
+//! run/stream bridge correctly relays it end to end. Which exact error
+//! (missing Playwright vs. missing interpreter vs. a dead session) is
+//! environment-dependent, so this only asserts the invariant that
+//! holds regardless: some error, and no items committed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -87,7 +87,7 @@ fn the_real_binarys_handshake_is_valid_and_matches_the_connector() {
 }
 
 #[test]
-fn a_real_run_with_a_fully_valid_session_dir_still_relays_the_issue_99_config_error() {
+fn a_real_run_with_a_fully_valid_session_dir_still_relays_a_clean_error() {
     let dir = temp_session_dir();
 
     let mut registry = ConnectorRegistry::new();
@@ -130,10 +130,13 @@ fn a_real_run_with_a_fully_valid_session_dir_still_relays_the_issue_99_config_er
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
 
     // Proves the subprocess boundary correctly relays a
-    // connector-level error end to end — not that the connector does
-    // real work, since it can't yet (issue #99).
-    let error = outcome.error.expect("expected a config error, got none");
-    assert!(error.contains("issue #99"), "{error}");
+    // connector-level error end to end. This sandbox has no captured
+    // Reddit session (and likely no Playwright package either), so
+    // acquisition can't succeed — which exact error surfaces depends
+    // on what's installed here, so only the non-empty-error and
+    // no-items-committed invariants are asserted.
+    let error = outcome.error.expect("expected an error, got none");
+    assert!(!error.is_empty(), "{error}");
     assert_eq!(outcome.items_seen, 0);
     let live = storage.live_external_ids(source.id, None).unwrap();
     assert!(live.is_empty());
