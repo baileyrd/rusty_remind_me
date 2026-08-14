@@ -200,6 +200,37 @@ fn value_to_id_string(v: &Value) -> Option<String> {
     }
 }
 
+/// Reads `options[key]` as a string array, for `configure()`'s
+/// `communities`/`courses`/`no_download_communities` fields — `None`
+/// if the key is absent (leave the config default alone), `Some(vec)`
+/// if present and valid. Mirrors `dbs-connector-podcast`'s identical
+/// `feeds` parsing (the closest existing precedent for an
+/// array-valued per-source option).
+fn string_array_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let arr = v.as_array().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be an array of strings, got {v}"
+        ))
+    })?;
+    let strings = arr
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(str::to_string).ok_or_else(|| {
+                ConnectorError::Config(format!(
+                    "sources.<name>.{key} entries must be strings, got {entry}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(strings))
+}
+
 /// A community's display name: `metadata.displayName`, falling back
 /// to `metadata.name`, falling back to the group's own `name`.
 fn group_name(group: &Value) -> Option<String> {
@@ -1073,6 +1104,22 @@ impl Connector for SkoolConnector {
         }
     }
 
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = string_array_option(options, "communities")? {
+            self.config.communities = v;
+        }
+        if let Some(v) = string_array_option(options, "courses")? {
+            self.config.courses = v;
+        }
+        if let Some(v) = string_array_option(options, "no_download_communities")? {
+            self.config.no_download_communities = v;
+        }
+        Ok(())
+    }
+
     fn fetch<'a>(
         &'a mut self,
         ctx: &'a RunContext,
@@ -1791,6 +1838,78 @@ mod tests {
         let capture = connector.auth_capture().unwrap();
         assert_eq!(capture.kind, "browser_session");
         assert_eq!(capture.secret_key, "SKOOL_SESSION_DIR");
+    }
+
+    // -- configure: communities/courses/no_download_communities from a
+    // real source's config (#200) --------------------------------------
+
+    #[test]
+    fn configure_applies_a_communities_array_from_options() {
+        let mut connector = SkoolConnector::new(SkoolConfig::default());
+        assert!(connector.config.communities.is_empty());
+        let options = HashMap::from([(
+            "communities".to_string(),
+            serde_json::json!(["chase-ai", "some-other-community"]),
+        )]);
+        connector.configure(&options).unwrap();
+        assert_eq!(
+            connector.config.communities,
+            vec!["chase-ai".to_string(), "some-other-community".to_string()]
+        );
+    }
+
+    #[test]
+    fn configure_applies_a_courses_array_from_options() {
+        let mut connector = SkoolConnector::new(SkoolConfig::default());
+        let options = HashMap::from([(
+            "courses".to_string(),
+            serde_json::json!(["chase-ai/Claude Code Masterclass"]),
+        )]);
+        connector.configure(&options).unwrap();
+        assert_eq!(
+            connector.config.courses,
+            vec!["chase-ai/Claude Code Masterclass".to_string()]
+        );
+    }
+
+    #[test]
+    fn configure_applies_a_no_download_communities_array_from_options() {
+        let mut connector = SkoolConnector::new(SkoolConfig::default());
+        let options = HashMap::from([(
+            "no_download_communities".to_string(),
+            serde_json::json!(["gated-community"]),
+        )]);
+        connector.configure(&options).unwrap();
+        assert_eq!(
+            connector.config.no_download_communities,
+            vec!["gated-community".to_string()]
+        );
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = SkoolConnector::new(SkoolConfig::default());
+        connector.configure(&HashMap::new()).unwrap();
+        assert!(connector.config.communities.is_empty());
+        assert!(connector.config.courses.is_empty());
+        assert!(connector.config.no_download_communities.is_empty());
+    }
+
+    #[test]
+    fn configure_rejects_a_non_array_communities_value() {
+        let mut connector = SkoolConnector::new(SkoolConfig::default());
+        let options =
+            HashMap::from([("communities".to_string(), serde_json::json!("not-an-array"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_courses_array_with_a_non_string_entry() {
+        let mut connector = SkoolConnector::new(SkoolConfig::default());
+        let options = HashMap::from([("courses".to_string(), serde_json::json!([1, 2]))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 
     // -- acquire_using: exercised against a fake stub "interpreter"
