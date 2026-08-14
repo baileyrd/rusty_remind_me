@@ -8,6 +8,16 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Wire `dbs verify`/`dbs restore`/`dbs maintain` CLI subcommands (closes #195)
+**2026-08-14**
+
+- **`dbs verify [source] [--archive PATH]`** now really calls `BackupService::verify` (DB integrity + per-source cursor/orphan-run checks) or, with `--archive`, `dbs_core::verify_archive` (an exported bundle's per-entry checksums) — both orchestrators have existed since #59/#60 but had no CLI caller. Exits 3 when either check finds real issues.
+- **`dbs restore <path> [--dry-run] [--json]`** now really calls `BackupService::restore`, replaying an archive/ndjson export back into the database.
+- **`dbs maintain [--vacuum] [--snapshot PATH] [--json]`** now really runs database housekeeping, via a new `BackupService::maintain` — `Storage::maintain`/`prune_revisions`/`vacuum_into` (#36) existed but had no orchestrator above the storage layer. Mirrors the reference: prunes each source's revisions past its configured `keep_revisions` first (so a `--vacuum` in the same pass reclaims the freed pages), then checkpoints/optimizes/vacuums, then optionally snapshots via `VACUUM INTO`. Populates the `MaintenanceReport` struct, which existed but was never constructed anywhere in the codebase until now.
+- **`/api/verify`** now bridges `BackupService::verify` for real too, instead of an honest 501 — same `tokio::task::spawn_blocking` bridging pattern every other `/api` route uses.
+- All three CLI subcommands were previously zero-field clap variants that fell through to a generic "not yet implemented" stub — that stub (`cmd_stub`/`command_name`) is now fully unused and removed, since every subcommand does real work.
+- Tests: 5 new `BackupService::maintain` unit tests (revision-pruning selectivity, vacuum threading, snapshot success/failure), 11 new CLI integration tests covering all three subcommands' success/error/`--json` paths, an `/api/verify` route test replacing the old 501 test.
+
 ## Fix stale doc-comments claiming already-landed wiring is still an open gap (closes #196)
 **2026-08-14**
 

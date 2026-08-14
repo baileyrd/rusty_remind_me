@@ -257,17 +257,31 @@ async fn vpn(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"relevant": true, "up": false, "detail": detail}))
 }
 
-/// `dbs verify` itself is an unimplemented stub in this port today
-/// (`dbs-cli/src/main.rs`'s generic "not yet implemented" fallback —
-/// there's no `cmd_verify`, no `BackupService::verify` to bridge to).
-/// `/api/verify` reports that honestly rather than inventing behavior
-/// the CLI doesn't have yet.
-async fn verify() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"detail": "verify is not yet implemented (tracked in a follow-up issue)"})),
-    )
-        .into_response()
+/// Bridges `BackupService::verify` — mirrors the reference's
+/// `GET /api/verify` (`src/dbs/web/app.py`).
+async fn verify(
+    State(state): State<AppState>,
+    Query(params): Query<SourceParam>,
+) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.verify(params.source.as_deref())?;
+        Ok(json!({
+            "ok": report.ok,
+            "issues": report.issues.iter().map(|x| json!({
+                "source": x.source,
+                "kind": x.kind,
+                "detail": x.detail,
+            })).collect::<Vec<_>>(),
+        }))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(result))
 }
 
 // -- items / media (issue #171) ----------------------------------------

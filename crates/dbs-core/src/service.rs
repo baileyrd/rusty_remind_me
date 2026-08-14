@@ -59,8 +59,8 @@ use crate::errors::{BackupRunError, ConnectorError, ConnectorLoadError, DbsError
 use crate::export::{get_exporter, ExportResult, ExportSource};
 use crate::export_profile::{resolve_export_profile, ExportProfile};
 use crate::models::{
-    ConnectorInfo, Cursor, DoctorCheck, ProgressEvent, ProgressPhase, RestoreReport, RunResult,
-    RunStatus, SourceStatus, VerifyIssue, VerifyReport,
+    ConnectorInfo, Cursor, DoctorCheck, MaintenanceReport, ProgressEvent, ProgressPhase,
+    RestoreReport, RunResult, RunStatus, SourceStatus, VerifyIssue, VerifyReport,
 };
 use crate::netns::{in_named_netns, named_netns_exists};
 use crate::registry::{ConnectorRegistry, RegisteredConnector};
@@ -1770,6 +1770,80 @@ impl<'a> BackupService<'a> {
         })
     }
 
+    /// Database housekeeping: flush the WAL, refresh planner
+    /// statistics, optionally compact (`vacuum`) and write a
+    /// consistent single-file snapshot (`snapshot` — safe to copy
+    /// off-machine, unlike a raw copy of a live WAL-mode database
+    /// file, which misses the `-wal` sidecar). Mirrors the
+    /// reference's `BackupService.maintain`.
+    ///
+    /// Revision retention runs first, so a `vacuum` in the same pass
+    /// reclaims the pages it frees: every source with a positive
+    /// `keep_revisions` gets [`Storage::prune_revisions`] before
+    /// [`Storage::maintain`] runs.
+    pub fn maintain(
+        &mut self,
+        vacuum: bool,
+        snapshot: Option<&Path>,
+    ) -> Result<MaintenanceReport, DbsError> {
+        let mut revisions_pruned: u64 = 0;
+        for (name, sc) in &self.config.sources {
+            if sc.keep_revisions == 0 {
+                continue;
+            }
+            if let Some(source) = self.storage.get_source(name)? {
+                revisions_pruned += self.storage.prune_revisions(source.id, sc.keep_revisions)?;
+            }
+        }
+
+        let stats = self.storage.maintain(vacuum)?;
+        let database = stats
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let wal_checkpointed = stats
+            .get("wal_checkpointed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let optimized = stats
+            .get("optimized")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let vacuumed = stats
+            .get("vacuumed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let size_before = stats
+            .get("size_before")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let size_after = stats
+            .get("size_after")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let mut snapshot_path = None;
+        let mut snapshot_bytes = None;
+        if let Some(dest) = snapshot {
+            let bytes = self.storage.vacuum_into(dest)?;
+            snapshot_path = Some(dest.display().to_string());
+            snapshot_bytes = Some(bytes);
+        }
+
+        Ok(MaintenanceReport {
+            database,
+            wal_checkpointed,
+            optimized,
+            vacuumed,
+            size_before,
+            size_after,
+            snapshot_path,
+            snapshot_bytes,
+            revisions_pruned,
+        })
+    }
+
     /// Runs `query` through `format`'s [`Exporter`](crate::export::Exporter)
     /// and atomically writes the result to `path` (write to a sibling
     /// `.tmp` file, then rename — a crash mid-export never leaves a
@@ -2358,6 +2432,14 @@ mod tests {
         export_items: Vec<ItemRow>,
         export_revisions: Vec<ItemRow>,
         export_media_blobs: Vec<ItemRow>,
+        /// `(source_id, keep)` pairs `maintain` tests assert
+        /// `prune_revisions` was actually called with.
+        prune_revisions_calls: Vec<(i64, u32)>,
+        /// Fixed per-call return value `prune_revisions` reports back.
+        prune_revisions_return: u64,
+        /// When set, `vacuum_into` succeeds and returns this byte
+        /// count instead of the trait default's "not supported" error.
+        vacuum_into_bytes: Option<u64>,
     }
 
     impl Storage for FakeStorage {
@@ -2607,6 +2689,28 @@ mod tests {
         }
         fn integrity_check(&self) -> Result<String, DbsError> {
             Ok(self.integrity.clone())
+        }
+        fn maintain(&mut self, vacuum: bool) -> Result<ItemRow, DbsError> {
+            let mut out = ItemRow::new();
+            out.insert("path".to_string(), Value::from("test.db"));
+            out.insert("wal_checkpointed".to_string(), Value::from(true));
+            out.insert("optimized".to_string(), Value::from(true));
+            out.insert("vacuumed".to_string(), Value::from(vacuum));
+            out.insert("size_before".to_string(), Value::from(100u64));
+            out.insert(
+                "size_after".to_string(),
+                Value::from(if vacuum { 80u64 } else { 100u64 }),
+            );
+            Ok(out)
+        }
+        fn prune_revisions(&mut self, source_id: i64, keep: u32) -> Result<u64, DbsError> {
+            self.prune_revisions_calls.push((source_id, keep));
+            Ok(self.prune_revisions_return)
+        }
+        fn vacuum_into(&self, _dest: &Path) -> Result<u64, DbsError> {
+            self.vacuum_into_bytes.ok_or_else(|| {
+                DbsError::Storage("this backend does not support snapshots".to_string())
+            })
         }
     }
 
@@ -3650,6 +3754,93 @@ mod tests {
         let service = BackupService::new(&mut storage, &config, &registry, &runner);
         let report = service.verify(Some("missing")).unwrap();
         assert!(report.ok);
+    }
+
+    // -- maintain -----------------------------------------------------------
+
+    #[test]
+    fn maintain_with_no_sources_skips_pruning_and_reports_storages_stats() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.maintain(false, None).unwrap();
+        assert_eq!(report.revisions_pruned, 0);
+        assert_eq!(report.database, "test.db");
+        assert!(report.wal_checkpointed);
+        assert!(!report.vacuumed);
+        assert_eq!(report.size_before, 100);
+        assert_eq!(report.size_after, 100);
+        assert!(report.snapshot_path.is_none());
+    }
+
+    #[test]
+    fn maintain_vacuum_true_is_threaded_through_to_storage_and_reflected_in_the_report() {
+        let mut storage = FakeStorage::default();
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.maintain(true, None).unwrap();
+        assert!(report.vacuumed);
+        assert_eq!(report.size_after, 80);
+    }
+
+    #[test]
+    fn maintain_prunes_revisions_only_for_sources_with_a_positive_keep_revisions() {
+        let mut sources = HashMap::new();
+        let mut with_retention = test_source_config("a", "raindrop");
+        with_retention.keep_revisions = 5;
+        sources.insert("a".to_string(), with_retention);
+        sources.insert("b".to_string(), test_source_config("b", "raindrop")); // keep_revisions: 0
+        let mut storage = FakeStorage {
+            prune_revisions_return: 3,
+            ..Default::default()
+        };
+        storage
+            .upsert_source("a", "raindrop", "raindrop", "{}", 1)
+            .unwrap();
+        storage
+            .upsert_source("b", "raindrop", "raindrop", "{}", 1)
+            .unwrap();
+        let config = test_config(sources);
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let report = service.maintain(false, None).unwrap();
+        assert_eq!(report.revisions_pruned, 3);
+        assert_eq!(storage.prune_revisions_calls.len(), 1);
+        assert_eq!(storage.prune_revisions_calls[0].1, 5); // "a"'s keep_revisions
+    }
+
+    #[test]
+    fn maintain_snapshot_calls_vacuum_into_and_reports_its_path_and_bytes() {
+        let mut storage = FakeStorage {
+            vacuum_into_bytes: Some(4096),
+            ..Default::default()
+        };
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let snapshot = Path::new("/tmp/snap.db");
+        let report = service.maintain(false, Some(snapshot)).unwrap();
+        assert_eq!(report.snapshot_bytes, Some(4096));
+        assert_eq!(report.snapshot_path.as_deref(), Some("/tmp/snap.db"));
+    }
+
+    #[test]
+    fn maintain_snapshot_propagates_a_vacuum_into_error() {
+        let mut storage = FakeStorage::default(); // vacuum_into_bytes: None -> errors
+        let config = test_config(HashMap::new());
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let err = service
+            .maintain(false, Some(Path::new("/tmp/snap.db")))
+            .unwrap_err();
+        assert!(err.to_string().contains("does not support snapshots"));
     }
 
     // -- export -------------------------------------------------------------

@@ -148,18 +148,3 @@ fn init_force_overwrites_the_config() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
-
-#[test]
-fn a_stub_subcommand_reports_not_yet_implemented() {
-    // `backup` (#64), `status`/`history` (#68), `items`/`stats` (#69),
-    // `export*`/`decrypt` (#70), `sources`/`connectors` (#71),
-    // `capture` (#76), `research` (#77), and `version` (#78) are no
-    // longer pure stubs — `verify` still is. There's no remaining
-    // nested-subcommand enum (`sources`/`connectors`/`research`) that's
-    // still a pure stub, so there's nothing left to cover with a
-    // "nested stub" variant of this test.
-    let output = Command::new(dbs_bin()).arg("verify").output().unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("not yet implemented"));
-}
