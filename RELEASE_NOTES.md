@@ -8,6 +8,48 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real `/api` dashboard status routes (closes #170)
+**2026-08-13**
+
+- **`dbs serve`'s shipped SPA can now actually load its dashboard.**
+  `GET /api/meta`, `/api/status`, `/api/metrics`, `/api/history`,
+  `/api/vpn`, and `/api/verify` are real routes now, bridging into
+  `dbs-core`'s existing `BackupService`/`Storage` exactly the way each
+  `dbs-cli` `cmd_status`/`cmd_history`/etc. already does — first slice
+  of #169's umbrella `/api` tracking issue, establishing the pattern
+  every remaining slice (#171-#177) reuses: an async Axum handler
+  clones `AppState`'s `Arc<Config>`, opens a fresh `SqliteStorage` +
+  `ConnectorRegistry`/`BackupService` inside `tokio::task::spawn_blocking`,
+  and returns JSON — `dbs-core` stays fully synchronous throughout.
+- **`dbs serve` loads a real `Config` at startup now**, same as every
+  other CLI command — previously it never read `dbs.toml` at all.
+  `dbs_web::serve`/`router` gained a `ServeOptions` parameter
+  (`config`, `allow_setup`, `schedule`) carrying that through to
+  `AppState`.
+- **`dbs_core::build_registry`/`connector_search_dirs`** (generalized
+  out of a `dbs-cli`-private helper from #160): `dbs-web` needed the
+  exact same "scan `PATH`/`connectors_dir`, handshake, apply overrides"
+  logic `dbs-cli` already had — moving it into `dbs-core` means both
+  build the identical registry instead of two implementations quietly
+  drifting apart. `dbs-cli`'s own `build_registry` is now a thin
+  eprintln-warnings wrapper around it.
+- **`SourceStatus` gained a `requires_vpn` field** — the shipped
+  frontend's `sourceRow`/`refreshVpn` (`app.js`) already read
+  `r.requires_vpn` off every `/api/status` row; `service.status()` now
+  actually populates it from `SourceConfig`.
+- `/api/vpn` returns a single aggregate object (`{relevant, up, detail}`)
+  matching the frontend's exact expectation, computed from
+  `in_named_netns`/`named_netns_exists` — fail-closed (`up: false`)
+  whenever a through-VPN run would currently fail, whether the
+  namespace isn't up at all or is up but this process isn't joined to
+  it. `/api/verify` honestly reports 501 (`dbs verify` itself is still
+  an unimplemented CLI stub — no behavior to bridge to yet).
+- Fixed `dbs-cli/tests/serve.rs`'s integration tests, all of which
+  previously ran `dbs serve` with no `dbs.toml` in scope — harmless
+  before (the server never touched config), a hard failure now (config
+  loading happens before the listener binds). Each spawns its own
+  temp-dir config via `--config`.
+
 ## `dbs-core`: per-source connector config over the subprocess wire (closes #166, implements ADR-0002)
 **2026-08-13**
 

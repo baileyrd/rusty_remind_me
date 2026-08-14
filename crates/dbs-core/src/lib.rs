@@ -59,9 +59,9 @@ pub use models::{
 pub use netns::{in_named_netns, named_netns_exists};
 pub use notes_export::{export_notes, export_wiki_dir, STATE_FILENAME};
 pub use registry::{
-    override_map_from_config, scan_connector_candidates, ConnectorCandidate, ConnectorRegistry,
-    Handshake, LoadFailure, LoadReport, RegisteredConnector, CONNECTOR_BINARY_PREFIX,
-    DEFAULT_HANDSHAKE_TIMEOUT,
+    build_registry, connector_search_dirs, override_map_from_config, scan_connector_candidates,
+    ConnectorCandidate, ConnectorRegistry, Handshake, LoadFailure, LoadReport, RegisteredConnector,
+    CONNECTOR_BINARY_PREFIX, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 pub use restore::{
     iter_export_rows, prepared_item_from_row, read_manifest, skipped_extras, verify_archive,

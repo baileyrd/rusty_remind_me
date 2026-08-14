@@ -39,10 +39,9 @@ use clap::{Parser, Subcommand};
 
 use dbs_core::service::{BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink};
 use dbs_core::{
-    load_config, override_map_from_config, parse_iso, scan_connector_candidates, write_scaffolding,
-    BackupRunError, CancelToken, Config, ConnectorRegistry, DbsError, ExportQuery, ItemRow,
-    ProgressEvent, ProgressPhase, RunResult, RunStatus, SqliteStorage, Storage, SubprocessRunner,
-    CURRENT_API_VERSION, DEFAULT_HANDSHAKE_TIMEOUT,
+    load_config, parse_iso, write_scaffolding, BackupRunError, CancelToken, Config,
+    ConnectorRegistry, DbsError, ExportQuery, ItemRow, ProgressEvent, ProgressPhase, RunResult,
+    RunStatus, SqliteStorage, Storage, SubprocessRunner, CURRENT_API_VERSION,
 };
 
 const STUB_EXIT_CODE: i32 = 1;
@@ -594,7 +593,14 @@ fn main() {
             token,
             schedule,
             no_schedule: _,
-        } => cmd_serve(host, port, allow_setup && !no_setup, token, schedule),
+        } => cmd_serve(
+            &cli.config,
+            host,
+            port,
+            allow_setup && !no_setup,
+            token,
+            schedule,
+        ),
         Command::Capture { target, out } => cmd_capture(&cli.config, &target, out),
         Command::Research(sub) => match sub {
             ResearchCommand::Youtube {
@@ -735,32 +741,13 @@ fn report_config_error(e: &DbsError) -> i32 {
     CONFIG_ERROR_EXIT_CODE
 }
 
-/// Directories to scan for `dbs-connector-*` binaries (issue #160):
-/// every `PATH` entry, plus `[dbs] connectors_dir` if configured.
-/// Deliberately does *not* default to this binary's own directory
-/// (`std::env::current_exe()`'s parent) — in a `cargo`-built workspace
-/// that directory holds every other crate's binary too, which would
-/// make discovery depend on incidental build layout rather than a
-/// real, portable install convention. `PATH` is that convention.
-fn connector_search_dirs(cfg: &Config) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = cfg.connectors_dir_path().into_iter().collect();
-    if let Some(path_var) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&path_var));
-    }
-    dirs
-}
-
-/// Builds a real [`ConnectorRegistry`] (issue #160): scans
-/// [`connector_search_dirs`] for `dbs-connector-*` binaries, handshakes
-/// with each one found, and applies `cfg.connectors`' per-type
-/// overrides. A candidate that fails to load is reported as a warning
-/// (never silently dropped) but never blocks discovery of the others —
-/// same guarantee `ConnectorRegistry::discover` itself makes.
+/// Builds a real [`ConnectorRegistry`] (issue #160) via [`dbs_core::build_registry`]
+/// — generalized there for issue #170 so `dbs-web`'s `/api` handlers
+/// build the exact same registry, not a second, drifting
+/// implementation — and prints any load failure as a CLI warning (never
+/// silently dropped, but never blocking discovery of the others either).
 fn build_registry(cfg: &Config) -> ConnectorRegistry {
-    let mut registry = ConnectorRegistry::new();
-    let candidates = scan_connector_candidates(&connector_search_dirs(cfg));
-    let override_map = override_map_from_config(&cfg.connectors);
-    let report = registry.discover(&candidates, &override_map, DEFAULT_HANDSHAKE_TIMEOUT);
+    let (registry, report) = dbs_core::build_registry(cfg);
     for failure in &report.failures {
         eprintln!(
             "warning: connector candidate {:?} failed to load: {}",
@@ -2400,11 +2387,12 @@ fn is_local_host(host: &str) -> bool {
 
 /// Mirrors the reference's `serve` command's flag parsing and its
 /// security-relevant validation (an unauthenticated API must not bind
-/// off-localhost). Starting the actual server is out of scope for
-/// this issue — see gap-analysis.md's Web tier rows (app skeleton,
-/// job manager, auth) — so once flags validate, this reports that
-/// plainly instead of pretending to listen for real.
+/// off-localhost), then loads `config_path` — same as every other
+/// `cmd_*` function — and hands it to [`dbs_web::serve`] via
+/// [`dbs_web::ServeOptions`] (issue #170) so the `/api` layer has real
+/// `Config`/`Storage` access instead of running against nothing.
 fn cmd_serve(
+    config_path: &Path,
     host: String,
     port: u16,
     allow_setup: bool,
@@ -2419,6 +2407,18 @@ fn cmd_serve(
         );
         return CONFIG_ERROR_EXIT_CODE;
     }
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    drop(storage);
 
     eprintln!("Serving rusty_dbs UI at http://{host}:{port}  (press Ctrl+C to stop)");
     if schedule {
@@ -2428,7 +2428,7 @@ fn cmd_serve(
         );
     }
     if !allow_setup {
-        eprintln!("  (--no-setup noted, but there are no setup actions to disable yet)");
+        eprintln!("  (--no-setup noted: in-UI setup routes will refuse to run)");
     }
     if token.is_some() {
         eprintln!("  (token auth required on every /api request)");
@@ -2444,7 +2444,12 @@ fn cmd_serve(
             return CONFIG_ERROR_EXIT_CODE;
         }
     };
-    match rt.block_on(dbs_web::serve(&host, port, token)) {
+    let opts = dbs_web::ServeOptions {
+        config: cfg,
+        allow_setup,
+        schedule,
+    };
+    match rt.block_on(dbs_web::serve(&host, port, token, opts)) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("dbs serve: {e}");

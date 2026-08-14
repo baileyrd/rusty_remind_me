@@ -381,6 +381,13 @@ pub struct SourceStatus {
     pub next_due_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub due_now: bool,
+    /// Mirrors `SourceConfig::requires_vpn` (issue #170) — the web UI's
+    /// `/api/status` needs this per row to tag VPN-gated sources and
+    /// disable their Run button when the tunnel is down, without a
+    /// second round-trip to re-read `Config` for something `status()`
+    /// already has in hand while building this row.
+    #[serde(default)]
+    pub requires_vpn: bool,
 }
 
 impl SourceStatus {
