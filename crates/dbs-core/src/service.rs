@@ -1108,6 +1108,7 @@ impl<'a> BackupService<'a> {
                     .collect(),
                 secret_keys: rc.handshake.secret_keys.clone(),
                 config_schema: Value::Null,
+                auth_capture: rc.handshake.auth_capture.clone(),
             })
             .collect()
     }

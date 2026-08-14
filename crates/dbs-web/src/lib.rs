@@ -820,6 +820,189 @@ mod tests {
             .contains("not yet implemented"));
     }
 
+    // -- /api/connectors, /api/sources (issue #172) ---------------------
+
+    /// A real, spawnable `dbs-connector-fixture` shell script that writes
+    /// a minimal valid handshake line and exits — same technique
+    /// `dbs-core`'s own `registry.rs` tests use to test discovery against
+    /// a real subprocess rather than `ConnectorRegistry::from_resolved`'s
+    /// bypass, which `dbs-web`'s handlers can't reach (they only ever
+    /// build a registry through `dbs_core::build_registry`, i.e. a real
+    /// directory scan).
+    #[cfg(unix)]
+    fn connectors_dir_with_a_fixture_connector(label: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-connectors-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("dbs-connector-fixture");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho '{{\"type\":\"fixture\",\"core_api_version\":{},\"schema_version\":1,\"capabilities\":{{\"requires_auth\":false}},\"item_kinds\":[\"item\"]}}'\nexit 0\n",
+                dbs_core::CURRENT_API_VERSION
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn api_connectors_with_no_connectors_dir_is_an_empty_array() {
+        let (status, body) = get_json(router(None, test_opts()), "/api/connectors").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!([]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_connectors_lists_a_discovered_connector_with_its_auth_capture() {
+        let dir = connectors_dir_with_a_fixture_connector("list");
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/connectors").await;
+        assert_eq!(status, StatusCode::OK);
+        let connectors = body.as_array().unwrap();
+        assert_eq!(connectors.len(), 1);
+        assert_eq!(connectors[0]["type"], "fixture");
+        assert_eq!(connectors[0]["auth_capture"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn api_sources_with_none_configured_is_an_empty_array() {
+        let (status, body) = get_json(router(None, test_opts()), "/api/sources").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn api_sources_lists_a_configured_source_not_yet_backed_up() {
+        let mut config = test_config();
+        config.sources.insert(
+            "a".to_string(),
+            dbs_core::SourceConfig {
+                name: "a".to_string(),
+                type_: "raindrop".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/sources").await;
+        assert_eq!(status, StatusCode::OK);
+        let sources = body.as_array().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["name"], "a");
+        assert_eq!(sources[0]["type"], "raindrop");
+        assert_eq!(sources[0]["enabled"], true);
+        assert_eq!(sources[0]["backed_up"], false);
+    }
+
+    async fn post_json(
+        router: Router,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let resp_body = body_string(response).await;
+        (
+            status,
+            serde_json::from_str(&resp_body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn api_create_source_rejects_an_unregistered_connector_type() {
+        let (status, body) = post_json(
+            router(None, test_opts()),
+            "/api/sources",
+            serde_json::json!({
+                "name": "new-source",
+                "type": "nonexistent",
+                "options": {},
+                "store_media": false,
+                "max_media_mb": 0,
+                "requires_vpn": false,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("nonexistent"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_create_source_adds_a_source_for_a_registered_connector_type() {
+        let dir = connectors_dir_with_a_fixture_connector("create");
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        let config_dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-create-source-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("dbs.toml");
+        std::fs::write(&config_path, "[dbs]\n").unwrap();
+        config.source_path = Some(config_path.clone());
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = post_json(
+            router(None, opts),
+            "/api/sources",
+            serde_json::json!({
+                "name": "new-source",
+                "type": "fixture",
+                "options": {},
+                "store_media": true,
+                "max_media_mb": 50,
+                "requires_vpn": false,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "new-source");
+        assert_eq!(body["type"], "fixture");
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("[sources.new-source]"));
+        assert!(written.contains("type = \"fixture\""));
+    }
+
     #[tokio::test]
     async fn api_requests_require_the_token_when_one_is_configured() {
         let response = router(Some("secret".to_string()), test_opts())
