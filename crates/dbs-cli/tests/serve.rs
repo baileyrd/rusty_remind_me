@@ -18,6 +18,24 @@ fn dbs_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_dbs"))
 }
 
+/// `dbs serve` (issue #170) now loads a real `Config` at startup, same
+/// as every other command — so every test spawning it for real needs a
+/// valid `dbs.toml` to point `--config` at, in its own temp dir (unique
+/// per test, since these run concurrently and each needs its own
+/// `:memory:`-adjacent SQLite file path).
+fn write_test_config(label: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("dbs-cli-serve-test-{label}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("dbs.toml");
+    std::fs::write(
+        &config_path,
+        "[dbs]\ndatabase = \"dbs.sqlite3\"\nexport_dir = \"exports\"\ndownload_root = \"downloads\"\n",
+    )
+    .unwrap();
+    config_path
+}
+
 /// Kills the wrapped child on drop, so a failing assertion never leaks
 /// a `dbs serve` process past the test that started it.
 struct KillOnDrop(Child);
@@ -60,6 +78,8 @@ fn get(port: u16, path: &str) -> String {
 fn default_host_and_port_serve_the_app_skeleton() {
     let child = Command::new(dbs_bin())
         .arg("serve")
+        .arg("--config")
+        .arg(write_test_config("default"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -77,6 +97,8 @@ fn a_custom_port_is_actually_bound() {
         .arg("serve")
         .arg("--port")
         .arg("18123")
+        .arg("--config")
+        .arg(write_test_config("custom-port"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -96,6 +118,8 @@ fn localhost_by_name_is_actually_bound() {
         .arg("localhost")
         .arg("--port")
         .arg("18124")
+        .arg("--config")
+        .arg(write_test_config("localhost-by-name"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -141,6 +165,8 @@ fn schedule_flag_is_reflected_in_the_report() {
         .arg("--port")
         .arg("18125")
         .arg("--schedule")
+        .arg("--config")
+        .arg(write_test_config("schedule"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -160,6 +186,8 @@ fn no_setup_flag_is_reflected_in_the_report() {
         .arg("--port")
         .arg("18126")
         .arg("--no-setup")
+        .arg("--config")
+        .arg(write_test_config("no-setup"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -196,6 +224,8 @@ fn binding_off_localhost_with_a_token_is_actually_served_and_the_token_is_enforc
         .arg("18127")
         .arg("--token")
         .arg("secret")
+        .arg("--config")
+        .arg(write_test_config("token-enforced"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

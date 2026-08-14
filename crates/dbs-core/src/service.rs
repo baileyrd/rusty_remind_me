@@ -937,6 +937,7 @@ impl<'a> BackupService<'a> {
                 .map(|s| s.type_.clone())
                 .unwrap_or_else(|| "?".to_string());
             let enabled = sc.map(|s| s.enabled).unwrap_or(false);
+            let requires_vpn = sc.map(|s| s.requires_vpn).unwrap_or(false);
             let schedule = sc
                 .and_then(|s| s.schedule.clone())
                 .unwrap_or_else(|| "daily".to_string());
@@ -971,6 +972,7 @@ impl<'a> BackupService<'a> {
                     schedule,
                     next_due_at: next_due,
                     due_now,
+                    requires_vpn,
                 });
                 continue;
             };
@@ -1001,6 +1003,7 @@ impl<'a> BackupService<'a> {
                 schedule,
                 next_due_at: next_due,
                 due_now,
+                requires_vpn,
             });
         }
         Ok(out)

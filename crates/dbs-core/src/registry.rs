@@ -152,6 +152,39 @@ pub fn override_map_from_config(
     map
 }
 
+/// Every directory [`build_registry`] scans for `dbs-connector-*`
+/// binaries: an optional configured `connectors_dir` (checked first, so
+/// it wins over `PATH` for the same filename — [`scan_connector_candidates`]'s
+/// own earlier-directory-wins convention), then every `PATH` entry.
+pub fn connector_search_dirs(cfg: &crate::config::Config) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = cfg.connectors_dir_path().into_iter().collect();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path_var));
+    }
+    dirs
+}
+
+/// Builds a real [`ConnectorRegistry`] from `cfg` (issue #160, generalized
+/// out of `dbs-cli` for issue #170 so `dbs-web`'s `/api` handlers can
+/// build the same registry a `dbs backup`/`dbs connectors list` call
+/// would, not a second, drifting implementation): scans
+/// [`connector_search_dirs`] for `dbs-connector-*` binaries, handshakes
+/// with each one found, and applies `cfg.connectors`'s per-type
+/// overrides. Returns the registry alongside the full [`LoadReport`] —
+/// a load failure never blocks discovery of the others (same guarantee
+/// [`ConnectorRegistry::discover`] itself makes), but *reporting* a
+/// failure (stderr for the CLI, a JSON field for the web API) is the
+/// caller's call, not this function's.
+pub fn build_registry(cfg: &crate::config::Config) -> (ConnectorRegistry, LoadReport) {
+    let mut registry = ConnectorRegistry::new();
+    let candidates = scan_connector_candidates(&connector_search_dirs(cfg));
+    let override_map = override_map_from_config(&cfg.connectors);
+    let report = registry
+        .discover(&candidates, &override_map, DEFAULT_HANDSHAKE_TIMEOUT)
+        .clone();
+    (registry, report)
+}
+
 /// The JSON line a connector subprocess writes on startup, self-describing
 /// its contract. Field names match the reference's `_validate_contract`
 /// checks (`src/dbs/core/registry.py`) and ADR-0001's handshake shape.
