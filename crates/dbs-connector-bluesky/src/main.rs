@@ -14,11 +14,12 @@
 //! real spawned binary at a local mock HTTP server instead of the live
 //! Bluesky API.
 //!
-//! Note: there is no per-source config passthrough yet, so
-//! `BlueskyConfig::identifier` (the handle/DID whose likes to back up)
-//! stays at its empty-string default in every real spawn of this
-//! binary today — a future issue about general per-source config
-//! passthrough should fix that, not this one.
+//! `BlueskyConfig::identifier` (the handle/DID whose likes to back
+//! up) comes from a real source's `sources.<name>.identifier` config
+//! via `BlueskyConnector::configure()`, called by
+//! `dbs_connector_support::run_connector_main` with the per-source
+//! wire config on every real run (#166/ADR-0002) — no env var or
+//! override needed for that part.
 
 use dbs_connector_bluesky::{BlueskyConfig, BlueskyConnector};
 

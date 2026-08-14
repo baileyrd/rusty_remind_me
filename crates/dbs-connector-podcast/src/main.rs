@@ -17,12 +17,13 @@
 //! a real spawned binary at a local mock RSS/Atom feed instead of a
 //! real one.
 //!
-//! Note this is *not* a stand-in for real per-source config passthrough
-//! (a separate, still-open gap outside this issue's scope): without
-//! that plumbing, a real `dbs backup` run of this binary today
-//! constructs `PodcastConfig::default()` — `feeds: vec![]` — so it has
-//! no feeds configured at all and will find nothing. This env var only
-//! exists to make the binary itself testable in isolation.
+//! Note this is *not* how a real `dbs backup` run supplies `feeds`:
+//! `PodcastConnector::configure()` reads `feeds` from
+//! `sources.<name>.feeds`, called by
+//! `dbs_connector_support::run_connector_main` with the per-source
+//! wire config on every real run (#166/ADR-0002). This env var exists
+//! only to make the binary itself testable in isolation, without a
+//! full source config.
 
 use dbs_connector_podcast::{PodcastConfig, PodcastConnector};
 
