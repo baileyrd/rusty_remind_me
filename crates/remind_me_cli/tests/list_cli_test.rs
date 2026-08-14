@@ -26,7 +26,11 @@ fn run(db: &Path, args: &[&str]) -> (String, String, bool) {
 }
 
 fn scratch_db(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("rrm-list-test-{}-{}", name, std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!(
+        "rrm-list-test-{}-{}",
+        name,
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir.join("remind_me.db")
 }

@@ -12,10 +12,13 @@ use remind_me_core::dbs_import::{
 use remind_me_core::{Database, DbsImportInput};
 use rusqlite::{params, Connection};
 
-/// A scratch directory inside the default import root (the home directory).
+/// A scratch directory inside the configured import root.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
-        .join(format!("rrm_dbs_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::import_export_root().join(format!(
+        "rrm_dbs_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

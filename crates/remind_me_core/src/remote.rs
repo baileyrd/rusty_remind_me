@@ -725,7 +725,8 @@ mod tests {
     fn resolve_connector_token_prefers_the_env_var_over_a_persisted_file() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
-        let dir = std::env::temp_dir().join(format!("rrm_remote_token_{}", std::process::id()));
+        let dir = remind_me_testkit::scratch_root()
+            .join(format!("rrm_remote_token_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("connector_token");
@@ -746,7 +747,8 @@ mod tests {
     fn resolve_connector_token_generates_and_persists_on_first_use() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
-        let dir = std::env::temp_dir().join(format!("rrm_remote_token_gen_{}", std::process::id()));
+        let dir = remind_me_testkit::scratch_root()
+            .join(format!("rrm_remote_token_gen_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let file = dir.join("nested").join("connector_token");
         std::env::set_var(REMOTE_TOKEN_FILE_ENV, &file);
@@ -769,7 +771,8 @@ mod tests {
     fn remote_status_reports_token_configured_once_a_token_exists_on_disk() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
-        let dir = std::env::temp_dir().join(format!("rrm_remote_status_{}", std::process::id()));
+        let dir = remind_me_testkit::scratch_root()
+            .join(format!("rrm_remote_status_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("connector_token");
@@ -812,8 +815,8 @@ mod tests {
     fn remote_status_reports_oauth_enabled_and_the_client_count_once_an_issuer_and_clients_exist() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
-        let dir =
-            std::env::temp_dir().join(format!("rrm_remote_status_oauth_{}", std::process::id()));
+        let dir = remind_me_testkit::scratch_root()
+            .join(format!("rrm_remote_status_oauth_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let state_file = dir.join("oauth.json");
@@ -842,7 +845,7 @@ mod tests {
     // -- OAuthStateStore --------------------------------------------------
 
     fn temp_state_path(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = remind_me_testkit::scratch_root().join(format!(
             "rrm_oauth_store_{label}_{}_{}",
             std::process::id(),
             Uuid::new_v4().simple()
@@ -1028,7 +1031,7 @@ mod tests {
     /// root in CI containers, where mode bits are simply bypassed and a
     /// permission-based injection quietly succeeds instead of failing.
     fn unwritable_store() -> (OAuthStateStore, PathBuf) {
-        let base = std::env::temp_dir().join(format!(
+        let base = remind_me_testkit::scratch_root().join(format!(
             "rrm_oauth_unwritable_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -1057,7 +1060,8 @@ mod tests {
 
     #[test]
     fn a_successful_write_leaves_no_temp_file_behind() {
-        let dir = std::env::temp_dir().join(format!("rrm_oauth_tmp_{}", std::process::id()));
+        let dir =
+            remind_me_testkit::scratch_root().join(format!("rrm_oauth_tmp_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let store = OAuthStateStore::new(dir.join("oauth.json"));
         store
@@ -1080,7 +1084,8 @@ mod tests {
         // The rename is what can fail after the temp file exists, so the
         // cleanup path needs its own check -- otherwise a store on a
         // failing volume slowly fills its directory with debris.
-        let dir = std::env::temp_dir().join(format!("rrm_oauth_tmpfail_{}", std::process::id()));
+        let dir = remind_me_testkit::scratch_root()
+            .join(format!("rrm_oauth_tmpfail_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("dir");
         // Make the destination a directory: the write succeeds, the rename
@@ -1111,7 +1116,8 @@ mod tests {
     #[test]
     fn the_state_file_is_never_world_readable_even_briefly() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("rrm_oauth_perm_{}", std::process::id()));
+        let dir = remind_me_testkit::scratch_root()
+            .join(format!("rrm_oauth_perm_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let store = OAuthStateStore::new(dir.join("oauth.json"));
         store
@@ -1135,7 +1141,8 @@ mod tests {
     /// hammering began.
     #[test]
     fn concurrent_readers_never_observe_a_torn_write() {
-        let dir = std::env::temp_dir().join(format!("rrm_oauth_torn_{}", std::process::id()));
+        let dir = remind_me_testkit::scratch_root()
+            .join(format!("rrm_oauth_torn_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let store = std::sync::Arc::new(OAuthStateStore::new(dir.join("oauth.json")));
         store

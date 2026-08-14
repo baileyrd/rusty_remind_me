@@ -33,7 +33,11 @@ fn fake_home() -> PathBuf {
 /// via `name` and the process id (matches this crate's other `scratch()`
 /// helpers, e.g. `dbs_import_test.rs`).
 fn scratch_home(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rrm_memory_dir_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!(
+        "rrm_memory_dir_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

@@ -2,6 +2,99 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-12 — test scratch space no longer lands in the developer's home directory
+
+### Fixed
+- **Every test in the workspace built its scratch directory from
+  `std::env::temp_dir()`**, which on Windows calls `GetTempPath` — and
+  `GetTempPath` falls back to `%USERPROFILE%` when both `TMP` and `TEMP` are
+  unset, then to the Windows directory. Any test run from a process without a
+  full environment (a service, a stripped CI shell, an editor-spawned runner)
+  therefore wrote its scratch directories straight into the developer's home
+  folder, where nothing cleans them up. Added `crates/remind_me_testkit`, a
+  test-only crate whose `scratch_root()` resolves
+  `$REMIND_ME_TEST_TMPDIR` → `$TMPDIR`/`$TEMP`/`$TMP` → `<target dir>/tmp`,
+  reading the variables directly so "unset" is a case the workspace decides
+  rather than one the OS decides for it, and replaced all 63
+  `std::env::temp_dir()` call sites across 42 files in `remind_me_core`,
+  `remind_me_api`, `remind_me_mcp`, `remind_me_cli` and `remind_me_remote`.
+  Every one of those sites was already test-only (`tests/*.rs` or inside a
+  `#[cfg(test)] mod tests`), so no shipped code path changed; `testkit` is a
+  `[dev-dependencies]` entry everywhere and `publish = false`.
+- The `target/`-relative fallback pops parent components rather than appending
+  `..` segments. A path carrying literal `..` names the same location but is
+  not `Path`-equal to the normalised form, which broke
+  `status_test::an_on_disk_database_reports_its_path_and_size` (it compares the
+  path a status report hands back against the path it was given). Popping is
+  also why the fallback does not `canonicalize`: on Windows that prepends the
+  `\\?\` verbatim prefix, the trap `import_paths::roots_from` already
+  documents.
+
+- **The import/export containment tests wrote their fixtures into the home
+  directory on purpose**, and this — not the `temp_dir()` fallback above — is
+  what actually accumulates `rrm_*` directories in practice. Containment
+  refuses any import source outside the configured roots and the default root
+  *is* the home directory, so a test wanting a fixture the importer accepts
+  either wrote into the developer's home folder or configured a root; eight
+  test binaries took the first option (`archive_test`, `dbs_import_test`,
+  `export_test`, `importer_test`, `mempalace_import_test`, `watcher_test`,
+  `watcher_driver_test`, and `remind_me_api`'s `import_export_test`), which is
+  where the observed `rrm_archive_*`, `rrm_dbs_*`, `rrm_export_*`,
+  `rrm_import_*`, `rrm_watch_*` and `rrm_api_io_*` directories came from. They
+  now take their paths from `remind_me_testkit::import_export_root()`, which
+  points `REMIND_ME_IMPORT_ROOTS` and `REMIND_ME_EXPORT_ROOTS` at a per-process
+  directory under the scratch root. The tests that used
+  `import_paths::home_dir_var()` merely as "a path known to be inside the
+  roots" (the traversal-rejection, missing-file and not-yet-created-watch-dir
+  cases) take that anchor from the same function and assert exactly what they
+  did before. `wiki_fs_test`'s `the_default_wiki_dir_is_hyphenated` is
+  deliberately left alone — it asserts the *unset-variable* default, and
+  creates nothing.
+- Those variables are process-global and read on every call, while libtest runs
+  a binary's tests on parallel threads, so `import_export_root()` writes them
+  exactly once per process behind a `OnceLock` rather than letting each test set
+  them and race its siblings. The contract this depends on is documented on the
+  function: a test touching a roots-sensitive API must take its paths from it.
+
+- **The `<target dir>/tmp` fallback is inside this repository**, which is
+  correct for a test that just needs somewhere to put a file and wrong for one
+  whose subject walks *up* the directory tree — and it only engages when
+  `TMP`/`TEMP` are unset, so a normally-configured machine never sees it. Four
+  `updater` tests did exactly that and failed under the stripped environment
+  this change exists to fix: `find_repo_root_from` walks upward for a `.git`
+  beside a `Cargo.toml` naming this workspace, so from `target/tmp/...` it
+  returned `Some(<workspace>)` where the test expected `None`, and the
+  build-path test's scratch crate fell inside this workspace's manifest
+  (`current package believes it's in a workspace when it's not`). Added
+  `non_repo_scratch_root()` — the same resolution order with the in-tree
+  fallback replaced by a `rrm-test-tmp` directory beside the workspace, skipping
+  any candidate with a `.git` above it and panicking rather than quietly
+  returning an in-repo path. `updater`'s `TempDir` takes its scratch space from
+  it, restoring the out-of-repo property `%TEMP%` used to provide for free.
+
+### Provenance
+
+Found by investigating leftover `rrm_*` directories in a developer's home
+directory, which turned out to have two independent causes — only one of them
+the `temp_dir()` fallback the investigation started from.
+
+Verified: `cargo test --workspace --no-fail-fast` green, 1874 tests across 141
+binaries, with zero `rrm_*` directories left in the home directory afterwards;
+then the same run with `TMP`, `TEMP` and `TMPDIR` stripped — the condition that
+triggers the `GetTempPath` fallback, and the one that exposed the `updater`
+failures above — also green at 1874, home directory still clean, scratch landing
+in `target/tmp` and (for `updater`) beside the workspace. `cargo clippy
+--workspace --all-targets` and `cargo fmt --all --check` both clean.
+
+Two pre-existing failures seen on the first run of this branch — `sync::tests`'
+`a_real_triple_still_enables_sync` and
+`unresolved_user_config_placeholder_does_not_enable_sync` — are unrelated to
+this change and are not fixed here: `sync/mod.rs` and `sync/server.rs` each
+declare their own private `ENV_LOCK` while both mutating
+`REMIND_ME_SYNC_SECRET`, so two mutexes serialize nothing against each other.
+They pass under `--test-threads=1` and on subsequent parallel runs. Tracked
+separately.
+
 ## 2026-08-12 — thiserror bumped to 2.x workspace-wide, resolving the duplicate-major dependency (#280)
 
 ### Fixed

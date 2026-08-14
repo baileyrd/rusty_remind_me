@@ -63,7 +63,7 @@ mod with_the_feature {
     struct TempDb(std::path::PathBuf);
     impl TempDb {
         fn new(label: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
+            let dir = remind_me_testkit::scratch_root().join(format!(
                 "rrm_ann_{}_{}_{}",
                 label,
                 std::process::id(),

@@ -21,12 +21,15 @@ use rusqlite::Connection;
 /// failed, and letting it block the rest converts one failure into all of them.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A scratch directory inside the default import root (the home directory),
-/// matching `importer_test.rs`'s own helper — an import source has to sit
+/// A scratch directory inside the configured import root, matching
+/// `importer_test.rs`'s own helper — an import source has to sit
 /// inside the import roots or containment refuses it.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
-        .join(format!("rrm_archive_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::import_export_root().join(format!(
+        "rrm_archive_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

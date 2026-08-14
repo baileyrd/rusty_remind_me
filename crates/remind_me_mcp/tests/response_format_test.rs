@@ -36,7 +36,7 @@ use serde_json::json;
 /// the shared wiki root, which made the empty-wiki assertion below pass or fail
 /// depending on what else had ever run on the machine.
 fn server() -> McpServer {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = remind_me_testkit::scratch_root().join(format!(
         "rrm-fmt-test-{}-{:?}",
         std::process::id(),
         std::thread::current().id()

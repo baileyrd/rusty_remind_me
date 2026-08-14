@@ -10,3 +10,6 @@ remind_me_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+
+[dev-dependencies]
+remind_me_testkit.workspace = true

@@ -37,8 +37,8 @@ fn a_stuck_hub_never_blocks_an_ordinary_database_read() {
         }
     });
 
-    let dir =
-        std::env::temp_dir().join(format!("rrm_sync_worker_lock_test_{}", std::process::id()));
+    let dir = remind_me_testkit::scratch_root()
+        .join(format!("rrm_sync_worker_lock_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("memory.db");

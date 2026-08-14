@@ -256,7 +256,8 @@ fn the_migration_is_idempotent() {
 
 #[test]
 fn opening_an_existing_database_migrates_it() {
-    let dir = std::env::temp_dir().join(format!("rrm_entity_id_{}", std::process::id()));
+    let dir =
+        remind_me_testkit::scratch_root().join(format!("rrm_entity_id_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("memories.db");
     let _ = std::fs::remove_file(&path);

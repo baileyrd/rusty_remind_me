@@ -20,7 +20,7 @@ impl TempDir {
             std::process::id(),
             std::thread::current().id()
         );
-        let path = std::env::temp_dir().join(unique.replace(['(', ')', ' '], ""));
+        let path = remind_me_testkit::scratch_root().join(unique.replace(['(', ')', ' '], ""));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         Self(path)

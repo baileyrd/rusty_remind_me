@@ -172,7 +172,8 @@ fn a_refused_upload_does_not_stop_the_local_backup() {
     clear();
     std::env::set_var(cloud_backup::BUCKET_ENV, "my-bucket");
 
-    let dir = std::env::temp_dir().join(format!("rrm_cloud_backup_{}", std::process::id()));
+    let dir =
+        remind_me_testkit::scratch_root().join(format!("rrm_cloud_backup_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 

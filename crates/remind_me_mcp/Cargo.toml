@@ -12,3 +12,6 @@ serde_json.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+remind_me_testkit.workspace = true

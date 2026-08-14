@@ -18,7 +18,7 @@ struct TempDb(PathBuf);
 
 impl TempDb {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(
+        let dir = remind_me_testkit::scratch_root().join(
             format!(
                 "rmm_migsnap_{}_{}_{:?}",
                 tag,

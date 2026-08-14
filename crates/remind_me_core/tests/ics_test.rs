@@ -345,7 +345,7 @@ fn an_explicit_token_env_var_wins() {
 fn a_generated_token_persists_and_is_reused() {
     let _guard = env_lock().lock().unwrap();
     std::env::remove_var(ICS_TOKEN_ENV);
-    let dir = std::env::temp_dir().join(format!("rmm_ics_{}", std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!("rmm_ics_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("ics_token");
@@ -383,7 +383,7 @@ fn a_generated_token_persists_and_is_reused() {
 fn deleting_the_token_file_rotates_the_token() {
     let _guard = env_lock().lock().unwrap();
     std::env::remove_var(ICS_TOKEN_ENV);
-    let dir = std::env::temp_dir().join(format!("rmm_ics_rot_{}", std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!("rmm_ics_rot_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("ics_token");

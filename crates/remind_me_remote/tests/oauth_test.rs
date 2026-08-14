@@ -72,7 +72,7 @@ static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// above.
 async fn isolated_oauth_state_file(label: &str) -> tokio::sync::MutexGuard<'static, ()> {
     let guard = ENV_LOCK.lock().await;
-    let dir = std::env::temp_dir().join(format!(
+    let dir = remind_me_testkit::scratch_root().join(format!(
         "rrm_oauth_http_test_{label}_{}",
         std::process::id()
     ));

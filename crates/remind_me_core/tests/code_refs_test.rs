@@ -26,7 +26,11 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn db(name: &str) -> Database {
-    let dir = std::env::temp_dir().join(format!("rrm_coderefs_db_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!(
+        "rrm_coderefs_db_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     Database::open(dir.join("memories.db").display().to_string()).unwrap()
@@ -40,8 +44,11 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("rrm_coderefs_root_{}_{}", name, std::process::id()));
+        let root = remind_me_testkit::scratch_root().join(format!(
+            "rrm_coderefs_root_{}_{}",
+            name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("auth.rs");

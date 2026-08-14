@@ -21,7 +21,7 @@ struct TmpDir(std::path::PathBuf);
 
 impl TmpDir {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!(
+        let base = remind_me_testkit::scratch_root().join(format!(
             "rrm-reference-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()

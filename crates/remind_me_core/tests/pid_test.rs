@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::thread::JoinHandle;
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = remind_me_testkit::scratch_root().join(format!(
         "rrm_pid_{}_{}_{:?}",
         name,
         std::process::id(),

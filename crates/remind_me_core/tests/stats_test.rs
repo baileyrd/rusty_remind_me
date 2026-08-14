@@ -131,7 +131,7 @@ fn db_size_is_reported_for_an_in_memory_database() {
 
 #[test]
 fn db_path_is_reported_for_a_file_backed_database() {
-    let dir = std::env::temp_dir().join(format!("rmm_stats_{}", std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!("rmm_stats_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("stats_test.db");
     let _ = std::fs::remove_file(&path);

@@ -13,3 +13,6 @@ remind_me_remote.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
+
+[dev-dependencies]
+remind_me_testkit.workspace = true

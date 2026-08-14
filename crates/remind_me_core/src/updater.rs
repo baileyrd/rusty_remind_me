@@ -560,7 +560,13 @@ mod tests {
                 std::process::id(),
                 std::thread::current().id()
             );
-            let path = std::env::temp_dir().join(unique.replace(['(', ')', ' '], ""));
+            // Out-of-repo, not just out-of-home: these tests ask what lies
+            // *above* their scratch directory -- `find_repo_root_from` walks
+            // up looking for this workspace's `.git`, and the build tests put
+            // a crate inside it that Cargo must not read as a workspace
+            // member. See `non_repo_scratch_root`'s own documentation.
+            let path = remind_me_testkit::non_repo_scratch_root()
+                .join(unique.replace(['(', ')', ' '], ""));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self(path)

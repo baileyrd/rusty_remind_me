@@ -118,7 +118,7 @@ mod with_the_feature {
 
     #[test]
     fn a_model_file_that_is_not_a_model_is_a_clear_error_not_a_panic() {
-        let dir = std::env::temp_dir().join("remind_me_onnx_bad_model_test");
+        let dir = remind_me_testkit::scratch_root().join("remind_me_onnx_bad_model_test");
         std::fs::create_dir_all(&dir).unwrap();
         let model = dir.join("model.rten");
         let tokenizer = dir.join("tokenizer.json");

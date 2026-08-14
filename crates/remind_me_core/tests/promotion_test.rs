@@ -19,7 +19,11 @@ use remind_me_core::{
 use rusqlite::{params, Connection};
 
 fn db(name: &str) -> Database {
-    let dir = std::env::temp_dir().join(format!("rrm_promo_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!(
+        "rrm_promo_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     Database::open(dir.join("memories.db").display().to_string()).unwrap()
