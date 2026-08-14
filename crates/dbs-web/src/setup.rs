@@ -104,6 +104,41 @@ pub fn playwright_install_commands() -> Option<Vec<(String, Vec<String>)>> {
     ])
 }
 
+/// `pip install yt-dlp` — the one real, already-installable dependency
+/// the research pipeline has (`dbs_research::youtube_search`'s
+/// yt-dlp-subprocess search). `None` if no Python interpreter is on
+/// `PATH` to run `pip` through.
+pub fn research_install_commands() -> Option<Vec<(String, Vec<String>)>> {
+    let python = find_python()?;
+    Some(vec![(
+        "pip install yt-dlp".to_string(),
+        vec![
+            python.to_string(),
+            "-m".to_string(),
+            "pip".to_string(),
+            "install".to_string(),
+            "yt-dlp".to_string(),
+        ],
+    )])
+}
+
+/// A [`crate::jobs::JobManager::start`]-compatible NotebookLM login
+/// capture job body. Always fails cleanly — same reason and shape as
+/// [`run_capture_job`]: a real browser session needs the shared
+/// Playwright launch helper issue #99 hasn't built yet.
+pub fn run_notebooklm_login_job(job: &Arc<Job>) -> Result<(), String> {
+    job.emit(json!({
+        "line": "Opening a browser window on the server host for NotebookLM login."
+    }));
+    Err(
+        "browser capture needs a Playwright launch helper this port doesn't have yet \
+         (gap-analysis.md's Connectors cluster, issue #99) — run `notebooklm login` on a \
+         desktop build of the reference instead, then copy its storage_state.json into \
+         <config dir>/.notebooklm/storage_state.json."
+            .to_string(),
+    )
+}
+
 /// The `(label, argv)` steps to make `rc` runnable, derived entirely
 /// from its declared handshake metadata. Empty when it declares
 /// nothing to install. `None` if no Python interpreter is on `PATH`

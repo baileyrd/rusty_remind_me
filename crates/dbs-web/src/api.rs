@@ -23,9 +23,11 @@ use std::time::Duration;
 
 use axum::extract::{Multipart, Path, Query, RawQuery, State};
 use axum::http::{header, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Redirect, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -35,8 +37,15 @@ use dbs_core::{
     ExportQuery, ItemRow, ProgressEvent, SqliteStorage, Storage, SubprocessRunner, VpnGuard,
     CURRENT_API_VERSION,
 };
+use dbs_research::models::VideoMeta;
+use dbs_research::notebooklm::{resolve_auth_state, UnimplementedClient};
+use dbs_research::pipeline::{
+    run_pipeline, run_pipeline_for_videos, SynthesisOptions, DEFAULT_QUESTIONS,
+};
+use dbs_research::report::render_report;
+use dbs_research::youtube_search::yt_dlp_available;
 
-use crate::jobs::{Job, JobAlreadyRunning, JobSnapshot};
+use crate::jobs::{Job, JobAlreadyRunning, JobSnapshot, SseItem};
 use crate::AppState;
 
 /// Export formats `dbs export --format` accepts (`dbs-cli/src/main.rs`'s
@@ -113,6 +122,13 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/sources/:name/import", post(import_source))
         .route("/api/export", get(export_download))
         .route("/api/export-notes", post(export_notes_route))
+        .route("/api/research/meta", get(research_meta))
+        .route("/api/research/install", post(research_install))
+        .route("/api/research/login", post(research_login))
+        .route("/api/research", post(start_research))
+        .route("/api/research/current", get(current_research))
+        .route("/api/research/:id/stream", get(research_stream))
+        .route("/api/research/:id/report", get(research_report))
 }
 
 async fn meta(State(state): State<AppState>) -> Json<Value> {
@@ -1357,4 +1373,362 @@ async fn export_notes_route(
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(Json(result))
+}
+
+// -- research (issue #177) -------------------------------------------------
+
+/// Converts one backed-up YouTube item row (from
+/// `BackupService::select_youtube_backup_videos`) into a
+/// `dbs-research` [`VideoMeta`] — the two crates deliberately don't
+/// depend on each other (`dbs-research`'s own module doc-comment: this
+/// pipeline "has nothing to do with the Connector/Storage/engine
+/// machinery"), so `dbs-web`, the app layer, is where that conversion
+/// belongs. `subscriber_count`/`upload_date` are always `None`: the
+/// youtube connector's own handshake never captures them (see its
+/// `raw` field construction), only `id`/`title`/`channel`/
+/// `view_count`/`duration_seconds` — `VideoMeta::engagement()` already
+/// treats a missing subscriber count as "rank last," not an error.
+fn item_row_to_video_meta(row: &ItemRow) -> Option<VideoMeta> {
+    let raw = row.get("raw").and_then(Value::as_object)?;
+    let id = raw.get("id").and_then(Value::as_str)?.trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let title = row
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    let url = row
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}"));
+    Some(VideoMeta {
+        id,
+        title,
+        url,
+        channel: raw
+            .get("channel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        subscriber_count: None,
+        view_count: raw.get("view_count").and_then(Value::as_i64),
+        duration_seconds: raw.get("duration_seconds").and_then(Value::as_i64),
+        upload_date: None,
+    })
+}
+
+/// `GET /api/research/meta` — `loadResearch` (`app.js`) reads:
+/// `ready`/`pip_requirements`/`missing` (yt-dlp, the pipeline's one
+/// real installable dependency; the NotebookLM synthesis half has no
+/// installable adapter at all yet — see `dbs_research::notebooklm`'s
+/// module doc-comment — so it's reported separately below, not folded
+/// into "missing"), `auth.configured` (whether a captured NotebookLM
+/// session exists), `youtube_sources` (for the backup-mode source
+/// picker), and `default_questions` (the placeholder text).
+async fn research_meta(State(state): State<AppState>) -> Json<Value> {
+    let ready = yt_dlp_available();
+    let pip_requirements = vec!["yt-dlp".to_string()];
+    let missing = if ready {
+        Vec::new()
+    } else {
+        pip_requirements.clone()
+    };
+    let configured = resolve_auth_state(&state.config.base_dir).is_some();
+    let mut youtube_sources: Vec<&String> = state
+        .config
+        .sources
+        .iter()
+        .filter(|(_, sc)| sc.type_ == "youtube")
+        .map(|(name, _)| name)
+        .collect();
+    youtube_sources.sort();
+    Json(json!({
+        "ready": ready,
+        "pip_requirements": pip_requirements,
+        "missing": missing,
+        "auth": {"configured": configured},
+        "youtube_sources": youtube_sources,
+        "default_questions": DEFAULT_QUESTIONS,
+    }))
+}
+
+/// `POST /api/research/install` — `pip install yt-dlp`, streamed
+/// through the same `/api/setup/:id/stream` mount every other setup
+/// job (#175's connector install/capture) uses, on the same shared
+/// `job_manager`.
+async fn research_install(State(state): State<AppState>) -> Result<Json<JobSnapshot>, ApiError> {
+    require_setup_enabled(&state)?;
+    let result = state
+        .job_manager
+        .start(json!({"kind": "research-install"}), |job| {
+            let commands = crate::setup::research_install_commands()
+                .ok_or_else(|| "no Python interpreter found on PATH to install with".to_string())?;
+            crate::setup::run_install_job(&job, &commands)
+        });
+    match result {
+        Ok(job) => Ok(Json(job.snapshot())),
+        Err(JobAlreadyRunning) => Err(job_already_running_error()),
+    }
+}
+
+/// `POST /api/research/login` — NotebookLM's login capture, same
+/// shared `job_manager`/`/api/setup/:id/stream` as `research_install`
+/// and #175's connector capture; fails cleanly pending issue #99.
+async fn research_login(State(state): State<AppState>) -> Result<Json<JobSnapshot>, ApiError> {
+    require_setup_enabled(&state)?;
+    let result = state
+        .job_manager
+        .start(json!({"kind": "research-login"}), |job| {
+            crate::setup::run_notebooklm_login_job(&job)
+        });
+    match result {
+        Ok(job) => Ok(Json(job.snapshot())),
+        Err(JobAlreadyRunning) => Err(job_already_running_error()),
+    }
+}
+
+/// Reshapes a generic [`JobSnapshot`] JSON value into what
+/// `app.js`'s research consumers (`openResearchProgress`'s `end`
+/// listener, `resumeResearchIfRunning`) actually read: `result`
+/// (singular — the one recorded `{report, indexed, total}` object, or
+/// `null` before the job finishes) instead of `results` (plural,
+/// every other job kind's shape), plus a top-level `connector` hoisted
+/// out of `spec` (`openProgress`'s `Researching: ${job.connector}`
+/// title reads it directly off the job, not off `spec`).
+fn reshape_research_snapshot(mut snapshot: Value) -> Value {
+    if let Some(map) = snapshot.as_object_mut() {
+        let result = map
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first().cloned());
+        map.remove("results");
+        map.insert("result".to_string(), result.unwrap_or(Value::Null));
+        let connector = map
+            .get("spec")
+            .and_then(|s| s.get("connector"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        map.insert("connector".to_string(), connector);
+    }
+    snapshot
+}
+
+/// Request body for `POST /api/research` — `app.js`'s research form
+/// submit sends exactly this shape (`$("#research-form")`'s submit
+/// handler).
+#[derive(Deserialize)]
+struct StartResearchRequest {
+    #[serde(default)]
+    mode: String,
+    topic: String,
+    #[serde(default)]
+    queries: Vec<String>,
+    #[serde(default)]
+    sources: Vec<String>,
+    #[serde(default)]
+    lists: Vec<String>,
+    #[serde(default)]
+    questions: Vec<String>,
+    #[serde(default = "default_research_count")]
+    count: u32,
+    #[serde(default = "default_research_per_query_count")]
+    per_query_count: u32,
+    #[serde(default = "default_research_months")]
+    months: u32,
+    #[serde(default)]
+    infographic: bool,
+    #[serde(default)]
+    notebook_name: String,
+}
+
+fn default_research_count() -> u32 {
+    10
+}
+
+fn default_research_per_query_count() -> u32 {
+    10
+}
+
+fn default_research_months() -> u32 {
+    6
+}
+
+/// `POST /api/research` — starts the YouTube-search-or-backup →
+/// NotebookLM-synthesis → report pipeline as a background
+/// [`crate::jobs::Job`] on `research_job_manager` (kept apart from the
+/// shared setup/backup manager — see `AppState::research_job_manager`'s
+/// doc-comment). Every real run fails cleanly at the NotebookLM step
+/// (`dbs_research::notebooklm::UnimplementedClient` — Decision 4's
+/// adapter isn't built yet, same external-tool boundary as issue #99),
+/// but search/selection, progress events, and report rendering are all
+/// real up to that point.
+async fn start_research(
+    State(state): State<AppState>,
+    Json(body): Json<StartResearchRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let topic = body.topic.trim().to_string();
+    if topic.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "\"topic\" is required".to_string(),
+        ));
+    }
+    let backup_mode = body.mode == "backup";
+    let config = state.config.clone();
+    let spec = json!({
+        "mode": if backup_mode { "backup" } else { "search" },
+        "topic": topic,
+        "connector": topic,
+    });
+
+    let result = state.research_job_manager.start(spec, move |job| {
+        let options = SynthesisOptions {
+            questions: (!body.questions.is_empty()).then_some(body.questions),
+            notebook_name: (!body.notebook_name.trim().is_empty()).then_some(body.notebook_name),
+            infographic: body.infographic,
+            infographic_orientation: None,
+            infographic_path: None,
+        };
+        let mut client = UnimplementedClient;
+        let job_for_progress = job.clone();
+        let on_progress = move |line: &str| {
+            job_for_progress.emit(json!({"line": line}));
+        };
+
+        let pipeline_result = if backup_mode {
+            let mut storage = open_storage(&config).map_err(|e| e.to_string())?;
+            let (registry, _report) = build_registry(&config);
+            let runner = SubprocessRunner::new(&config);
+            let service = BackupService::new(&mut storage, &config, &registry, &runner);
+            let sources = (!body.sources.is_empty()).then_some(body.sources.as_slice());
+            let lists = (!body.lists.is_empty()).then_some(body.lists.as_slice());
+            let rows = service
+                .select_youtube_backup_videos(sources, lists, Some(body.count as usize))
+                .map_err(|e| e.to_string())?;
+            let videos: Vec<VideoMeta> = rows.iter().filter_map(item_row_to_video_meta).collect();
+            let source_label = if body.sources.is_empty() {
+                "backed-up youtube sources".to_string()
+            } else {
+                body.sources.join(", ")
+            };
+            run_pipeline_for_videos(
+                &topic,
+                videos,
+                &source_label,
+                options,
+                &mut client,
+                on_progress,
+            )
+        } else {
+            let queries = if body.queries.is_empty() {
+                vec![topic.clone()]
+            } else {
+                body.queries
+            };
+            run_pipeline(
+                &topic,
+                &queries,
+                body.per_query_count,
+                body.count as usize,
+                Some(body.months),
+                options,
+                &mut client,
+                on_progress,
+            )
+        };
+
+        let result = pipeline_result.map_err(|e| e.to_string())?;
+        let report = render_report(&result);
+        let indexed = result.indexed_videos().len();
+        let total = result.outcomes.len();
+        job.record_result(json!({"report": report, "indexed": indexed, "total": total}));
+        Ok(())
+    });
+
+    match result {
+        Ok(job) => Ok(Json(reshape_research_snapshot(
+            serde_json::to_value(job.snapshot()).unwrap_or(Value::Null),
+        ))),
+        Err(JobAlreadyRunning) => Err(job_already_running_error()),
+    }
+}
+
+/// `GET /api/research/current` — the in-flight (or most recently
+/// finished) research job's snapshot, or `null`. `resumeResearchIfRunning`
+/// (`app.js`) polls this on page load to reattach the progress panel.
+async fn current_research(State(state): State<AppState>) -> Json<Value> {
+    match state.research_job_manager.current() {
+        Some(job) => Json(reshape_research_snapshot(
+            serde_json::to_value(job.snapshot()).unwrap_or(Value::Null),
+        )),
+        None => Json(Value::Null),
+    }
+}
+
+/// `GET /api/research/:id/stream` — a dedicated SSE handler (not
+/// `crate::jobs::sse_router`, whose generic `end` payload shape
+/// doesn't match what `openResearchProgress`'s listener reads) built
+/// on the same buffered/live/terminal [`Job::subscribe`] primitive
+/// every other job stream uses, reshaping only the terminal `end`
+/// event's payload via [`reshape_research_snapshot`].
+async fn research_stream(State(state): State<AppState>, Path(id): Path<u64>) -> Response {
+    let Some(job) = state.research_job_manager.get(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let events = job.subscribe().map(|item| {
+        let event = match item {
+            SseItem::Data(v) => Event::default().data(v.to_string()),
+            SseItem::End(v) => Event::default()
+                .event("end")
+                .data(reshape_research_snapshot(v).to_string()),
+        };
+        Ok::<_, std::convert::Infallible>(event)
+    });
+    Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+/// `GET /api/research/:id/report` — the finished job's rendered
+/// Markdown report as a real download (`$("#research-download").href`,
+/// `app.js`), read back from the job's own recorded result rather than
+/// re-rendering from a re-parsed `ResearchResult` (the report text is
+/// all `job.record_result` ever stored — see `start_research`).
+async fn research_report(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<Response, ApiError> {
+    let Some(job) = state.research_job_manager.get(id) else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such job".to_string()));
+    };
+    let snap = job.snapshot();
+    let report = snap
+        .results
+        .first()
+        .and_then(|r| r.get("report"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "no report available for this job".to_string(),
+            )
+        })?;
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"research-report.md\"".to_string(),
+            ),
+        ],
+        report,
+    )
+        .into_response())
 }

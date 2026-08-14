@@ -145,7 +145,7 @@ pub struct JobSnapshot {
 /// `resumeResearchIfRunning`/`openProgress`) listens for a named `end`
 /// SSE event carrying this snapshot to know the job is over —
 /// [`stream_handler`] is what actually names it.
-enum SseItem {
+pub(crate) enum SseItem {
     Data(Value),
     End(Value),
 }
@@ -238,7 +238,14 @@ impl Job {
     /// `.await` the broadcast channel; the returned stream is just that
     /// task's output channel, so a dropped/cancelled stream (a
     /// disconnected SSE client) cleanly stops the forwarding task too.
-    fn subscribe(self: &Arc<Self>) -> impl Stream<Item = SseItem> {
+    ///
+    /// `pub(crate)`: most `/api/*/:id/stream` routes go through
+    /// [`sse_router`] (which calls this internally), but `/api/research`
+    /// needs its own stream handler (issue #177) — its `end` event's
+    /// payload shape (`result`, singular) differs from every other job
+    /// stream's (`results`, plural), so it can't reuse [`stream_handler`]
+    /// as-is, only this lower buffered/live/terminal machinery.
+    pub(crate) fn subscribe(self: &Arc<Self>) -> impl Stream<Item = SseItem> {
         let job = self.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
