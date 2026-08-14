@@ -38,16 +38,22 @@ const EXPORT_FORMATS: &[&str] = &[
     "json", "ndjson", "csv", "markdown", "archive", "obsidian", "wiki",
 ];
 
-/// Every `/api` failure becomes one JSON shape: `{"error": "..."}"`
+/// Every `/api` failure becomes one JSON shape: `{"detail": "..."}"`
 /// with a status code chosen from the underlying [`DbsError`] variant.
 /// `Config`/`Load`/`Run` map to 400 (the request or its target source
 /// is the problem); `Storage`/`Connector` map to 500 (something on
-/// this server's side went wrong, not the caller's).
+/// this server's side went wrong, not the caller's). The key is
+/// `detail`, not `error` — the shipped frontend's `api()`/`apiUpload()`
+/// helpers (`app.js`) read `(await res.json()).detail` on a non-OK
+/// response (the reference is a FastAPI app; this mirrors
+/// `HTTPException`'s default error body shape), so `error` would
+/// silently swallow every server-side error message the frontend was
+/// built to show, falling back to a bare HTTP status text instead.
 struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error": self.1}))).into_response()
+        (self.0, Json(json!({"detail": self.1}))).into_response()
     }
 }
 
@@ -221,7 +227,7 @@ async fn vpn(State(state): State<AppState>) -> Json<Value> {
 async fn verify() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "verify is not yet implemented (tracked in a follow-up issue)"})),
+        Json(json!({"detail": "verify is not yet implemented (tracked in a follow-up issue)"})),
     )
         .into_response()
 }
@@ -363,7 +369,7 @@ async fn item_detail(
 }
 
 fn not_found(message: &str) -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({"error": message}))).into_response()
+    (StatusCode::NOT_FOUND, Json(json!({"detail": message}))).into_response()
 }
 
 /// Reconstructs the raw bytes `Storage::get_media_blob`'s generic

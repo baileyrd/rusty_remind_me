@@ -445,7 +445,7 @@ mod tests {
     async fn api_item_detail_404s_for_an_unknown_id() {
         let (status, body) = get_json(router(None, test_opts()), "/api/items/999999").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body["error"].as_str().unwrap().contains("no such item"));
+        assert!(body["detail"].as_str().unwrap().contains("no such item"));
     }
 
     #[tokio::test]
@@ -814,7 +814,7 @@ mod tests {
     async fn api_verify_reports_not_implemented() {
         let (status, body) = get_json(router(None, test_opts()), "/api/verify").await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body["error"]
+        assert!(body["detail"]
             .as_str()
             .unwrap()
             .contains("not yet implemented"));
