@@ -8,6 +8,44 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real `/api` item browse & media routes (closes #171)
+**2026-08-14**
+
+- **`GET /api/items`** mirrors `dbs items`' list branch (`cmd_items`,
+  `dbs-cli/src/main.rs`): `source`/`type` (repeatable), `q` (search
+  text), `since`/`until`, `include_deleted`, `limit`, `offset`. Since
+  `source`/`type` are sent as repeated query keys (`app.js`'s
+  `browseParams()`) and `axum::extract::Query` can't collect those into
+  a `Vec`, this parses the raw query string directly via
+  `url::form_urlencoded` (already a `dbs-web` dependency) rather than
+  pulling in a new query-string crate. Response envelope
+  (`{items, total, limit, offset}`) matches both the CLI's own
+  `--json` output and what `loadBrowseCardsFlat`/`loadBrowseTable`
+  expect.
+- **`GET /api/items/:id`** bridges `BackupService::get_item` directly —
+  its `media` array (`id`/`filename`/`mime`/`kind`/`byte_size`/
+  `has_data` per entry) already matched `openItemDrawer`'s (`app.js`)
+  expectations exactly, no gap to close beyond the bridge itself.
+- **`GET /api/media/:id`** is a real binary response, not JSON — reads
+  `Storage::get_media_blob` directly (no `BackupService` wrapper exists
+  for it, and none was needed) and reconstructs the raw bytes from the
+  `ItemRow`'s JSON-array-of-byte-numbers encoding (chosen storage-side
+  to keep that method's return type uniform with every other
+  `ItemRow`-returning one).
+- **`GET /api/thumb/:id`** — `:id` here is an *item* id, not a media
+  id (`app.js`'s `thumbUrl` calls it as `/api/thumb/${it.id}`): serves
+  the item's own local image media if it has one, otherwise redirects
+  (307) to YouTube's public thumbnail CDN for a YouTube item whose URL
+  carries a `?v=` video id — YouTube connector items have no local
+  image media rows at all, so proxying would mean fetching bytes this
+  server never stored.
+- 12 new router-level tests, including a real temp-file-backed
+  `SqliteStorage` seed helper (`seed_db`/`seed_youtube_item`) — the
+  `:memory:` database `test_config()` uses for #170's read-only tests
+  doesn't work here since every `/api` handler opens its own fresh
+  connection per request, and each `:memory:` connection is an
+  independent, empty database.
+
 ## `dbs-web`: real `/api` dashboard status routes (closes #170)
 **2026-08-13**
 
