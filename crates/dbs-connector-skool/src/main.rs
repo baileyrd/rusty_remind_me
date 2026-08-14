@@ -8,28 +8,16 @@
 //! Unlike raindrop (and most of its siblings), there's no
 //! `with_base_url`-style override here, and none is needed: this
 //! connector makes zero outbound HTTP calls anywhere — no `reqwest`
-//! dependency exists in this crate at all. `SkoolConnector::fetch()`
-//! (see `src/lib.rs`) is permanently blocked pending issue #99 (the
-//! shared Playwright launch helper): after validating everything that
-//! doesn't need a live browser — the `video_cookies_file_env`
-//! declaration, the `SKOOL_SESSION_DIR` secret, that the session
-//! directory exists, that a downloads root resolves — it
-//! unconditionally returns `Err(ConnectorError::Config(..))` naming
-//! issue #99, regardless of what input it's given. There is thus no
-//! mock HTTP target to redirect a test double at, and no config knob
-//! this binary needs to plumb through.
-//!
-//! This binary exists anyway (rather than leaving the connector
-//! un-wired) so that: (1) `dbs-cli`'s discovery can find `skool` as a
-//! real subprocess like every other connector, proving its handshake
-//! (secret keys, item kinds, `needs_playwright_browser`, ...) end to
-//! end through ADR-0001's protocol; and (2) its current
-//! always-an-error behavior is itself provable through the real
-//! subprocess boundary — `tests/subprocess_binary_integration.rs`
-//! spawns this exact binary and asserts the relayed error mentions
-//! issue #99, so a future PR that lands #99 and wires up real
-//! acquisition here will have a test that visibly starts failing
-//! (forcing an update) rather than one that silently stays green.
+//! dependency exists in this crate at all. `SkoolConnector::fetch()`'s
+//! acquisition step (issue #188) instead shells out to a
+//! Python/Playwright subprocess that drives real Chromium pages
+//! against skool.com — there is no HTTP layer here at all to redirect
+//! at a mock server, and no realistic way to fake a whole browser
+//! session in a subprocess-boundary integration test.
+//! `tests/subprocess_binary_integration.rs` proves the parts that
+//! *are* provable without one: the handshake, and that a connector-
+//! level error (there being no real captured session in CI) relays
+//! correctly through the real run/stream subprocess boundary.
 
 use dbs_connector_skool::{SkoolConfig, SkoolConnector};
 
