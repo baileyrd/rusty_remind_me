@@ -59,9 +59,52 @@ pub fn scratch_root() -> PathBuf {
                 root.display()
             )
         });
-        root
+        to_long_path(&root)
     })
     .clone()
+}
+
+/// `path` with any Windows 8.3 short components expanded to their long form,
+/// and without the `\\?\` verbatim prefix `canonicalize` adds. A no-op
+/// everywhere but Windows, and on a path that cannot be canonicalized.
+///
+/// # Why
+///
+/// `%TEMP%` is not guaranteed to be in long form. A GitHub Actions Windows
+/// runner sets it to `C:\Users\RUNNER~1\AppData\Local\Temp`, because
+/// `runneradmin` exceeds the 8.3 limit. Handing that straight back means a
+/// test comparing a path it *passed in* against the path an API *reports*
+/// fails on a difference that names the same directory:
+///
+/// ```text
+/// left:  C:\Users\runneradmin\AppData\Local\Temp\...\export.json
+/// right: C:\Users\RUNNER~1\AppData\Local\Temp\...\export.json
+/// ```
+///
+/// That is a real failure of `export_test`'s
+/// `an_export_writes_to_a_file_and_reports_its_size` on CI, and it does not
+/// reproduce on a developer machine whose user name happens to fit in eight
+/// characters. Before this crate the same tests took their paths from
+/// `dirs::home_dir()`, which is always long form, so the problem is new with
+/// the move to `%TEMP%` — normalising here is what keeps that move
+/// behaviour-preserving.
+///
+/// The verbatim prefix is stripped rather than kept because a `\\?\` path is
+/// not `Path`-equal to the ordinary spelling of the same location — the exact
+/// trap `import_paths::roots_from` already documents. Only a plain drive path
+/// sheds it unambiguously; anything else (`\\?\UNC\...`) is left alone.
+fn to_long_path(path: &Path) -> PathBuf {
+    if !cfg!(windows) {
+        return path.to_path_buf();
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return path.to_path_buf();
+    };
+    let text = canonical.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// The scratch directory for tests that exercise import/export containment,
@@ -149,7 +192,7 @@ pub fn non_repo_scratch_root() -> PathBuf {
                 root.display()
             )
         });
-        root
+        to_long_path(&root)
     })
     .clone()
 }
@@ -360,6 +403,28 @@ mod tests {
     #[should_panic(expected = "inside a git repository")]
     fn no_candidate_outside_a_repo_panics() {
         resolve_non_repo_root(env_of(&[("TEMP", "/repo/tmp")]), |_| true);
+    }
+
+    /// The roots handed to tests must already be in long form, so a test
+    /// comparing a path it passed in against a path an API reports back does
+    /// not fail on an 8.3-vs-long spelling of the same directory. Vacuous on a
+    /// machine whose `%TEMP%` is already long; it bites on a CI runner, where
+    /// `%TEMP%` contains `RUNNER~1`.
+    #[test]
+    fn the_scratch_roots_are_already_in_long_form() {
+        for root in [
+            scratch_root(),
+            import_export_root(),
+            non_repo_scratch_root(),
+        ] {
+            assert_eq!(
+                root,
+                to_long_path(&root),
+                "{} is not in long form -- an 8.3 path would break tests that \
+                 compare a reported path against the one they passed in",
+                root.display()
+            );
+        }
     }
 
     #[test]
