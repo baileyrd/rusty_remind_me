@@ -72,7 +72,7 @@ pub use run_stream::{
     WireRunContext,
 };
 pub use secrets::Secrets;
-pub use service::{reap_once, ConnectorRunOutcome, ConnectorRunner, UnimplementedRunner};
+pub use service::{ConnectorRunOutcome, ConnectorRunner, UnimplementedRunner};
 pub use storage::sqlite::open_connection;
 pub use storage::sqlite_storage::SqliteStorage;
 pub use storage::{BatchResult, ExportQuery, ItemRow, PreparedItem, SourceRecord, Storage};
