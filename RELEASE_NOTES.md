@@ -8,6 +8,22 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Remove the dead `reap_once` helper in dbs-core (closes #201)
+**2026-08-14**
+
+`reap_once` (a `storage.reap_interrupted_runs()` wrapper guarded by a shared
+`already_reaped` flag) was fully implemented and unit-tested but had zero
+real callers — `backup_source`/`backup_all` hand-roll the same "reap exactly
+once per top-level call" guarantee inline instead, and neither one's control
+flow actually needs a shared mutable guard flag (`backup_all` reaps once
+unconditionally up front, then calls `backup_source` per source with
+`reap: false`). Removed the function, its dedicated `CountingStorage` test
+double, and its three tests; replaced with a single integration-level test
+(`backup_all_reaps_exactly_once_across_multiple_sources`) asserting the same
+guarantee against the real call graph via the existing `FakeStorage`. The
+module doc-comment's description of the guarantee now points at the code
+that actually provides it.
+
 ## Fix more stale doc-comments claiming already-landed wiring is still open (closes #202)
 **2026-08-14**
 
