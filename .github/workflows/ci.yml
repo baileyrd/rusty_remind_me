@@ -47,6 +47,18 @@ jobs:
       - name: Regenerate schema_*.sql and diff against committed files
         run: scripts/check_schema_regen_drift.sh
 
+  # Also cheap and toolchain-independent -- catches a version bump that
+  # updated Cargo.toml but forgot .claude-plugin/plugin.json (or vice versa)
+  # before it ever reaches the release workflow, which tags and packages
+  # both from the same PR.
+  plugin-version:
+    name: plugin.json version vs. workspace version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare .claude-plugin/plugin.json against Cargo.toml
+        run: scripts/check_plugin_version.sh
+
   check:
     name: build / test / clippy / fmt
     runs-on: ubuntu-latest
