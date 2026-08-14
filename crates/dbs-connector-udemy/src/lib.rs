@@ -44,12 +44,10 @@
 //! [`dbs_connector_support::run_with_watchdog`] with a heartbeat fed
 //! by the subprocess's own stdout lines.
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85)
-//! through `dbs-connector-vimeo` (#94) — this struct isn't reachable
-//! from a real `dbs backup` run yet; the plugin registry's run/stream
-//! bridge doesn't exist. Tested directly against the `Connector`
-//! trait and fixture HTTP responses; the download path is tested
-//! against a fake `yt-dlp` script on disk.
+//! Reachable from a real `dbs backup udemy` run since #164's
+//! `dbs-connector-udemy` subprocess binary. Tested directly against
+//! the `Connector` trait and fixture HTTP responses; the download path
+//! is tested against a fake `yt-dlp` script on disk.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

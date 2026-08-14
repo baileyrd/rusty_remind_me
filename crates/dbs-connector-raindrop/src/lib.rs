@@ -39,18 +39,11 @@
 //! auth + delta/cursor fetch) — a reasonable follow-up once media
 //! archiving has its own real story in this port.
 //!
-//! **Not wired up:** this struct isn't reachable from a real `dbs
-//! backup` run yet. Per ADR-0001, a real connector is its own
-//! subprocess binary discovered through the plugin registry's
-//! handshake protocol (`dbs-core::registry`) — that discovery/spawn
-//! machinery exists, but the *run/stream* half (writing a
-//! `RunContext`, reading a `FetchEvent` stream back over the wire) is
-//! a separate, not-yet-built bridge (see `registry.rs`'s own scope
-//! note). This issue's acceptance criteria are scoped to the
-//! connector's own fetch/delta logic, tested directly against the
-//! `Connector` trait and fixture HTTP responses — same boundary this
-//! whole session has drawn around every "the wiring doesn't exist
-//! yet" gap.
+//! Reachable from a real `dbs backup raindrop` run since #161's
+//! `dbs-connector-raindrop` subprocess binary, discovered through the
+//! plugin registry's handshake protocol (`dbs-core::registry`, #45)
+//! and driven end to end by the run/stream bridge (#157). Tested
+//! directly against the `Connector` trait and fixture HTTP responses.
 
 use std::cell::RefCell;
 

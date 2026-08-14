@@ -29,12 +29,8 @@
 //! Auth: `POCKETCASTS_EMAIL`/`POCKETCASTS_PASSWORD` (your web-player
 //! login).
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85),
-//! `dbs-connector-github` (#86), `dbs-connector-pinboard` (#87),
-//! `dbs-connector-readwise` (#88), `dbs-connector-mastodon` (#89),
-//! `dbs-connector-bluesky` (#90), and `dbs-connector-spotify` (#91) —
-//! this struct isn't reachable from a real `dbs backup` run yet; the
-//! plugin registry's run/stream bridge doesn't exist. Tested directly
+//! Reachable from a real `dbs backup pocketcasts` run since #164's
+//! `dbs-connector-pocketcasts` subprocess binary. Tested directly
 //! against the `Connector` trait and fixture HTTP responses.
 
 use std::cell::RefCell;

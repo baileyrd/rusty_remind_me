@@ -30,11 +30,10 @@
 //! still make progress; only when *every* feed fails does the run
 //! fail.
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85)
-//! through `dbs-connector-pocketcasts` (#92) — this struct isn't
-//! reachable from a real `dbs backup` run yet; the plugin registry's
-//! run/stream bridge doesn't exist. Tested directly against the
-//! `Connector` trait and fixture HTTP responses.
+//! Reachable from a real `dbs backup podcast` run since #164's
+//! `dbs-connector-podcast` subprocess binary, whose `configure()` (via
+//! #166/ADR-0002) reads `feeds` from a real source's config. Tested
+//! directly against the `Connector` trait and fixture HTTP responses.
 
 use std::cell::RefCell;
 use std::path::PathBuf;

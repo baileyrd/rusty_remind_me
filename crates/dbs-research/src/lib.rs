@@ -13,14 +13,13 @@
 //! - [`pipeline`] — orchestrates the two into a [`models::ResearchResult`].
 //! - [`report`] — renders that result as a Markdown report.
 //!
-//! **Not wired up:** `dbs-cli`'s `dbs research` subcommands (issue
-//! #77) still report their own "not yet implemented" stub — wiring
-//! them to call into this crate is a natural follow-up, but the
-//! [`notebooklm::UnimplementedClient`] this crate ships means that
-//! wiring wouldn't change user-visible behavior yet anyway (every real
-//! run would still fail at the NotebookLM step). Landing the pipeline
-//! itself first, fully real and tested up to that boundary, mirrors
-//! how issue #80's job manager landed ahead of its own route wiring.
+//! Wired into `dbs-cli`'s `dbs research` subcommands (#77, real
+//! pipeline calls since #189) and `dbs-web`'s `/api/research` routes
+//! (#177) — both call `run_pipeline`/`run_pipeline_for_videos` for
+//! real. Every real run still fails cleanly at the NotebookLM step,
+//! since [`notebooklm::UnimplementedClient`] remains the only concrete
+//! client — Decision 4's real `nlm`/`notebooklm-mcp` adapter is
+//! deferred pending that tool's confirmed CLI surface.
 
 pub mod models;
 pub mod notebooklm;

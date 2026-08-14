@@ -25,11 +25,9 @@
 //! Auth: the access token from readwise.io/access_token in
 //! `READWISE_TOKEN` (sent as `Authorization: Token <token>`).
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85),
-//! `dbs-connector-github` (#86), and `dbs-connector-pinboard` (#87) —
-//! this struct isn't reachable from a real `dbs backup` run yet; the
-//! plugin registry's run/stream bridge doesn't exist. Tested directly
-//! against the `Connector` trait and fixture HTTP responses.
+//! Reachable from a real `dbs backup readwise` run since #164's
+//! `dbs-connector-readwise` subprocess binary. Tested directly against
+//! the `Connector` trait and fixture HTTP responses.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

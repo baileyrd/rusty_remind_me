@@ -45,12 +45,10 @@
 //! since the CLI has no equivalent hook — any stdout activity counts
 //! as progress.
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85)
-//! through `dbs-connector-podcast` (#93) — this struct isn't
-//! reachable from a real `dbs backup` run yet; the plugin registry's
-//! run/stream bridge doesn't exist. Tested directly against the
-//! `Connector` trait and fixture HTTP responses; the download path is
-//! tested against a fake `yt-dlp` script on disk, the same pattern
+//! Reachable from a real `dbs backup vimeo` run since #164's
+//! `dbs-connector-vimeo` subprocess binary. Tested directly against
+//! the `Connector` trait and fixture HTTP responses; the download path
+//! is tested against a fake `yt-dlp` script on disk, the same pattern
 //! `dbs-research`'s YouTube search already uses.
 
 use std::cell::RefCell;
