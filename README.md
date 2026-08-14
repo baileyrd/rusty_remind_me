@@ -62,6 +62,13 @@ A fresh install prints an empty store's stats rather than erroring — that's
 expected; the database (`~/.remind-me/memory.db` by default) is created on
 first use.
 
+Prebuilt binaries for Linux, macOS (Intel/Apple Silicon), and Windows are
+also published on the [Releases
+page](https://github.com/baileyrd/rusty_remind_me/releases) for every
+tagged version — each includes both `rusty-remind-me` and
+`rusty-remind-me-hub` — if you'd rather skip the build step. See [Releases
+and versioning](#releases-and-versioning) below for how those get produced.
+
 ### 2. Connect it to a client
 
 **Claude Code plugin** (recommended if you're using Claude Code): this repo
@@ -175,6 +182,37 @@ rusty_remind_me/
     ├── remind_me_hub/          # Multi-node sync hub: push/pull relay + Tailscale peer discovery
     └── remind_me_cli/          # Unified `rusty-remind-me` binary executable
 ```
+
+---
+
+## Releases and versioning
+
+`.github/workflows/release.yml` watches every push to `main` that touches
+the root `Cargo.toml`. When `[workspace.package].version` there has moved
+past the last version this repo published (checked against existing `vX.Y.Z`
+tags — nothing hand-maintains a changelog of already-shipped versions), it:
+
+1. Builds `rusty-remind-me` and `rusty-remind-me-hub` in release mode,
+   natively, for `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+   `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc` — one job per
+   platform, no cross-compilation, matching the "no system binary at build
+   time" convention the optional feature flags already follow (see
+   `Cargo.toml`).
+2. Packages the Claude Code plugin surface (`.claude-plugin/`, `commands/`,
+   `hooks/`, `.mcp.json`) into its own archive.
+3. Publishes a GitHub Release tagged `vX.Y.Z`, with all of the above
+   attached as downloadable assets.
+
+Bumping the version is therefore the entire release process — there is no
+separate "cut a release" step, and nothing here pushes a tag by hand; the
+release action creates it from the version it read.
+
+A CI job (`plugin-version` in `.github/workflows/ci.yml`,
+`scripts/check_plugin_version.sh`) fails any PR where
+`.claude-plugin/plugin.json`'s `"version"` has drifted from the workspace
+version, so a version bump PR that forgets to update the plugin manifest
+never merges in the first place — the release workflow's plugin archive is
+never a version behind the binaries it ships alongside.
 
 ---
 
