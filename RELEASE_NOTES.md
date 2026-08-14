@@ -8,6 +8,30 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-cli`: wire `dbs research` to the real pipeline (closes #189)
+**2026-08-14**
+
+- **`dbs research youtube`** and **`dbs research youtube-backup`** now call
+  the real `dbs_research::pipeline::run_pipeline`/`run_pipeline_for_videos`
+  instead of printing a stub message — the CLI reaches the same real
+  YouTube-search-or-selection → NotebookLM-synthesis → report pipeline
+  `dbs-web`'s `/api/research` routes (#177) already drive.
+- **`youtube-backup`** converts its matched `ItemRow`s to `VideoMeta` via
+  a new `item_row_to_video_meta` in `dbs-cli` — an intentional duplicate
+  of `dbs-web`'s identical helper (same precedent as `find_python`: two
+  small independent binaries, not worth a shared crate for one function).
+- Every real run still fails cleanly at the NotebookLM step —
+  `notebooklm::UnimplementedClient` is the only concrete client until
+  Decision 4's `nlm`/`notebooklm-mcp` adapter lands (#84).
+- `--auth-state` is accepted and echoed but not yet consumed by the real
+  client (nothing to authenticate against yet).
+- Tests updated for the real pipeline: two stub-era tests replaced with
+  environment-robust ones (assert non-zero exit + no report file written,
+  without pinning which of yt-dlp-missing/no-network causes the failure
+  first), plus a new test that seeds a real backed-up video and confirms
+  `youtube-backup` selection succeeds and the pipeline actually runs
+  before failing at NotebookLM.
+
 ## `dbs-web`: wire `dbs serve --schedule`'s scheduler (closes #190)
 **2026-08-14**
 
