@@ -901,12 +901,12 @@ pub struct PeerServerStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global; serialize this module's env-touching
-    // tests so they don't race each other the way `cargo test` otherwise
-    // would.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // The sync subtree's shared env lock -- see its definition in
+    // `sync/mod.rs`. Deliberately not a private lock in this module: these
+    // tests write SYNC_SECRET_ENV, and so do `sync::tests`, in parallel
+    // threads of the same binary.
+    use super::super::ENV_LOCK;
 
     fn clear_env() {
         std::env::remove_var(super::super::SYNC_SECRET_ENV);
@@ -925,7 +925,7 @@ mod tests {
     /// instead.
     #[test]
     fn unresolved_user_config_placeholder_does_not_start_a_peer_server() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_env();
         std::env::set_var(super::super::SYNC_SECRET_ENV, "${user_config.sync_secret}");
 
@@ -936,7 +936,7 @@ mod tests {
 
     #[test]
     fn a_real_secret_still_starts_a_peer_server() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_env();
         std::env::set_var(super::super::SYNC_SECRET_ENV, "s3cr3t");
 

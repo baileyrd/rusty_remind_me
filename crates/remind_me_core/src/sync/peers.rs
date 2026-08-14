@@ -226,6 +226,13 @@ mod tests {
     // crate's integration tests (which already hold an `ENV_LOCK` for this
     // exact reason), these predate that convention and raced each other
     // intermittently. Same fix, applied here too.
+    //
+    // Deliberately private, and deliberately NOT the subtree-wide
+    // `sync::ENV_LOCK`: the rule is one lock per set of variables, and these
+    // two variables are touched nowhere else. Sharing the other lock would
+    // serialize these tests against every secret/hub-url test for no
+    // correctness gain. (`sync::ENV_LOCK` is shared precisely because two
+    // modules did write the same variable -- see its definition.)
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
