@@ -433,14 +433,21 @@ pub(crate) fn record_pull(conn: &Connection, remote_id: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
     // Env vars are process-global; serialize this module's env-touching
     // tests so they don't race each other the way `cargo test` otherwise
-    // would.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // would. `pub(crate)` (rather than a second, module-local lock) because
+    // `sync::server`'s tests mutate this same `SYNC_SECRET_ENV` -- two
+    // independent locks over one shared process global would still race
+    // each other, which is exactly what happened before this was unified
+    // (a `combined-features` CI run hit
+    // `sync::server::tests::unresolved_user_config_placeholder_does_not_start_a_peer_server`
+    // failing because a concurrent `sync::tests` test set a real secret in
+    // the assertion's window).
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear_env() {
         std::env::remove_var(NODE_ID_ENV);
