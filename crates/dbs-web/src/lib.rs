@@ -99,6 +99,12 @@ pub(crate) struct AppState {
     /// itself isn't wired into this app skeleton yet (`cmd_serve`'s own
     /// stderr note), so this is honest metadata, not a live toggle.
     pub(crate) scheduler_enabled: bool,
+    /// The at-most-one-running-job primitive (issue #80) `/api/backup`
+    /// (issue #174) starts a `BackupService::backup_source`/`backup_all`
+    /// run on. Shared (not per-request) so a second `POST /api/backup`
+    /// while one is running is actually refused, and so `/api/backup/current`
+    /// can find whatever's in flight after a page reload.
+    pub(crate) job_manager: Arc<jobs::JobManager>,
 }
 
 fn cache_stamp_now() -> String {
@@ -128,21 +134,24 @@ pub struct ServeOptions {
 /// default; refused at the `dbs serve` CLI layer otherwise).
 pub fn router(token: Option<String>, opts: ServeOptions) -> Router {
     let security_config = Arc::new(SecurityConfig { token });
+    let job_manager = Arc::new(jobs::JobManager::new());
     let state = AppState {
         cache_stamp: cache_stamp_now(),
         config: Arc::new(opts.config),
         allow_setup: opts.allow_setup,
         scheduler_enabled: opts.schedule,
+        job_manager: job_manager.clone(),
     };
     Router::new()
         .route("/", get(index))
         .route("/static/:name", get(static_asset))
         .merge(api::router())
+        .with_state(state)
+        .nest("/api/backup", jobs::sse_router(job_manager))
         .layer(axum::middleware::from_fn_with_state(
             security_config,
             auth::security_gate,
         ))
-        .with_state(state)
 }
 
 async fn index(State(state): State<AppState>) -> Response {
@@ -1230,6 +1239,214 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
         assert_eq!(body["removed"], false);
+    }
+
+    // -- /api/backup (issue #174) -----------------------------------------
+
+    fn config_with_disabled_source(label: &str) -> dbs_core::Config {
+        let mut config = test_config();
+        config.base_dir = temp_base_dir(label);
+        config.sources.insert(
+            "a".to_string(),
+            dbs_core::SourceConfig {
+                name: "a".to_string(),
+                type_: "fixture".to_string(),
+                enabled: false,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        config
+    }
+
+    /// Polls `GET /api/backup/:id` (the plain JSON snapshot route
+    /// `jobs::sse_router` nests under `/api/backup`) until the job is no
+    /// longer `running` — every job this test suite starts does real
+    /// but near-instant work (a disabled source, or an empty `--all`),
+    /// so a short bounded poll is enough without a fake sleep.
+    async fn wait_until_done(router: Router, id: u64) -> serde_json::Value {
+        for _ in 0..200 {
+            let (status, body) = get_json(router.clone(), &format!("/api/backup/{id}")).await;
+            assert_eq!(status, StatusCode::OK);
+            if body["status"] != "running" {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("job {id} never finished");
+    }
+
+    #[tokio::test]
+    async fn api_start_backup_requires_source_or_all() {
+        let (status, body) = post_json(
+            router(None, test_opts()),
+            "/api/backup",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("\"source\" or \"all\""));
+    }
+
+    #[tokio::test]
+    async fn api_start_backup_rejects_an_unconfigured_source() {
+        let (status, body) = post_json(
+            router(None, test_opts()),
+            "/api/backup",
+            serde_json::json!({"source": "nonexistent"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn api_start_backup_runs_a_disabled_source_to_a_skipped_result() {
+        let config = config_with_disabled_source("disabled");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/backup",
+            serde_json::json!({"source": "a"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["spec"]["source"], "a");
+        let id = body["id"].as_u64().unwrap();
+
+        let snap = wait_until_done(router, id).await;
+        assert_eq!(snap["status"], "done");
+        let results = snap["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["status"], "skipped");
+    }
+
+    #[tokio::test]
+    async fn api_backup_current_is_null_when_nothing_has_run() {
+        let (status, body) = get_json(router(None, test_opts()), "/api/backup/current").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn api_backup_current_reflects_the_most_recently_started_job() {
+        let config = config_with_disabled_source("current");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (_, body) = post_json(
+            router.clone(),
+            "/api/backup",
+            serde_json::json!({"source": "a"}),
+        )
+        .await;
+        let id = body["id"].as_u64().unwrap();
+        wait_until_done(router.clone(), id).await;
+
+        let (status, current) = get_json(router, "/api/backup/current").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(current["id"], id);
+    }
+
+    #[tokio::test]
+    async fn api_cancel_backup_404s_for_an_unknown_job() {
+        let response = router(None, test_opts())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backup/999999/cancel")
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_cancel_backup_on_an_already_finished_job_reports_not_cancelled() {
+        let config = config_with_disabled_source("cancel-finished");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (_, body) = post_json(
+            router.clone(),
+            "/api/backup",
+            serde_json::json!({"source": "a"}),
+        )
+        .await;
+        let id = body["id"].as_u64().unwrap();
+        wait_until_done(router.clone(), id).await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/backup/{id}/cancel"))
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        assert_eq!(body["cancelled"], false);
+    }
+
+    #[tokio::test]
+    async fn api_backup_stream_ends_with_the_final_snapshot() {
+        let config = config_with_disabled_source("stream");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (_, body) = post_json(
+            router.clone(),
+            "/api/backup",
+            serde_json::json!({"source": "a"}),
+        )
+        .await;
+        let id = body["id"].as_u64().unwrap();
+        wait_until_done(router.clone(), id).await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/backup/{id}/stream"))
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let sse_body = body_string(response).await;
+        assert!(sse_body.contains("event: end"), "{sse_body}");
+        assert!(sse_body.contains(r#""status":"done""#), "{sse_body}");
     }
 
     #[tokio::test]

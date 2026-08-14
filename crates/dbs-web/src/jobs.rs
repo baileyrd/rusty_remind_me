@@ -137,6 +137,19 @@ pub struct JobSnapshot {
     pub results: Vec<Value>,
 }
 
+/// One item [`Job::subscribe`]'s stream yields: an ordinary progress
+/// `Data` payload, or the terminal `End` payload (the job's final
+/// [`JobSnapshot`]) every subscriber gets exactly once, whether it was
+/// watching live or only attached after the job had already finished.
+/// Every `/api/*/:id/stream` consumer (`app.js`'s `streamSetup`/
+/// `resumeResearchIfRunning`/`openProgress`) listens for a named `end`
+/// SSE event carrying this snapshot to know the job is over —
+/// [`stream_handler`] is what actually names it.
+enum SseItem {
+    Data(Value),
+    End(Value),
+}
+
 impl Job {
     pub fn id(&self) -> u64 {
         self.id
@@ -212,16 +225,20 @@ impl Job {
         }
     }
 
-    /// Buffered events first, then live ones, ending once the job's
-    /// finish message has been delivered (or immediately, for a job
-    /// that had already finished before this call). Mirrors the
-    /// reference's `JobManager.stream` generator.
+    /// Buffered events first, then live ones, ending with exactly one
+    /// [`SseItem::End`] carrying the job's final snapshot — whether the
+    /// job finishes while this subscriber is attached, or had already
+    /// finished before `subscribe` was even called (a late attach still
+    /// gets a real terminal event, not a stream that silently never
+    /// closes). Mirrors the reference's `JobManager.stream` generator,
+    /// extended with the terminal snapshot every `end`-event consumer
+    /// needs.
     ///
     /// Runs the replay-then-forward loop on its own task so it can
     /// `.await` the broadcast channel; the returned stream is just that
     /// task's output channel, so a dropped/cancelled stream (a
     /// disconnected SSE client) cleanly stops the forwarding task too.
-    fn subscribe(self: &Arc<Self>) -> impl Stream<Item = Value> {
+    fn subscribe(self: &Arc<Self>) -> impl Stream<Item = SseItem> {
         let job = self.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -236,21 +253,29 @@ impl Job {
                 (buffered, live_rx)
             };
             for event in buffered {
-                if tx.send(event).is_err() {
+                if tx.send(SseItem::Data(event)).is_err() {
                     return;
                 }
             }
+            let snapshot_value = || serde_json::to_value(job.snapshot()).unwrap_or(Value::Null);
             let Some(mut live_rx) = live_rx else {
+                // Already finished before this subscriber attached —
+                // still owed a terminal event, just immediately.
+                let _ = tx.send(SseItem::End(snapshot_value()));
                 return;
             };
             loop {
                 match live_rx.recv().await {
                     Ok(JobMessage::Event(event)) => {
-                        if tx.send(event).is_err() {
+                        if tx.send(SseItem::Data(event)).is_err() {
                             return;
                         }
                     }
-                    Ok(JobMessage::Finished) | Err(broadcast::error::RecvError::Closed) => return,
+                    Ok(JobMessage::Finished) => {
+                        let _ = tx.send(SseItem::End(snapshot_value()));
+                        return;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
                     // A slow subscriber fell behind the broadcast's
                     // ring buffer; skip ahead rather than end the
                     // stream over it — the buffered replay already
@@ -397,9 +422,13 @@ async fn stream_handler(
     let Some(job) = manager.get(id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let events = job
-        .subscribe()
-        .map(|event| Ok::<_, Infallible>(Event::default().data(event.to_string())));
+    let events = job.subscribe().map(|item| {
+        let event = match item {
+            SseItem::Data(v) => Event::default().data(v.to_string()),
+            SseItem::End(v) => Event::default().event("end").data(v.to_string()),
+        };
+        Ok::<_, Infallible>(event)
+    });
     Sse::new(events)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
@@ -585,6 +614,40 @@ mod tests {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains(r#"data: {"phase":"one"}"#), "{body}");
         assert!(body.contains(r#"data: {"phase":"two"}"#), "{body}");
+        assert!(body.contains("event: end"), "{body}");
+        assert!(body.contains(r#""status":"done""#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_stream_route_emits_end_immediately_for_a_job_that_already_finished() {
+        // A late subscriber — attached only after the job finished —
+        // must still get a real terminal event rather than a stream
+        // that opens and silently never closes.
+        let manager = Arc::new(JobManager::new());
+        let job = manager.start(json!({}), |_job| Ok(())).ok().unwrap();
+        for _ in 0..200 {
+            if job.status() != JobStatus::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(job.status(), JobStatus::Done);
+
+        let router = sse_router(manager);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{}/stream", job.id()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("event: end"), "{body}");
+        assert!(body.contains(r#""status":"done""#), "{body}");
     }
 
     #[tokio::test]
