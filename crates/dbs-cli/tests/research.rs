@@ -1,16 +1,17 @@
 //! Integration tests for `dbs research youtube`/`youtube-backup` (issue
-//! #77).
+//! #77, wired to the real `dbs-research` pipeline in #189).
 //!
-//! Both commands' NotebookLM synthesis step isn't implemented in this
-//! port yet (see gap-analysis.md's Research subsystem row), so these
-//! tests cover what's real today: flag parsing, default output path
-//! (`./<slug>.md`), and `youtube-backup`'s video *selection* against
-//! the (empty, in these tests) backup database — including the
-//! reference's own "no videos matched" error and its source/list
-//! scoping text. The "videos matched" success path is covered by the
-//! `dbs-core` unit tests for `BackupService::select_youtube_backup_videos`
-//! (which seed a real database), the same split established for
-//! `dbs sources`/`dbs connectors` (#71) and `dbs capture` (#76).
+//! Both commands' NotebookLM synthesis step is real but can never
+//! succeed against `notebooklm::UnimplementedClient` (see that type's
+//! own doc-comment — Decision 4's real adapter is deferred pending
+//! #84), so these tests cover what's actually verifiable in a sandbox
+//! with no live network access: flag parsing, default output path
+//! (`./<slug>.md`), no report file written on failure,
+//! `youtube-backup`'s video *selection* against the (empty, in most of
+//! these tests) backup database — including the reference's own "no
+//! videos matched" error and its source/list scoping text — and, with
+//! a real seeded video, that selection succeeding and the pipeline
+//! actually running past it before failing at the NotebookLM step.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -53,9 +54,20 @@ fn run(
         .unwrap()
 }
 
+// `research youtube` now runs the real pipeline (issue #189):
+// `dbs_research::pipeline::run_pipeline` shells out to a real `yt-dlp`
+// for search, then hits `notebooklm::UnimplementedClient`. Neither
+// step can succeed in this test environment (`yt-dlp` may or may not
+// be on `PATH`, and even if it is, this sandbox has no live network
+// access to youtube.com) — so rather than pin the *specific* failure
+// message (which depends on which of those two unavailable
+// dependencies it hits first), these tests only assert the two things
+// guaranteed regardless: a non-zero exit and no report file written
+// (the report is only written on success).
+
 #[test]
-fn research_youtube_reports_the_pipeline_stub_and_the_default_out_path() {
-    let dir = temp_dir("youtube-stub");
+fn research_youtube_fails_cleanly_and_writes_no_report() {
+    let dir = temp_dir("youtube-fail");
     let config_path = write_config(&dir);
 
     let output = run(
@@ -65,18 +77,15 @@ fn research_youtube_reports_the_pipeline_stub_and_the_default_out_path() {
     );
     assert_eq!(output.status.code(), Some(4), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("research pipeline isn't implemented"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("claude-code-skills.md"), "{stderr}");
+    assert!(!stderr.is_empty(), "{stderr}");
+    assert!(!dir.join("claude-code-skills.md").exists());
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn research_youtube_respects_a_custom_out_path() {
-    let dir = temp_dir("youtube-out");
+fn research_youtube_with_a_custom_out_path_still_writes_nothing_on_failure() {
+    let dir = temp_dir("youtube-out-fail");
     let config_path = write_config(&dir);
 
     let output = run(
@@ -91,9 +100,8 @@ fn research_youtube_respects_a_custom_out_path() {
         ],
     );
     assert_eq!(output.status.code(), Some(4), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("report.md"), "{stderr}");
-    assert!(!stderr.contains("claude-code-skills.md"), "{stderr}");
+    assert!(!dir.join("report.md").exists());
+    assert!(!dir.join("claude-code-skills.md").exists());
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -186,6 +194,72 @@ fn research_youtube_backup_with_no_topic_is_a_usage_error() {
 
     let output = run(&dir, &config_path, &["research", "youtube-backup"]);
     assert!(!output.status.success(), "{output:?}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// With a real backed-up video seeded, selection succeeds — the
+/// pipeline now actually runs (past the "no videos matched" early
+/// return) and only fails at the NotebookLM step.
+#[test]
+fn research_youtube_backup_with_a_matched_video_runs_the_pipeline_and_fails_cleanly() {
+    let dir = temp_dir("backup-real-video");
+    let config_path = write_config(&dir);
+
+    {
+        use dbs_core::{PreparedItem, SqliteStorage, Storage};
+        let db_path = dir.join("dbs.sqlite3");
+        let mut storage = SqliteStorage::open(db_path.to_str().unwrap()).unwrap();
+        storage.migrate().unwrap();
+        let source = storage
+            .upsert_source("yt", "youtube", "p", "{}", 1)
+            .unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let item = PreparedItem {
+            external_id: "v1".to_string(),
+            item_kind: "video".to_string(),
+            title: Some("A great video".to_string()),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string()),
+            body: None,
+            tags: vec![],
+            item_created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            item_updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+            content_hash: "h1".to_string(),
+            raw_json: serde_json::json!({
+                "id": "dQw4w9WgXcQ",
+                "channel": "A Channel",
+                "view_count": 12345,
+            })
+            .to_string(),
+            deleted: false,
+            media: Vec::new(),
+        };
+        storage
+            .upsert_items(source.id, run_id, &[item], true, 0)
+            .unwrap();
+    }
+
+    let output = run(
+        &dir,
+        &config_path,
+        &[
+            "research",
+            "youtube-backup",
+            "claude code skills",
+            "--source",
+            "yt",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("No backed-up YouTube videos matched"),
+        "{stderr}"
+    );
+    assert!(!stderr.is_empty(), "{stderr}");
+    assert!(!dir.join("claude-code-skills.md").exists());
 
     std::fs::remove_dir_all(&dir).ok();
 }

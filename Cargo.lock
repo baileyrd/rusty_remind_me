@@ -475,6 +475,7 @@ dependencies = [
  "ctrlc",
  "dbs-connector-raindrop",
  "dbs-core",
+ "dbs-research",
  "dbs-web",
  "serde_json",
  "tokio",

@@ -119,7 +119,7 @@ not left as one oversized issue.
 | `dbs schedule` (cron/systemd snippets) | fn | spec | both | `cli.py` | — | no | S | Done (#74) — Linux branch ports the reference's cron+systemd snippets exactly; Windows branch generates a `schtasks` command, no reference equivalent |
 | `dbs serve` flag wiring | fn | spec | both | `cli.py` | — | no | S | Done (#75) — flags parse and validate for real; the actual server is still the Web tier row below |
 | `dbs capture` (headless login capture) | fn | spec | both | `cli.py`, `web/setup.py` | — | no | L | Done (#76) — target resolution + default out-path per capture kind implemented; the actual browser-automation subprocess still depends on the strategy decision (see Connectors) |
-| `dbs research` subcommands | fn | spec | both | `cli.py`, `research/*` | — | no | L | Done (#77) — flag surface + `youtube-backup`'s real video selection against the backup DB implemented; the NotebookLM synthesis step itself still depends on the NotebookLM client — see Research row |
+| `dbs research` subcommands | fn | spec | both | `cli.py`, `research/*` | — | no | L | Done (#77, real pipeline wiring #189) — both `youtube` and `youtube-backup` call the real `dbs_research::pipeline::run_pipeline`/`run_pipeline_for_videos` (the latter converting `ItemRow`→`VideoMeta` for its matched videos, same conversion `dbs-web`'s `/api/research` uses); the NotebookLM synthesis step itself still depends on the NotebookLM client — see Research row |
 | `dbs version` | fn | spec | both | `cli.py` | — | no | S | Done (#78) — prints `rusty_dbs <crate version> (core API v<N>)` |
 
 ## Web tier (`[web]` extra)
@@ -145,7 +145,7 @@ not left as one oversized issue.
 
 | Symbol | Category | Source | Platforms | Reference | Existing RustyMill impl | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Research pipeline (YouTube search → NotebookLM synthesis → report) | fn | spec | both | `src/dbs/research/*` | — | no | L | Done (#84) — new `dbs-research` crate: YouTube search (real, yt-dlp subprocess) + report rendering are fully real; NotebookLM sits behind a `NotebookLmClient` trait whose concrete `nlm`/`notebooklm-mcp` adapter (Decision 4) is deferred pending that tool's confirmed CLI surface. Not yet wired into `dbs-cli`'s `dbs research` (#77) stubs |
+| Research pipeline (YouTube search → NotebookLM synthesis → report) | fn | spec | both | `src/dbs/research/*` | — | no | L | Done (#84) — new `dbs-research` crate: YouTube search (real, yt-dlp subprocess) + report rendering are fully real; NotebookLM sits behind a `NotebookLmClient` trait whose concrete `nlm`/`notebooklm-mcp` adapter (Decision 4) is deferred pending that tool's confirmed CLI surface. Wired into `dbs-cli`'s `dbs research` (#77, #189) and `dbs-web`'s `/api/research` (#177) — every real run reaches this step and fails cleanly at `NotebookLmClient` |
 
 ## Connectors (14 — each a natural one-issue unit; "template" per README's own A/B split)
 

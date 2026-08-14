@@ -43,6 +43,11 @@ use dbs_core::{
     ConnectorRegistry, DbsError, ExportQuery, ItemRow, ProgressEvent, ProgressPhase, RunResult,
     RunStatus, SqliteStorage, Storage, SubprocessRunner, CURRENT_API_VERSION,
 };
+use dbs_research::models::{ResearchError, ResearchResult, VideoMeta};
+use dbs_research::notebooklm::UnimplementedClient;
+use dbs_research::pipeline::{run_pipeline, run_pipeline_for_videos, SynthesisOptions};
+use dbs_research::report::render_report;
+use serde_json::Value;
 
 const STUB_EXIT_CODE: i32 = 1;
 const CONFIG_ERROR_EXIT_CODE: i32 = 4;
@@ -2546,15 +2551,19 @@ struct YoutubeResearchArgs {
     auth_state: Option<PathBuf>,
 }
 
-/// Mirrors the reference's `research youtube` command's flag surface
-/// and its default output path (`./<slug>.md`). The pipeline itself —
-/// a live YouTube search feeding a NotebookLM notebook — isn't
-/// implemented in this port yet: it depends on the research subsystem
-/// (gap-analysis.md's Research subsystem row, not yet its own issue)
-/// and the NotebookLM integration strategy (gap-analysis.md's
-/// Decisions section item 4: shell out to `nlm`/`notebooklm-mcp` as a
-/// subprocess or MCP client). So once flags parse, this reports what
-/// it would do instead of pretending to run a real search.
+/// Mirrors the reference's `research youtube` command: live YouTube
+/// search (`dbs_research::youtube_search`, a real `yt-dlp` subprocess)
+/// feeding a NotebookLM notebook (`dbs_research::pipeline::run_pipeline`).
+/// Every real run still fails cleanly at the NotebookLM step —
+/// `dbs_research::notebooklm::UnimplementedClient` is the only
+/// concrete `NotebookLmClient` this port has; Decision 4's real
+/// `nlm`/`notebooklm-mcp` adapter is deferred pending that tool's
+/// confirmed CLI surface (#84) — same boundary issue #99 draws around
+/// browser-auth capture. Progress lines go to stderr as they arrive
+/// (search progress, notebook creation, per-video indexing, each
+/// analysis question), matching `cmd_backup`'s own stderr-progress
+/// convention; the report is written to `--out` (default `./<slug>.md`)
+/// only on success.
 fn cmd_research_youtube(args: YoutubeResearchArgs) -> i32 {
     let slug = slugify(&args.topic);
     let out_path = args
@@ -2565,36 +2574,36 @@ fn cmd_research_youtube(args: YoutubeResearchArgs) -> i32 {
     } else {
         args.query
     };
-
-    eprintln!(
-        "dbs research youtube: the research pipeline isn't implemented in this port yet (see \
-         gap-analysis.md's Research subsystem row) \u{2014} would search {:?} ({} results/query, \
-         {} final, {}-month recency) and write a report to {}",
-        queries,
-        args.per_query_count,
-        args.count,
-        args.months,
-        out_path.display()
-    );
-    if !args.question.is_empty() {
-        eprintln!(
-            "  ({} custom analysis question(s) given)",
-            args.question.len()
-        );
-    }
-    if args.infographic {
-        eprintln!(
-            "  (would also generate a {} infographic)",
-            args.infographic_orientation
-        );
-    }
-    if let Some(name) = &args.notebook_name {
-        eprintln!("  (notebook name: {name})");
-    }
     if let Some(path) = &args.auth_state {
-        eprintln!("  (auth state: {})", path.display());
+        // `UnimplementedClient` takes no construction arguments today,
+        // so there's nothing yet to thread this into — noted so the
+        // flag isn't silently swallowed once given.
+        eprintln!(
+            "(auth state: {}; not yet consumed — no real NotebookLM adapter exists)",
+            path.display()
+        );
     }
-    CONFIG_ERROR_EXIT_CODE
+
+    let options = SynthesisOptions {
+        questions: (!args.question.is_empty()).then_some(args.question),
+        notebook_name: args.notebook_name,
+        infographic: args.infographic,
+        infographic_orientation: (!args.infographic_orientation.is_empty())
+            .then_some(args.infographic_orientation),
+        infographic_path: None,
+    };
+    let mut client = UnimplementedClient;
+    let result = run_pipeline(
+        &args.topic,
+        &queries,
+        args.per_query_count,
+        args.count as usize,
+        Some(args.months),
+        options,
+        &mut client,
+        |line| eprintln!("{line}"),
+    );
+    report_research_result(result, &out_path)
 }
 
 struct YoutubeBackupResearchArgs {
@@ -2610,13 +2619,15 @@ struct YoutubeBackupResearchArgs {
     auth_state: Option<PathBuf>,
 }
 
-/// Mirrors the reference's `research youtube-backup` command: unlike
-/// `research youtube`, video *selection* is real — it queries already
-/// backed-up items via [`BackupService::select_youtube_backup_videos`]
-/// and reports the reference's own "no videos matched" error when
-/// nothing does. Sending the selected videos through NotebookLM is the
-/// same not-yet-implemented pipeline step as `research youtube` (see
-/// that function's doc-comment) — reported once selection succeeds.
+/// Mirrors the reference's `research youtube-backup` command: video
+/// *selection* queries already backed-up items via
+/// [`BackupService::select_youtube_backup_videos`] (reporting the
+/// reference's own "no videos matched" error when nothing does), then
+/// [`item_row_to_video_meta`] converts each selected row into a
+/// `dbs_research::VideoMeta` and [`dbs_research::pipeline::run_pipeline_for_videos`]
+/// sends them through NotebookLM — same clean-failure boundary as
+/// `research youtube` (see that function's doc-comment): every real
+/// run still fails at `UnimplementedClient`, pending #84's adapter.
 fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchArgs) -> i32 {
     let cfg = match load_config(config_path) {
         Ok(cfg) => cfg,
@@ -2643,12 +2654,12 @@ fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchAr
     } else {
         Some(args.list.as_slice())
     };
-    let videos =
-        match service.select_youtube_backup_videos(sources, lists, Some(args.count as usize)) {
-            Ok(v) => v,
-            Err(e) => return report_config_error(&e),
-        };
-    if videos.is_empty() {
+    let rows = match service.select_youtube_backup_videos(sources, lists, Some(args.count as usize))
+    {
+        Ok(v) => v,
+        Err(e) => return report_config_error(&e),
+    };
+    if rows.is_empty() {
         let scope = if args.source.is_empty() {
             "any youtube source".to_string()
         } else {
@@ -2665,38 +2676,112 @@ fn cmd_research_youtube_backup(config_path: &Path, args: YoutubeBackupResearchAr
         );
         return CONFIG_ERROR_EXIT_CODE;
     }
+    let videos: Vec<VideoMeta> = rows.iter().filter_map(item_row_to_video_meta).collect();
+    let source_label = if args.source.is_empty() {
+        "backed-up youtube sources".to_string()
+    } else {
+        args.source.join(", ")
+    };
 
     let slug = slugify(&args.topic);
     let out_path = args
         .out
         .unwrap_or_else(|| PathBuf::from(format!("{slug}.md")));
-
-    eprintln!(
-        "dbs research youtube-backup: the research pipeline isn't implemented in this port yet \
-         (see gap-analysis.md's Research subsystem row) \u{2014} {} backed-up video(s) selected, \
-         would write a report to {}",
-        videos.len(),
-        out_path.display()
-    );
-    if !args.question.is_empty() {
-        eprintln!(
-            "  ({} custom analysis question(s) given)",
-            args.question.len()
-        );
-    }
-    if args.infographic {
-        eprintln!(
-            "  (would also generate a {} infographic)",
-            args.infographic_orientation
-        );
-    }
-    if let Some(name) = &args.notebook_name {
-        eprintln!("  (notebook name: {name})");
-    }
     if let Some(path) = &args.auth_state {
-        eprintln!("  (auth state: {})", path.display());
+        eprintln!(
+            "(auth state: {}; not yet consumed — no real NotebookLM adapter exists)",
+            path.display()
+        );
     }
-    CONFIG_ERROR_EXIT_CODE
+
+    let options = SynthesisOptions {
+        questions: (!args.question.is_empty()).then_some(args.question),
+        notebook_name: args.notebook_name,
+        infographic: args.infographic,
+        infographic_orientation: (!args.infographic_orientation.is_empty())
+            .then_some(args.infographic_orientation),
+        infographic_path: None,
+    };
+    let mut client = UnimplementedClient;
+    let result = run_pipeline_for_videos(
+        &args.topic,
+        videos,
+        &source_label,
+        options,
+        &mut client,
+        |line| eprintln!("{line}"),
+    );
+    report_research_result(result, &out_path)
+}
+
+/// Converts one backed-up YouTube item row (from
+/// [`BackupService::select_youtube_backup_videos`]) into a
+/// `dbs-research` [`dbs_research::VideoMeta`]. Duplicated from
+/// `dbs-web`'s identical helper (`crates/dbs-web/src/api.rs`) rather
+/// than hoisted to a shared crate — the two crates don't otherwise
+/// depend on each other in that direction, and it's a few lines; same
+/// precedent as `dbs-web::setup::find_python`'s own duplication of a
+/// `dbs-cli` helper. `subscriber_count`/`upload_date` are always
+/// `None`: the youtube connector's own handshake never captures them,
+/// only `id`/`title`/`channel`/`view_count`/`duration_seconds` —
+/// `VideoMeta::engagement()` already treats a missing subscriber count
+/// as "rank last," not an error.
+fn item_row_to_video_meta(row: &ItemRow) -> Option<VideoMeta> {
+    let raw = row.get("raw").and_then(Value::as_object)?;
+    let id = raw.get("id").and_then(Value::as_str)?.trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let title = row
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    let url = row
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}"));
+    Some(VideoMeta {
+        id,
+        title,
+        url,
+        channel: raw
+            .get("channel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        subscriber_count: None,
+        view_count: raw.get("view_count").and_then(Value::as_i64),
+        duration_seconds: raw.get("duration_seconds").and_then(Value::as_i64),
+        upload_date: None,
+    })
+}
+
+/// Shared success/failure handling for both `research` subcommands:
+/// writes the rendered report to `out_path` and prints a summary line
+/// on success; prints the error and returns [`CONFIG_ERROR_EXIT_CODE`]
+/// otherwise — including the expected-today case where the pipeline
+/// reaches `UnimplementedClient` and fails cleanly there.
+fn report_research_result(result: Result<ResearchResult, ResearchError>, out_path: &Path) -> i32 {
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("dbs research: {e}");
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+    };
+    let report = render_report(&result);
+    if let Err(e) = std::fs::write(out_path, report) {
+        eprintln!("dbs research: failed to write {}: {e}", out_path.display());
+        return CONFIG_ERROR_EXIT_CODE;
+    }
+    println!(
+        "Wrote report to {} ({}/{} videos indexed)",
+        out_path.display(),
+        result.indexed_videos().len(),
+        result.outcomes.len(),
+    );
+    0
 }
 
 /// Mirrors the reference's `version` command: `<tool> <version> (core
