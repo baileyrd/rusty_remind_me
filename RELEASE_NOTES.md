@@ -8,6 +8,53 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real `/api` backup trigger + live progress routes (closes #174)
+**2026-08-14**
+
+- **`POST /api/backup`** starts a `BackupService::backup_source`/
+  `backup_all` run as a background `crate::jobs::Job` and returns its
+  snapshot immediately (`openProgress`, `app.js`). A `source` that
+  isn't configured is rejected synchronously with a 400 (a cheap
+  in-memory `Config::sources` lookup, no DB open needed); a second
+  trigger while one is already running is refused with a 409. Whether
+  the run itself succeeds surfaces later through the job's own
+  `status`/`error`/`results`.
+- **`GET /api/backup/:id/stream`** and **`GET /api/backup/current`**
+  are `crate::jobs`' existing SSE/snapshot primitives (issue #80),
+  nested under `/api/backup` — unchanged from that issue beyond the
+  `end`-event fix below.
+- **`POST /api/backup/:id/cancel`** requests the job's cooperative
+  early stop (`stopBackup`, `app.js`) — 404s for an unknown job id,
+  otherwise always 200.
+- **`crate::jobs::Job::subscribe` gained a terminal `end` SSE event**
+  carrying the job's final snapshot — every `/api/*/:id/stream`
+  consumer `app.js` already ships (`streamSetup`, `openProgress`,
+  `resumeResearchIfRunning`) listens for a named `end` event, but the
+  #80 primitive only ever emitted plain, unnamed progress events and
+  then silently closed the connection. Fixed at the shared primitive
+  rather than duplicated per-route, so #175's setup/capture streams
+  and #177's research stream inherit the fix for free. A late
+  subscriber — attached only after the job already finished — now
+  gets the terminal event immediately instead of an open stream that
+  never closes.
+- A small watcher-thread bridge (`CancelBridge`) translates
+  `crate::jobs::Job`'s cooperative-cancel flag into a real
+  `dbs_core::CancelToken` `BackupSourceOptions`/`BackupAllOptions` can
+  poll — the two types are structurally identical (`Arc<AtomicBool>`
+  wrappers) but live in different crates with no shared trait.
+- The job's `results` list is populated from `backup_source`/
+  `backup_all`'s actual return value, not from `ProgressEvent`'s
+  `SourceDone.result` field alone — a disabled/VPN-skipped/locked/
+  dry-run source's `RunResult` never reaches `on_progress` at all
+  (`backup_source` returns before calling `sink.emit` on those
+  early-exit paths), so relying on the progress stream alone would
+  have silently dropped it from `snap.results`. Mirrors `dbs-cli`'s
+  own `cmd_backup`, which prints from that same return value.
+- 15 new tests: 2 in `crate::jobs` for the `end`-event fix, 13
+  router-level in `dbs-web`'s crate root covering the full trigger →
+  poll → cancel → stream lifecycle against a real (near-instant,
+  disabled-source) backup run.
+
 ## `dbs-web`: real `/api` secrets management routes (closes #173)
 **2026-08-14**
 

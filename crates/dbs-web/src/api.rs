@@ -16,21 +16,26 @@
 //! (#171-#177) reuses.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Redirect, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use dbs_core::service::BackupService;
+use dbs_core::service::{BackupAllOptions, BackupService, BackupSourceOptions, ProgressSink};
 use dbs_core::{
-    build_registry, in_named_netns, named_netns_exists, DbsError, ExportQuery, ItemRow,
-    SqliteStorage, Storage, SubprocessRunner, VpnGuard, CURRENT_API_VERSION,
+    build_registry, in_named_netns, named_netns_exists, CancelToken, DbsError, ExportQuery,
+    ItemRow, ProgressEvent, SqliteStorage, Storage, SubprocessRunner, VpnGuard,
+    CURRENT_API_VERSION,
 };
 
+use crate::jobs::{Job, JobAlreadyRunning, JobSnapshot};
 use crate::AppState;
 
 /// Export formats `dbs export --format` accepts (`dbs-cli/src/main.rs`'s
@@ -97,6 +102,9 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/sources", get(sources).post(create_source))
         .route("/api/secrets", get(secrets).post(set_secret))
         .route("/api/secrets/:name", delete(delete_secret))
+        .route("/api/backup", post(start_backup))
+        .route("/api/backup/current", get(current_backup))
+        .route("/api/backup/:id/cancel", post(cancel_backup))
 }
 
 async fn meta(State(state): State<AppState>) -> Json<Value> {
@@ -754,4 +762,190 @@ async fn delete_secret(
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(Json(json!({"name": name, "removed": removed})))
+}
+
+// -- backup trigger + progress (issue #174) ------------------------------
+
+/// Request body for `POST /api/backup` — `app.js`'s `startBackup` sends
+/// exactly `{source}` (the "Run" button on one source) or `{all: true}`
+/// ("Backup all sources").
+#[derive(Deserialize, serde::Serialize)]
+struct StartBackupRequest {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    all: bool,
+}
+
+/// Bridges a [`crate::jobs::Job`]'s cooperative-cancel flag into a real
+/// `dbs_core::CancelToken` [`BackupSourceOptions`]/[`BackupAllOptions`]
+/// can poll — the two types are structurally identical (`Arc<AtomicBool>`
+/// wrappers) but live in different crates with no shared trait, so a
+/// small watcher thread is the bridge: it polls `job.is_cancelled()`
+/// until either that fires (and sets `core_cancel` to match) or the
+/// caller signals the run itself finished via the returned guard's
+/// `Drop`.
+struct CancelBridge {
+    done: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CancelBridge {
+    fn spawn(job: Arc<Job>, core_cancel: CancelToken) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let done_for_thread = done.clone();
+        let handle = std::thread::spawn(move || {
+            while !done_for_thread.load(Ordering::Relaxed) {
+                if job.is_cancelled() {
+                    core_cancel.cancel();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        Self {
+            done,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for CancelBridge {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// A [`ProgressSink`] that forwards every [`ProgressEvent`] straight
+/// onto a [`Job`] as-is — its shape already matches what `openProgress`'s
+/// (`app.js`) `EventSource.onmessage` reads, field for field, including
+/// `SourceDone`'s inline `result` the live progress bar's `doneCount`
+/// increments on. Deliberately does *not* also call `Job::record_result`
+/// here: a disabled/VPN-skipped/locked/dry-run source's `RunResult`
+/// never reaches `on_progress` at all (`backup_source` returns before
+/// ever calling `sink.emit` on those early-exit paths) — the job's own
+/// `results` list is populated once, after the call returns, from
+/// `backup_source`/`backup_all`'s actual return value instead (mirrors
+/// `dbs-cli`'s `cmd_backup`, which prints from that same return value,
+/// not from progress events), so no skipped source silently goes
+/// missing from `snap.results`.
+struct JobProgressSink {
+    job: Arc<Job>,
+}
+
+impl ProgressSink for JobProgressSink {
+    fn emit(&self, event: &ProgressEvent) {
+        self.job
+            .emit(serde_json::to_value(event).unwrap_or(Value::Null));
+    }
+}
+
+/// `POST /api/backup` — starts a `backup_source`/`backup_all` run as a
+/// background [`crate::jobs::Job`] and returns its snapshot immediately
+/// (`openProgress` reads `id`/`spec`/`stopping` off it to arm the SSE
+/// stream and the Stop button). A `source` that isn't configured is
+/// rejected synchronously (a cheap in-memory lookup, no DB open needed);
+/// everything else about whether the run itself succeeds surfaces later
+/// through the job's own `status`/`error`, same as every other
+/// `crate::jobs::Job` consumer.
+async fn start_backup(
+    State(state): State<AppState>,
+    Json(body): Json<StartBackupRequest>,
+) -> Result<Json<JobSnapshot>, ApiError> {
+    if !body.all {
+        match &body.source {
+            None => {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "either \"source\" or \"all\" must be given".to_string(),
+                ))
+            }
+            Some(name) if !state.config.sources.contains_key(name) => {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("no such source: {name:?}"),
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+
+    let config = state.config.clone();
+    let spec = serde_json::to_value(&body).unwrap_or(Value::Null);
+    let all = body.all;
+    let source = body.source;
+    let result = state.job_manager.start(spec, move |job| {
+        let sink = JobProgressSink { job: job.clone() };
+        let core_cancel = CancelToken::new();
+        let bridge = CancelBridge::spawn(job.clone(), core_cancel.clone());
+
+        let mut storage = open_storage(&config).map_err(|e| e.to_string())?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let mut service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let outcome = if all {
+            let opts = BackupAllOptions {
+                on_progress: Some(&sink),
+                cancel: Some(core_cancel),
+                ..Default::default()
+            };
+            service.backup_all(&opts).map(|results| {
+                for result in &results {
+                    job.record_result(serde_json::to_value(result).unwrap_or(Value::Null));
+                }
+            })
+        } else {
+            let opts = BackupSourceOptions {
+                on_progress: Some(&sink),
+                cancel: Some(core_cancel),
+                ..Default::default()
+            };
+            service
+                .backup_source(source.as_deref().unwrap_or_default(), &opts)
+                .map(|result| {
+                    job.record_result(serde_json::to_value(&result).unwrap_or(Value::Null));
+                })
+        };
+        drop(bridge);
+        outcome.map_err(|e| e.to_string())
+    });
+
+    match result {
+        Ok(job) => Ok(Json(job.snapshot())),
+        Err(JobAlreadyRunning) => Err(ApiError(
+            StatusCode::CONFLICT,
+            "a backup is already running".to_string(),
+        )),
+    }
+}
+
+/// `GET /api/backup/current` — the in-flight (or most recently
+/// finished) job's snapshot, or `null` if none exists yet this process.
+/// `resumeIfRunning` (`app.js`) polls this on page load to reattach its
+/// progress panel after a refresh.
+async fn current_backup(State(state): State<AppState>) -> Json<Value> {
+    match state.job_manager.current() {
+        Some(job) => Json(serde_json::to_value(job.snapshot()).unwrap_or(Value::Null)),
+        None => Json(Value::Null),
+    }
+}
+
+/// `POST /api/backup/:id/cancel` — requests the named job's graceful
+/// early stop (`stopBackup`, `app.js`). 404s for an unknown job id;
+/// otherwise always 200, whether or not the job was actually still
+/// running to cancel (mirrors `crate::jobs::JobManager::cancel`'s own
+/// "no-op past that point" contract).
+async fn cancel_backup(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<Json<Value>, ApiError> {
+    if state.job_manager.get(id).is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such job".to_string()));
+    }
+    let cancelled = state.job_manager.cancel(id);
+    Ok(Json(json!({"cancelled": cancelled})))
 }
