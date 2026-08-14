@@ -8,6 +8,32 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: wire `dbs serve --schedule`'s scheduler (closes #190)
+**2026-08-14**
+
+- **`dbs serve --schedule`** now starts a real background loop
+  (`dbs-web::scheduler`) instead of just noting the flag and doing
+  nothing — mirrors the reference's `create_app(schedule_seconds=...)`:
+  wakes every 60 seconds, checks which enabled sources are due via a
+  new `BackupService::due_sources`, and if any are, starts the same
+  `{all: true, only_due: true}` job the web UI's "Backup all" button
+  would, on the *same* `JobManager` `/api/backup` uses — a scheduled
+  run shows up in the UI's live progress and history like any other.
+  `JobAlreadyRunning` is swallowed (a run already in flight just gets
+  picked up again next tick); any other tick failure is logged to
+  stderr and the loop keeps going.
+- This port's `--schedule` is a bare on/off flag (the reference's is a
+  float interval in seconds) — a fixed 60-second tick is this port's
+  substitute rather than a new CLI knob.
+- `BackupService` gained a public `due_sources(now)` method, extracted
+  from `backup_all`'s existing (private) `only_due` filtering logic —
+  used here so an idle tick never spawns an empty job.
+- `cmd_serve`'s stderr message updated to describe the real behavior.
+- 4 new tests in `dbs-web::scheduler` exercising the tick logic
+  directly (due / not due / already-running-job / the `spawn` loop
+  itself catching a source becoming due), no real 60-second wait
+  needed since the tick interval is test-injectable.
+
 ## `dbs-web`: real `/api` research routes (closes #177, closes #169)
 **2026-08-14**
 

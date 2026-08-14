@@ -697,6 +697,31 @@ impl<'a> BackupService<'a> {
         Ok(is_due(last_started, &schedule, now))
     }
 
+    /// Every enabled source whose `schedule` cadence has elapsed (or
+    /// that has never run at all) as of `now` — mirrors the
+    /// reference's `due_sources`. `dbs serve --schedule`'s background
+    /// loop (issue #190) calls this before starting a job, so an idle
+    /// tick with nothing due never spawns one — `backup_all`'s own
+    /// `only_due` filter would happily no-op on an empty source list,
+    /// but that would still mean one job-history entry per idle tick.
+    pub fn due_sources(&self, now: DateTime<Utc>) -> Result<Vec<String>, DbsError> {
+        let mut names: Vec<&String> = self
+            .config
+            .sources
+            .iter()
+            .filter(|(_, sc)| sc.enabled)
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        let mut due = Vec::with_capacity(names.len());
+        for name in names {
+            if self.source_is_due(name, now)? {
+                due.push(name.clone());
+            }
+        }
+        Ok(due)
+    }
+
     /// Backs up every enabled source, in name-sorted order — sequentially,
     /// or on a bounded worker pool when `--parallel N` resolves above 1
     /// (see [`Self::backup_all_parallel`]). Reaps once, up front, while no

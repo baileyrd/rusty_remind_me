@@ -2423,8 +2423,8 @@ fn cmd_serve(
     eprintln!("Serving rusty_dbs UI at http://{host}:{port}  (press Ctrl+C to stop)");
     if schedule {
         eprintln!(
-            "  (--schedule noted, but the scheduler isn't wired into the app skeleton yet \
-             \u{2014} tracked in a follow-up issue)"
+            "  (scheduler on: checks every 60s for due sources and backs them up \
+             automatically)"
         );
     }
     if !allow_setup {
