@@ -26,6 +26,16 @@ fn find_yt_dlp() -> Option<&'static str> {
         .map(|_| "yt-dlp")
 }
 
+/// Whether `yt-dlp` is on `PATH` at all — the one real,
+/// already-installable dependency this pipeline has (unlike the
+/// NotebookLM synthesis half, which has no installable adapter yet;
+/// see [`crate::notebooklm`]'s module doc-comment). A future caller
+/// reporting pipeline readiness (issue #177's `/api/research/meta`)
+/// needs this without triggering a real search.
+pub fn yt_dlp_available() -> bool {
+    find_yt_dlp().is_some()
+}
+
 /// Searches every query, dedups by video id, applies the recency
 /// filter. Ranking/truncation to the final `--count` is a separate,
 /// pure step ([`rank_and_truncate`]).

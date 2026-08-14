@@ -8,6 +8,51 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real `/api` research routes (closes #177, closes #169)
+**2026-08-14**
+
+The last of #169's eight-issue `/api` split — `dbs serve`'s shipped SPA now has a
+fully wired `/api` surface end to end.
+
+- **`GET /api/research/meta`** reports `ready`/`pip_requirements`/`missing`
+  (yt-dlp, the pipeline's one real installable dependency — gained a new
+  `dbs_research::youtube_search::yt_dlp_available()`), `auth.configured`
+  (`dbs_research::notebooklm::resolve_auth_state`), `youtube_sources`
+  (every configured `youtube`-type source), and `default_questions`.
+- **`POST /api/research/install`** (`pip install yt-dlp`) and
+  **`POST /api/research/login`** (NotebookLM login capture, fails cleanly
+  pending issue #99) both stream through the *same* `/api/setup/:id/stream`
+  mount #175's connector install/capture already uses — one shared
+  `job_manager`, matching `app.js`'s own `streamSetup` call for all three.
+- **`POST /api/research`** starts the YouTube-search-or-backup →
+  NotebookLM-synthesis → report pipeline as a background job on a
+  *separate* `research_job_manager` (kept apart from the shared one so
+  `/api/research/current` can't report back an unrelated backup/install
+  job). Search mode bridges `dbs_research::pipeline::run_pipeline`
+  directly; backup mode selects already-backed-up videos via
+  `BackupService::select_youtube_backup_videos` and converts each
+  `ItemRow` into a `dbs_research::VideoMeta` (a small `dbs-web`-side
+  bridge — the two crates deliberately don't depend on each other).
+  Every real run fails cleanly at the NotebookLM step
+  (`UnimplementedClient` — Decision 4's `nlm`/`notebooklm-mcp` adapter
+  isn't built yet, same external-tool boundary as issue #99), but
+  search/selection, progress events, and report rendering are all real
+  up to that point.
+- **`GET /api/research/:id/stream`** is a dedicated SSE handler, not a
+  `crate::jobs::sse_router` mount — its `end` event needs `result`
+  (singular) instead of every other job stream's `results` (plural),
+  plus a `connector` field hoisted out of the job's `spec`. Built on
+  the same buffered/live/terminal `Job::subscribe` primitive (now
+  `pub(crate)`) every other stream uses.
+- **`GET /api/research/:id/report`** serves the finished job's already-
+  rendered Markdown report as a real download; **`GET /api/research/current`**
+  mirrors `/api/backup/current`'s reattach-after-reload role.
+- 12 new router-level tests, including a full backup-mode pipeline run
+  against a seeded YouTube video (real selection, real progress events,
+  clean NotebookLM-boundary failure) — kept hermetic by testing the
+  backup-mode path (no yt-dlp/network dependency) rather than search
+  mode for the full-pipeline exercise.
+
 ## `dbs-web`: real `/api` export routes (closes #176)
 **2026-08-14**
 

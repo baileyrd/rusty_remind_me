@@ -103,8 +103,21 @@ pub(crate) struct AppState {
     /// (issue #174) starts a `BackupService::backup_source`/`backup_all`
     /// run on. Shared (not per-request) so a second `POST /api/backup`
     /// while one is running is actually refused, and so `/api/backup/current`
-    /// can find whatever's in flight after a page reload.
+    /// can find whatever's in flight after a page reload. Also backs
+    /// every in-UI setup job (issue #175's connector install/capture,
+    /// and issue #177's research-deps install / NotebookLM login) —
+    /// they all stream through the same `/api/setup/:id/stream` mount
+    /// `app.js`'s `streamSetup` always uses.
     pub(crate) job_manager: Arc<jobs::JobManager>,
+    /// A *separate* job manager (issue #177) for the main research
+    /// pipeline run (`POST /api/research`) specifically — kept apart
+    /// from `job_manager` because `/api/research/current` and the
+    /// `end` event on `/api/research/:id/stream` need a
+    /// research-specific snapshot shape (`result`, singular, not
+    /// `results`); sharing the generic manager would risk
+    /// `/api/research/current` reporting back an unrelated backup or
+    /// connector-install job that happened to start more recently.
+    pub(crate) research_job_manager: Arc<jobs::JobManager>,
 }
 
 fn cache_stamp_now() -> String {
@@ -135,12 +148,14 @@ pub struct ServeOptions {
 pub fn router(token: Option<String>, opts: ServeOptions) -> Router {
     let security_config = Arc::new(SecurityConfig { token });
     let job_manager = Arc::new(jobs::JobManager::new());
+    let research_job_manager = Arc::new(jobs::JobManager::new());
     let state = AppState {
         cache_stamp: cache_stamp_now(),
         config: Arc::new(opts.config),
         allow_setup: opts.allow_setup,
         scheduler_enabled: opts.schedule,
         job_manager: job_manager.clone(),
+        research_job_manager,
     };
     Router::new()
         .route("/", get(index))
@@ -1886,6 +1901,331 @@ mod tests {
             "{entries:?}"
         );
         std::fs::remove_dir_all(&out_dir).ok();
+    }
+
+    // -- /api/research (issue #177) ---------------------------------------
+
+    /// A configured `youtube`-type source with one backed-up video
+    /// whose `raw` carries a real video id/channel/view/duration —
+    /// unlike `seed_youtube_item` (whose `raw_json` is `"{}"`, fine for
+    /// the thumbnail-redirect tests but missing the `id` field
+    /// `BackupService::select_youtube_backup_videos` requires to
+    /// select anything at all).
+    fn seed_research_youtube_source(label: &str) -> dbs_core::Config {
+        use dbs_core::{PreparedItem, SqliteStorage, Storage};
+
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-research-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("dbs.sqlite3");
+
+        let mut storage = SqliteStorage::open(db_path.to_str().unwrap()).unwrap();
+        storage.migrate().unwrap();
+        let source = storage
+            .upsert_source("yt", "youtube", "p", "{}", 1)
+            .unwrap();
+        let run_id = storage
+            .begin_run(source.id, "p", "incremental", None)
+            .unwrap();
+        let item = PreparedItem {
+            external_id: "v1".to_string(),
+            item_kind: "video".to_string(),
+            title: Some("A great video".to_string()),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string()),
+            body: None,
+            tags: vec![],
+            item_created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            item_updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+            content_hash: "h1".to_string(),
+            raw_json: serde_json::json!({
+                "id": "dQw4w9WgXcQ",
+                "channel": "A Channel",
+                "view_count": 12345,
+                "duration_seconds": 212,
+            })
+            .to_string(),
+            deleted: false,
+            media: Vec::new(),
+        };
+        storage
+            .upsert_items(source.id, run_id, &[item], true, 0)
+            .unwrap();
+
+        let mut config = test_config();
+        config.database = db_path.to_str().unwrap().to_string();
+        config.sources.insert(
+            "yt".to_string(),
+            dbs_core::SourceConfig {
+                name: "yt".to_string(),
+                type_: "youtube".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        config
+    }
+
+    async fn wait_until_research_job_done(router: Router, id: u64) -> serde_json::Value {
+        for _ in 0..200 {
+            let (status, body) = get_json(router.clone(), "/api/research/current").await;
+            assert_eq!(status, StatusCode::OK);
+            if body["id"] == id && body["status"] != "running" {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("research job {id} never finished");
+    }
+
+    #[tokio::test]
+    async fn api_research_meta_reports_a_well_formed_response() {
+        let (status, body) = get_json(router(None, test_opts()), "/api/research/meta").await;
+        assert_eq!(status, StatusCode::OK);
+        let pip_requirements = body["pip_requirements"].as_array().unwrap();
+        assert!(pip_requirements.contains(&serde_json::json!("yt-dlp")));
+        let ready = body["ready"].as_bool().unwrap();
+        let missing = body["missing"].as_array().unwrap();
+        assert_eq!(missing.is_empty(), ready);
+        assert_eq!(body["auth"]["configured"], false);
+        assert_eq!(body["youtube_sources"], serde_json::json!([]));
+        assert_eq!(body["default_questions"].as_array().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn api_research_meta_lists_only_youtube_type_sources() {
+        let mut config = test_config();
+        config.sources.insert(
+            "yt".to_string(),
+            dbs_core::SourceConfig {
+                name: "yt".to_string(),
+                type_: "youtube".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        config.sources.insert(
+            "rd".to_string(),
+            dbs_core::SourceConfig {
+                name: "rd".to_string(),
+                type_: "raindrop".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/research/meta").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["youtube_sources"], serde_json::json!(["yt"]));
+    }
+
+    #[tokio::test]
+    async fn api_research_meta_reports_auth_configured_from_a_captured_storage_state() {
+        let mut config = test_config();
+        config.base_dir = temp_base_dir("research-auth");
+        std::fs::create_dir_all(config.base_dir.join(".notebooklm")).unwrap();
+        std::fs::write(
+            config
+                .base_dir
+                .join(".notebooklm")
+                .join("storage_state.json"),
+            "{}",
+        )
+        .unwrap();
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/research/meta").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["auth"]["configured"], true);
+    }
+
+    #[tokio::test]
+    async fn api_start_research_requires_a_topic() {
+        let (status, body) = post_json(
+            router(None, test_opts()),
+            "/api/research",
+            serde_json::json!({"mode": "search", "topic": ""}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("topic"));
+    }
+
+    #[tokio::test]
+    async fn api_start_research_backup_mode_fails_cleanly_pending_the_notebooklm_adapter() {
+        let config = seed_research_youtube_source("backup-mode");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/research",
+            serde_json::json!({
+                "mode": "backup",
+                "topic": "my topic",
+                "sources": ["yt"],
+                "count": 5,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["connector"], "my topic");
+        assert_eq!(body["result"], serde_json::Value::Null);
+        let id = body["id"].as_u64().unwrap();
+
+        let snap = wait_until_research_job_done(router.clone(), id).await;
+        assert_eq!(snap["status"], "error");
+        assert!(snap["error"].as_str().unwrap().contains("nlm CLI"));
+        assert_eq!(snap["connector"], "my topic");
+
+        // GET .../report has nothing to serve for a failed run.
+        let (report_status, _) = get_json(router, &format!("/api/research/{id}/report")).await;
+        assert_eq!(report_status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_start_research_backup_mode_errors_when_nothing_matched() {
+        let router = router(None, test_opts());
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/research",
+            serde_json::json!({"mode": "backup", "topic": "t", "sources": ["nonexistent"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_u64().unwrap();
+        let snap = wait_until_research_job_done(router, id).await;
+        assert_eq!(snap["status"], "error");
+        assert!(snap["error"].as_str().unwrap().contains("nothing to send"));
+    }
+
+    #[tokio::test]
+    async fn api_research_current_is_null_when_nothing_has_run() {
+        let (status, body) = get_json(router(None, test_opts()), "/api/research/current").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn api_research_report_404s_for_an_unknown_job() {
+        let (status, _) = get_json(router(None, test_opts()), "/api/research/999999/report").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_research_stream_ends_with_the_reshaped_final_snapshot() {
+        let config = seed_research_youtube_source("stream");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (_, body) = post_json(
+            router.clone(),
+            "/api/research",
+            serde_json::json!({"mode": "backup", "topic": "t", "sources": ["yt"]}),
+        )
+        .await;
+        let id = body["id"].as_u64().unwrap();
+        wait_until_research_job_done(router.clone(), id).await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/research/{id}/stream"))
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let sse_body = body_string(response).await;
+        assert!(sse_body.contains("event: end"), "{sse_body}");
+        assert!(sse_body.contains(r#""status":"error""#), "{sse_body}");
+        assert!(sse_body.contains(r#""connector":"t""#), "{sse_body}");
+        assert!(!sse_body.contains("\"results\""), "{sse_body}");
+    }
+
+    #[tokio::test]
+    async fn api_research_install_is_forbidden_when_setup_is_disabled() {
+        let opts = ServeOptions {
+            config: test_config(),
+            allow_setup: false,
+            schedule: false,
+        };
+        let (status, _) = post_json(
+            router(None, opts),
+            "/api/research/install",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn api_research_login_is_forbidden_when_setup_is_disabled() {
+        let opts = ServeOptions {
+            config: test_config(),
+            allow_setup: false,
+            schedule: false,
+        };
+        let (status, _) = post_json(
+            router(None, opts),
+            "/api/research/login",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn api_research_login_fails_cleanly_and_streams_via_the_shared_setup_mount() {
+        let router = router(None, test_opts());
+        let (status, body) =
+            post_json(router.clone(), "/api/research/login", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_u64().unwrap();
+        let snap = wait_until_setup_job_done(router, id).await;
+        assert_eq!(snap["status"], "error");
+        assert!(snap["error"]
+            .as_str()
+            .unwrap()
+            .contains("Playwright launch helper"));
     }
 
     #[tokio::test]

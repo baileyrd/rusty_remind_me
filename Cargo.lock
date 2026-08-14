@@ -690,6 +690,7 @@ dependencies = [
  "axum",
  "chrono",
  "dbs-core",
+ "dbs-research",
  "futures-util",
  "http-body-util",
  "serde",
