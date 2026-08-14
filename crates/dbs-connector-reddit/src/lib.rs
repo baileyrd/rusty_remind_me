@@ -13,20 +13,22 @@
 //! 403'd; only a fetch evaluated in an actual Chromium page carries a
 //! genuine TLS/HTTP2 fingerprint and client hints.
 //!
-//! **Acquisition is blocked on issue #99** (the shared Playwright
-//! launch helper) — same gap `dbs-web`'s `run_capture_job` already
-//! documents for browser-session capture generally. `fetch()` still
-//! performs every check that doesn't need a browser (the
-//! `session_dir_env` config is sane, the secret is set, the session
-//! directory actually exists on disk) before returning a clear
-//! [`ConnectorError::Config`] pointing at #99, so a real
-//! configuration mistake still surfaces immediately once #99 lands
-//! and this connector is wired up for real. Everything that *doesn't*
-//! need a browser — the raw-listing → record mapping, the record →
-//! `BackupItem` mapping, and the opportunistic outbound-link fetch
-//! (a single plain HTTP hop, no session cookies needed) — is fully
-//! implemented and tested here as pure functions, ready for
-//! `_acquire`'s future replacement to call into.
+//! **Acquisition (issue #187)** shells out to `scripts/acquire.py`
+//! (embedded into the binary via `include_str!`, staged to a temp
+//! file at run time) through issue #99's
+//! `dbs_connector_support::python_launch::run_python_script` — there
+//! is no Rust Playwright binding, so the actual browser driving
+//! happens in a real Python subprocess, same split
+//! `dbs-connector-support`'s module doc-comment describes. That
+//! script's only job is browser automation and pagination: it hands
+//! back the raw, undecoded `children` the saved-listing API returns,
+//! and Rust does the actual record mapping via [`record_from_child`]
+//! (below) — the same pure function this connector's tests already
+//! exercised against fixture data before #187 existed, now reachable
+//! from a real run too. `fetch()` still performs every check that
+//! doesn't need a browser first (the `session_dir_env` config is
+//! sane, the secret is set, the session directory actually exists on
+//! disk) before ever spawning the script.
 //!
 //! Two consequences shape the design once acquisition exists: there's
 //! no server-side `since` filter and no cheap delta (every run walks
@@ -40,19 +42,25 @@
 //! the Playwright persistent-context directory holding the logged-in
 //! cookies.
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85)
-//! through `dbs-connector-udemy` (#95) — this struct isn't reachable
-//! from a real `dbs backup` run yet; the plugin registry's run/stream
-//! bridge doesn't exist either. Tested directly against the
-//! `Connector` trait and fixture HTTP responses.
+//! Reachable from a real `dbs backup reddit` run via the
+//! `dbs-connector-reddit` subprocess binary (#164). Acquisition itself
+//! is tested only against a fake acquisition-script stub (no real
+//! Playwright/network access in CI, same convention
+//! `dbs-connector-youtube`'s yt-dlp tests established) — everything
+//! else is tested directly against the `Connector` trait and fixture
+//! HTTP responses.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
+use std::path::Path;
+use std::time::Duration;
 
+use dbs_connector_support::{find_python, run_python_script_using};
 use dbs_core::export_profile::ExportProfile;
 use dbs_core::parse_iso;
 use dbs_core::{
-    AuthCapture, BackupItem, Capabilities, Connector, ConnectorError, FetchEvent, ItemKind,
-    ManagedHttpClient, MediaRef, RunContext,
+    AuthCapture, BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor,
+    FetchEvent, ItemKind, ManagedHttpClient, MediaRef, ReconcileMarker, RunContext,
 };
 use serde_json::Value;
 
@@ -137,18 +145,9 @@ impl RedditConnector {
     }
 }
 
-// The five functions below (through `to_item`) aren't reachable from
-// `fetch()` yet — acquisition itself returns a Config error before
-// ever calling them (see the module doc-comment) — so the compiler
-// sees them as dead code outside `#[cfg(test)]`. They're kept and
-// fully tested anyway: forward-compatible groundwork for whenever
-// issue #99's Playwright launch helper lands and `fetch()` can call
-// into them for real.
-
 /// Absolutizes a Reddit-relative permalink (`/r/rust/...` ->
 /// `https://www.reddit.com/r/rust/...`); leaves an already-absolute
 /// URL alone.
-#[allow(dead_code)]
 fn abs_permalink(permalink: &str) -> String {
     if !permalink.is_empty() && !permalink.starts_with("http") {
         format!("https://www.reddit.com{permalink}")
@@ -161,7 +160,6 @@ fn abs_permalink(permalink: &str) -> String {
 /// record shape the rest of this connector consumes. `None` for any
 /// other listing kind, or a child with no `name` (fullname) to key
 /// off of.
-#[allow(dead_code)]
 fn record_from_child(child: &Value, extracted_at: &str) -> Option<Value> {
     let kind = child.get("kind").and_then(|v| v.as_str());
     if kind != Some("t3") && kind != Some("t1") {
@@ -248,7 +246,6 @@ fn record_from_child(child: &Value, extracted_at: &str) -> Option<Value> {
 /// own doc comment defers a shared `ext_for_mime` "to whichever
 /// media/export issue actually needs it" — this one only needs a
 /// handful of common cases.
-#[allow(dead_code)]
 fn ext_for_mime(mime: Option<&str>) -> &'static str {
     match mime.map(|m| m.split(';').next().unwrap_or(m).trim()) {
         Some("text/html") => ".html",
@@ -267,7 +264,6 @@ fn ext_for_mime(mime: Option<&str>) -> &'static str {
 /// since it's opportunistic enrichment and a dead link / timeout /
 /// non-2xx must never fail the backup. A single hop with no header to
 /// protect (an arbitrary external site, not Reddit's own API).
-#[allow(dead_code)]
 fn maybe_fetch_outbound_link(
     http: &RefCell<ManagedHttpClient>,
     ext_id: &str,
@@ -298,7 +294,6 @@ fn maybe_fetch_outbound_link(
 /// Maps one raw saved-listing record (as produced by
 /// [`record_from_child`]) to a `BackupItem`. `None` for a record with
 /// no usable id.
-#[allow(dead_code)]
 fn to_item(
     cfg: &RedditConfig,
     http: Option<&RefCell<ManagedHttpClient>>,
@@ -387,6 +382,145 @@ fn to_item(
         .and_then(|s| parse_iso(Some(s)));
     item.media = media;
     Some(item)
+}
+
+// -- acquisition (Playwright-driven, via a Python subprocess; #187) -----
+
+/// The embedded acquisition script — staged to a temp file at run time
+/// and run through `dbs_connector_support::python_launch`. See the
+/// module doc-comment for why the actual browser driving happens in a
+/// separate Python process rather than in Rust.
+const ACQUIRE_SCRIPT: &str = include_str!("../scripts/acquire.py");
+
+/// How long a single acquisition run (browser launch + full saved-feed
+/// walk) may take before being abandoned. `max_pages` defaults to 100
+/// at `cfg.delay`'s default 2s/page, so a slow account can legitimately
+/// take minutes; this is a generous outer bound against a genuinely
+/// hung browser, not a tight budget.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// The logged-in account name and every raw saved-listing `children`
+/// entry the script paged through, undecoded — [`record_from_child`]
+/// does the actual mapping.
+#[derive(Debug)]
+struct AcquireOutput {
+    account: String,
+    children: Vec<Value>,
+}
+
+fn script_error_to_connector_error(kind: &str, message: String) -> ConnectorError {
+    match kind {
+        "auth" => ConnectorError::Auth(message),
+        "rate_limited" => ConnectorError::RateLimited(message),
+        "config" => ConnectorError::Config(message),
+        _ => ConnectorError::Transient(message),
+    }
+}
+
+/// Runs the acquisition script under `interpreter` and parses its
+/// single line of JSON result (see `scripts/acquire.py`'s own
+/// doc-comment for the contract). Split from [`acquire`] so tests can
+/// inject a fake interpreter/script instead of a real Python +
+/// Playwright + live Reddit session — mirrors the reference's own
+/// `_acquire` being overridden in its tests.
+fn acquire_using(
+    interpreter: &str,
+    script: &Path,
+    session_dir: &str,
+    headless: bool,
+    max_pages: u32,
+    delay: f64,
+    timeout: Duration,
+) -> Result<AcquireOutput, ConnectorError> {
+    let args = vec![
+        session_dir.to_string(),
+        headless.to_string(),
+        max_pages.to_string(),
+        delay.to_string(),
+    ];
+    let output = run_python_script_using(interpreter, script, &args, timeout).map_err(|e| {
+        ConnectorError::Transient(format!(
+            "reddit: failed to run the saved-feed acquisition script: {e}"
+        ))
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last_line = stdout.lines().last().unwrap_or("").trim();
+    if last_line.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ConnectorError::Transient(format!(
+            "reddit: acquisition script produced no output (exit {:?}); stderr: {}",
+            output.status.code(),
+            stderr.trim()
+        )));
+    }
+    let parsed: Value = serde_json::from_str(last_line).map_err(|e| {
+        ConnectorError::Transient(format!(
+            "reddit: acquisition script produced unparseable output ({e}): {last_line}"
+        ))
+    })?;
+    if !parsed.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let kind = parsed
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("transient");
+        let message = parsed
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("reddit: acquisition failed")
+            .to_string();
+        return Err(script_error_to_connector_error(kind, message));
+    }
+    Ok(AcquireOutput {
+        account: parsed
+            .get("account")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        children: parsed
+            .get("children")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    })
+}
+
+/// Stages [`ACQUIRE_SCRIPT`] to a temp file and runs it through
+/// whichever interpreter [`find_python`] resolves.
+fn acquire(
+    session_dir: &str,
+    headless: bool,
+    max_pages: u32,
+    delay: f64,
+) -> Result<AcquireOutput, ConnectorError> {
+    let interpreter = find_python().ok_or_else(|| {
+        ConnectorError::Config(
+            "the Reddit connector needs Playwright; install it with `pip install playwright` \
+             and run `playwright install chromium` (no python3/python interpreter found on \
+             PATH)."
+                .to_string(),
+        )
+    })?;
+    let script_path = std::env::temp_dir().join(format!(
+        "dbs-connector-reddit-acquire-{}-{:?}.py",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&script_path, ACQUIRE_SCRIPT).map_err(|e| {
+        ConnectorError::Transient(format!(
+            "reddit: failed to stage the acquisition script: {e}"
+        ))
+    })?;
+    let result = acquire_using(
+        interpreter,
+        &script_path,
+        session_dir,
+        headless,
+        max_pages,
+        delay,
+        ACQUIRE_TIMEOUT,
+    );
+    let _ = std::fs::remove_file(&script_path);
+    result
 }
 
 impl Connector for RedditConnector {
@@ -504,17 +638,77 @@ impl Connector for RedditConnector {
             return Box::new(out.into_iter());
         }
 
-        // The rest of acquisition — launching the captured session as
-        // a Chromium context and paging the cookie-authenticated
-        // saved.json feed via a same-origin in-page fetch — needs the
-        // shared Playwright launch helper this port doesn't have yet
-        // (see the module doc-comment).
-        out.push(Err(ConnectorError::Config(
-            "reddit: saved-feed acquisition needs a Playwright launch helper this port doesn't \
-             have yet (gap-analysis.md's Connectors cluster, issue #99) — the session directory \
-             is valid; this connector will be wired up once #99 lands."
-                .to_string(),
-        )));
+        let acquired = match acquire(
+            &session_dir,
+            self.config.headless,
+            self.config.max_pages,
+            self.config.delay,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                out.push(Err(e));
+                return Box::new(out.into_iter());
+            }
+        };
+        if let Some(username) = &self.config.username {
+            if !username.eq_ignore_ascii_case(&acquired.account) {
+                eprintln!(
+                    "reddit: config username {:?} does not match the logged-in account u/{} — \
+                     backing up the logged-in account (saved feeds are owner-only, so the \
+                     config value would fetch nothing).",
+                    username, acquired.account
+                );
+            }
+        }
+
+        let extracted_at = dbs_core::iso_z(chrono::Utc::now());
+        let mut live_ids: HashSet<String> = HashSet::new();
+        let mut seen: u32 = 0;
+        for child in &acquired.children {
+            let Some(raw) = record_from_child(child, &extracted_at) else {
+                continue;
+            };
+            let Some(item) = to_item(&self.config, ctx.http.as_ref(), ctx.store_media, &raw) else {
+                continue;
+            };
+            // Still record the id so the reconcile sweep never deletes
+            // an item that exists upstream but is merely out of
+            // current `include_types` scope.
+            live_ids.insert(item.external_id().to_string());
+            if !self.config.include_types.is_empty()
+                && !self.config.include_types.contains(&item.item_kind)
+            {
+                continue;
+            }
+            out.push(Ok(FetchEvent::Item(item)));
+            seen += 1;
+            if self.config.checkpoint_every > 0 && seen.is_multiple_of(self.config.checkpoint_every)
+            {
+                out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
+                    cursor: Cursor {
+                        value: serde_json::json!({"items_seen": seen}),
+                    },
+                    note: format!("after {seen} items"),
+                })));
+            }
+        }
+        if acquired.children.is_empty() {
+            eprintln!(
+                "reddit: authenticated as u/{} but the saved feed returned 0 items — either \
+                 nothing is saved on this account, or Reddit served an empty listing.",
+                acquired.account
+            );
+        }
+
+        out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: serde_json::json!({"items_seen": seen}),
+            },
+            note: "final".to_string(),
+        })));
+        out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker::new(
+            live_ids,
+        ))));
 
         Box::new(out.into_iter())
     }
@@ -639,17 +833,184 @@ mod tests {
         assert!(matches!(result[0], Err(ConnectorError::Config(_))));
     }
 
+    /// With a valid (but real-session-less) directory, `fetch()` now
+    /// actually runs the acquisition script (#187) instead of
+    /// returning a static "blocked" error. It still can't succeed in
+    /// a sandbox with no live Playwright/Reddit session, but exactly
+    /// what it fails with depends on the environment (no python3 on
+    /// `PATH` vs. python3 present but Playwright not installed vs.
+    /// Playwright installed but no real browser) — so this only
+    /// asserts the environment-independent invariant: a single error
+    /// result, nothing yielded.
     #[test]
-    fn fetch_with_a_valid_session_dir_is_blocked_pending_the_playwright_helper() {
+    fn fetch_with_a_valid_but_empty_session_dir_fails_cleanly() {
         let dir = temp_dir("valid-session");
         let mut connector = RedditConnector::new(RedditConfig::default());
         let ctx = ctx_with(no_sleep_client(), Some(&dir.to_string_lossy()), false);
         let result: Vec<_> = connector.fetch(&ctx).collect();
-        assert_eq!(result.len(), 1);
-        match &result[0] {
-            Err(ConnectorError::Config(msg)) => assert!(msg.contains("issue #99"), "{msg}"),
-            other => panic!("expected a Config error mentioning issue #99, got {other:?}"),
+        assert_eq!(result.len(), 1, "{result:?}");
+        assert!(result[0].is_err(), "{result:?}");
+    }
+
+    // -- acquire_using: exercised against a fake stub "interpreter"
+    // (mirrors dbs_connector_support::python_launch's own tests and
+    // dbs-connector-youtube's fake-yt-dlp convention) so the JSON
+    // result contract between the Python script and this Rust code is
+    // tested without needing real Python, Playwright, or network
+    // access. ---------------------------------------------------------
+
+    fn write_stub_script(
+        dir: &std::path::Path,
+        stdout: &str,
+        exit_code: i32,
+    ) -> std::path::PathBuf {
+        let path = dir.join("stub.sh");
+        let body = format!("#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {exit_code}\n");
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        path
+    }
+
+    #[test]
+    fn acquire_using_parses_a_successful_result() {
+        let dir = temp_dir("acquire-success");
+        let script = write_stub_script(
+            &dir,
+            r#"{"ok": true, "account": "someone", "children": [{"kind": "t3"}]}"#,
+            0,
+        );
+        let result = acquire_using(
+            "/bin/sh",
+            &script,
+            "/some/dir",
+            true,
+            10,
+            0.0,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(result.account, "someone");
+        assert_eq!(result.children.len(), 1);
+    }
+
+    fn acquire_with_error_kind(
+        dir: &std::path::Path,
+        kind: &str,
+    ) -> Result<AcquireOutput, ConnectorError> {
+        let script = write_stub_script(
+            dir,
+            &format!(r#"{{"ok": false, "kind": "{kind}", "message": "boom"}}"#),
+            1,
+        );
+        acquire_using(
+            "/bin/sh",
+            &script,
+            "/some/dir",
+            true,
+            10,
+            0.0,
+            Duration::from_secs(5),
+        )
+    }
+
+    #[test]
+    fn acquire_using_maps_each_error_kind_to_the_matching_connector_error() {
+        let dir = temp_dir("acquire-errors");
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "auth"),
+            Err(ConnectorError::Auth(_))
+        ));
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "config"),
+            Err(ConnectorError::Config(_))
+        ));
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "rate_limited"),
+            Err(ConnectorError::RateLimited(_))
+        ));
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "something_unrecognized"),
+            Err(ConnectorError::Transient(_))
+        ));
+    }
+
+    #[test]
+    fn acquire_using_treats_unparseable_output_as_transient() {
+        let dir = temp_dir("acquire-garbage");
+        let script = write_stub_script(&dir, "not json at all", 1);
+        let result = acquire_using(
+            "/bin/sh",
+            &script,
+            "/some/dir",
+            true,
+            10,
+            0.0,
+            Duration::from_secs(5),
+        );
+        match result {
+            Err(ConnectorError::Transient(msg)) => assert!(msg.contains("unparseable"), "{msg}"),
+            other => panic!("expected a Transient error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acquire_using_treats_no_output_as_transient() {
+        let dir = temp_dir("acquire-empty");
+        let script = dir.join("empty.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let result = acquire_using(
+            "/bin/sh",
+            &script,
+            "/some/dir",
+            true,
+            10,
+            0.0,
+            Duration::from_secs(5),
+        );
+        match result {
+            Err(ConnectorError::Transient(msg)) => assert!(msg.contains("no output"), "{msg}"),
+            other => panic!("expected a Transient error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acquire_using_passes_config_through_as_positional_arguments() {
+        let dir = temp_dir("acquire-args");
+        // Echo the argv it was given back as the "account" field, so
+        // the assertion proves session_dir/headless/max_pages/delay
+        // all reach the script positionally in that order.
+        let path = dir.join("echo_args.sh");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\necho \"{\\\"ok\\\": true, \\\"account\\\": \\\"$1|$2|$3|$4\\\", \
+             \\\"children\\\": []}\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let result = acquire_using(
+            "/bin/sh",
+            &path,
+            "/my/session/dir",
+            false,
+            42,
+            1.5,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(result.account, "/my/session/dir|false|42|1.5");
     }
 
     #[test]

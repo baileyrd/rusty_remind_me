@@ -11,29 +11,15 @@
 //! `dbs-connector-raindrop`'s `main.rs`:** that connector's `fetch()`
 //! makes real HTTP calls, so its binary needs a way for integration
 //! tests to redirect those calls at a local mock server instead of the
-//! live API. This connector has no such thing to redirect. As
-//! `src/lib.rs`'s module doc-comment explains, saved-post/comment
-//! acquisition requires a cookie-authenticated Playwright browser
-//! session, and that capability is blocked pending issue #99 (the
-//! shared Playwright launch helper) — `fetch()` validates its
-//! `session_dir_env` config, checks the secret is set, and confirms
-//! the session directory exists on disk, then **unconditionally**
-//! returns a `ConnectorError::Config` pointing at #99, regardless of
-//! how valid that input is. There is no HTTP layer, no mock server,
-//! and no `with_base_url`-style hook to add, because there is no live
-//! call to intercept.
-//!
-//! So why does this binary exist at all, if the connector can't do
-//! real work yet? Because "wired up as a real subprocess binary" and
-//! "can fetch real data" are two different milestones, and this issue
-//! is only the first one: this binary makes the connector genuinely
-//! discoverable (`ConnectorRegistry::discover` can spawn it, handshake
-//! with it, and see its true `needs_playwright_browser` capability)
-//! and makes its current, always-an-error behavior provable end to
-//! end through the real subprocess boundary — not just from the
-//! in-process unit tests `src/lib.rs` already has. When #99 lands and
-//! `fetch()` is rewritten to actually acquire data, this `main.rs`
-//! won't need to change at all.
+//! live API. This connector's acquisition step (issue #187) instead
+//! shells out to a Python/Playwright subprocess that drives a real
+//! Chromium page against reddit.com — there is no HTTP layer here at
+//! all to redirect at a mock server, and no realistic way to fake a
+//! whole browser session in a subprocess-boundary integration test.
+//! `tests/subprocess_binary_integration.rs` proves the parts that
+//! *are* provable without one: the handshake, and that a connector-
+//! level error (there being no real captured session in CI) relays
+//! correctly through the real run/stream subprocess boundary.
 
 use dbs_connector_reddit::{RedditConfig, RedditConnector};
 
