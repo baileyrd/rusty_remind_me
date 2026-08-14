@@ -15,6 +15,8 @@
 //! establishes the async/sync bridging pattern every other slice
 //! (#171-#177) reuses.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Redirect, Response};
@@ -91,6 +93,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/items/:id", get(item_detail))
         .route("/api/media/:id", get(media))
         .route("/api/thumb/:id", get(thumb))
+        .route("/api/connectors", get(connectors))
+        .route("/api/sources", get(sources).post(create_source))
 }
 
 async fn meta(State(state): State<AppState>) -> Json<Value> {
@@ -503,4 +507,94 @@ async fn thumb(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Res
         ThumbOutcome::Redirect(url) => Redirect::temporary(&url).into_response(),
         ThumbOutcome::NotFound => not_found("no thumbnail available"),
     })
+}
+
+// -- sources / connectors (issue #172) ----------------------------------
+
+/// `GET /api/connectors` — every loadable connector, `type`/`label`/
+/// `capabilities`/`secret_keys`/`auth_capture`/... per
+/// `BackupService::list_connectors`. `app.js`'s `refreshStatus`,
+/// `loadConnectorsPanel`, and `loadAddForm` all fetch this as a flat
+/// array (`conns.map((c) => [c.type, c])`, `items.forEach((c) => ...)`),
+/// so the `Vec<ConnectorInfo>` is returned as-is rather than wrapped in
+/// an envelope.
+async fn connectors(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let rows = service.list_connectors();
+        Ok(serde_json::to_value(rows).unwrap_or(Value::Null))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(result))
+}
+
+/// `GET /api/sources` — every configured source, `name`/`type`/
+/// `enabled`/`schedule`/`backed_up` per `BackupService::list_sources`.
+/// `app.js`'s `loadSourceDetail` fetches this as a flat array too.
+async fn sources(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let rows = service.list_sources()?;
+        Ok(serde_json::to_value(rows).unwrap_or(Value::Null))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(result))
+}
+
+/// Request body for `POST /api/sources` — matches exactly what
+/// `app.js`'s add-source form submit sends (`loadAddForm`'s submit
+/// handler): `name`/`type`/`options`/`store_media`/`max_media_mb`/
+/// `requires_vpn`.
+#[derive(Deserialize)]
+struct CreateSourceRequest {
+    name: String,
+    #[serde(rename = "type")]
+    type_: String,
+    #[serde(default)]
+    options: HashMap<String, Value>,
+    #[serde(default)]
+    store_media: bool,
+    #[serde(default)]
+    max_media_mb: u32,
+    #[serde(default)]
+    requires_vpn: bool,
+}
+
+/// `POST /api/sources` — bridges `BackupService::add_source`. On
+/// success returns `{"name": ..., "type": ...}`, which is all the
+/// frontend's success toast (`Added ${sc.name} (${sc.type})`) reads.
+async fn create_source(
+    State(state): State<AppState>,
+    Json(body): Json<CreateSourceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let name = body.name.clone();
+    let type_ = body.type_.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        service.add_source(
+            &body.name,
+            &body.type_,
+            &body.options,
+            body.store_media,
+            body.max_media_mb,
+            body.requires_vpn,
+        )
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(json!({"name": name, "type": type_})))
 }

@@ -8,6 +8,37 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real `/api` sources & connectors routes (closes #172)
+**2026-08-14**
+
+- **`GET /api/connectors`** bridges `BackupService::list_connectors`
+  directly — the flat `Vec<ConnectorInfo>` array `app.js`'s
+  `refreshStatus`, `loadConnectorsPanel`, and `loadAddForm` all fetch.
+  Closing this route surfaced two upstream gaps in `dbs-core` itself,
+  fixed alongside it: `ConnectorInfo` had no `auth_capture` field at
+  all (the web UI needs it to know whether/how to show a capture
+  button), and `AuthCapture` had no `per_source` field (whether a
+  capture targets one configured source vs. the connector type
+  generally) — both now populated from each connector's handshake,
+  and set `true` on the three connectors with a personal-login-session
+  capture story (reddit, skool, youtube).
+- **`GET /api/sources`** bridges `BackupService::list_sources` — every
+  configured source's `name`/`type`/`enabled`/`schedule`/`backed_up`.
+- **`POST /api/sources`** bridges `BackupService::add_source`, taking
+  the exact body `app.js`'s add-source form submit sends
+  (`name`/`type`/`options`/`store_media`/`max_media_mb`/
+  `requires_vpn`) and returning `{"name", "type"}` on success, all the
+  frontend's own success toast reads.
+- `/api/sources/:name/import` and `/api/connectors/:type/import` were
+  originally scoped to this issue too, but moved to #175 (in-UI setup
+  & capture) since they share that slice's `dbs-web::setup` validation
+  machinery rather than anything here.
+- 6 new router-level tests, including a real spawnable
+  `dbs-connector-fixture` shell-script handshake (same technique
+  `dbs-core`'s own `registry.rs` tests use) to exercise a real
+  directory-scan discovery + successful `POST /api/sources` end to
+  end, not just the read-only listing routes.
+
 ## `dbs-web`: real `/api` item browse & media routes (closes #171)
 **2026-08-14**
 

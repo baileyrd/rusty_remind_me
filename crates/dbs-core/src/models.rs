@@ -31,7 +31,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::capabilities::{Capabilities, ItemKind};
+use crate::capabilities::{AuthCapture, Capabilities, ItemKind};
 
 // --------------------------------------------------------------------- //
 // Connector-facing models                                               //
@@ -411,6 +411,12 @@ pub struct ConnectorInfo {
     pub secret_keys: Vec<String>,
     #[serde(default)]
     pub config_schema: Value,
+    /// `None` for a connector with no interactive-login capture story
+    /// (most of them — plain API-token auth). The web UI (issue #172)
+    /// reads this to show a capture/import button at all, and its
+    /// `per_source` field to decide what the button targets.
+    #[serde(default)]
+    pub auth_capture: Option<AuthCapture>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -141,6 +141,7 @@ impl YouTubeConnector {
                 label: "YouTube login".to_string(),
                 target_dir_option: String::new(),
                 target_path: String::new(),
+                per_source: true,
             },
         }
     }

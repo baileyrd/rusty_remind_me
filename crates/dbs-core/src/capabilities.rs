@@ -37,6 +37,13 @@ pub struct AuthCapture {
     pub target_dir_option: String,
     #[serde(default)]
     pub target_path: String,
+    /// Whether this capture targets one specific configured source
+    /// (`true` — a personal login session, distinct per account) or the
+    /// connector type generally (`false`). The shipped web UI (issue
+    /// #172) reads this to decide whether a capture/import button calls
+    /// a connector-scoped or a source-scoped endpoint.
+    #[serde(default)]
+    pub per_source: bool,
 }
 
 /// Declarative description of a connector's behavior.
