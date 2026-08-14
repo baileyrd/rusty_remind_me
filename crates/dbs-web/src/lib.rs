@@ -845,13 +845,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_verify_reports_not_implemented() {
+    async fn api_verify_on_an_empty_database_reports_ok() {
         let (status, body) = get_json(router(None, test_opts()), "/api/verify").await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body["detail"]
-            .as_str()
-            .unwrap()
-            .contains("not yet implemented"));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["issues"], serde_json::json!([]));
     }
 
     // -- /api/connectors, /api/sources (issue #172) ---------------------

@@ -263,9 +263,25 @@ enum Command {
         since: Option<String>,
     },
     /// Check database integrity and per-source state, or an archive's checksums.
-    Verify,
+    Verify {
+        /// Only check this source (default: every source).
+        source: Option<String>,
+        /// Verify an exported archive bundle's checksums instead of the DB.
+        #[arg(long)]
+        archive: Option<PathBuf>,
+    },
     /// Replay an exported backup into the database.
-    Restore,
+    Restore {
+        /// An archive .zip (`dbs export --format archive`) or an .ndjson
+        /// export written with raw payloads.
+        path: PathBuf,
+        /// Parse and validate the bundle; write nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Machine-readable output.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Decrypt a `dbs export --encrypt`-produced bundle.
     Decrypt {
         /// A file written by `dbs export --encrypt`.
@@ -291,7 +307,18 @@ enum Command {
         dry_run: bool,
     },
     /// Run scheduled maintenance (VACUUM, revision pruning, ...).
-    Maintain,
+    Maintain {
+        /// Rebuild the database file to reclaim free pages.
+        #[arg(long)]
+        vacuum: bool,
+        /// Also write a consistent single-file snapshot safe to copy
+        /// off-machine (refuses an existing path).
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        /// Machine-readable output.
+        #[arg(long = "json")]
+        json_out: bool,
+    },
     /// Print a cron/systemd (or Task Scheduler) snippet for unattended runs.
     Schedule {
         /// cron preset: daily|hourly.
@@ -587,8 +614,19 @@ fn main() {
             }
             ConnectorsCommand::Describe { type_ } => cmd_connectors_describe(&cli.config, type_),
         },
+        Command::Verify { source, archive } => cmd_verify(&cli.config, source, archive),
+        Command::Restore {
+            path,
+            dry_run,
+            json_out,
+        } => cmd_restore(&cli.config, &path, dry_run, json_out),
         Command::Doctor { json_out } => cmd_doctor(&cli.config, json_out),
         Command::UpdateYtdlp { dry_run } => cmd_update_ytdlp(dry_run),
+        Command::Maintain {
+            vacuum,
+            snapshot,
+            json_out,
+        } => cmd_maintain(&cli.config, vacuum, snapshot, json_out),
         Command::Schedule { interval } => cmd_schedule(&cli.config, &interval),
         Command::Serve {
             host,
@@ -661,42 +699,8 @@ fn main() {
             ),
         },
         Command::Version => cmd_version(),
-        other => cmd_stub(command_name(&other)),
     };
     std::process::exit(code);
-}
-
-fn command_name(command: &Command) -> &'static str {
-    match command {
-        Command::Init { .. } => "init",
-        Command::Backup { .. } => "backup",
-        Command::Status { .. } => "status",
-        Command::History { .. } => "history",
-        Command::Items { .. } => "items",
-        Command::Stats { .. } => "stats",
-        Command::Export { .. } => "export",
-        Command::ExportNotes { .. } => "export-notes",
-        Command::ExportProfiles { .. } => "export-profiles",
-        Command::ExportWiki { .. } => "export-wiki",
-        Command::Verify => "verify",
-        Command::Restore => "restore",
-        Command::Decrypt { .. } => "decrypt",
-        Command::Doctor { .. } => "doctor",
-        Command::UpdateYtdlp { .. } => "update-ytdlp",
-        Command::Maintain => "maintain",
-        Command::Schedule { .. } => "schedule",
-        Command::Serve { .. } => "serve",
-        Command::Capture { .. } => "capture",
-        Command::Version => "version",
-        Command::Sources(_) => "sources",
-        Command::Connectors(_) => "connectors",
-        Command::Research(_) => "research",
-    }
-}
-
-fn cmd_stub(name: &str) -> i32 {
-    eprintln!("dbs {name}: not yet implemented (tracked in a follow-up issue)");
-    STUB_EXIT_CODE
 }
 
 /// Mirrors the reference's `init` command: writes the config template
@@ -2235,6 +2239,205 @@ fn cmd_connectors_describe(config_path: &Path, type_: String) -> i32 {
     // (ADR-0001 step 1) — unlike the reference's in-process Pydantic
     // model, there's nothing to introspect here yet.
     println!("\nConfig schema: {{}}");
+    0
+}
+
+/// Mirrors the reference's `verify` command: `--archive PATH` checks
+/// an exported bundle's per-entry sha256 checksums
+/// ([`dbs_core::verify_archive`]); otherwise checks the database and
+/// per-source state (`BackupService::verify`). Exit 3 (not 4 — that's
+/// reserved for a config/setup problem) when either check finds real
+/// issues, matching the reference's `typer.Exit(3)`.
+fn cmd_verify(config_path: &Path, source: Option<String>, archive: Option<PathBuf>) -> i32 {
+    if let Some(archive_path) = archive {
+        let report = match dbs_core::verify_archive(&archive_path) {
+            Ok(r) => r,
+            Err(e) => return report_config_error(&e),
+        };
+        if !report.has_checksums {
+            eprintln!(
+                "Bundle has no checksums (written by an older dbs) \u{2014} nothing to verify."
+            );
+            return 0;
+        }
+        if report.issues.is_empty() {
+            println!(
+                "OK \u{2014} {} entr{} verified.",
+                report.verified,
+                if report.verified == 1 { "y" } else { "ies" }
+            );
+            return 0;
+        }
+        println!("Integrity issues found:");
+        for issue in &report.issues {
+            println!("  {issue}");
+        }
+        return 3;
+    }
+
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = build_registry(&cfg);
+    let runner = SubprocessRunner::new(&cfg);
+    let service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let report = match service.verify(source.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+    if report.ok {
+        println!("OK \u{2014} no issues found.");
+        return 0;
+    }
+    println!("Issues found:");
+    for issue in &report.issues {
+        println!("  [{}] {}: {}", issue.kind, issue.source, issue.detail);
+    }
+    3
+}
+
+/// Mirrors the reference's `restore` command: replays an archive .zip
+/// (`dbs export --format archive`) or a raw-payload .ndjson export
+/// back into the database via `BackupService::restore`. Idempotent —
+/// re-restoring the same bundle classifies every row as unchanged.
+fn cmd_restore(config_path: &Path, path: &Path, dry_run: bool, json_out: bool) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = build_registry(&cfg);
+    let runner = SubprocessRunner::new(&cfg);
+    let mut service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let secret_store = load_env_secret_store(config_path);
+    let report = match service.restore(path, dry_run, Some(&secret_store)) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+
+    if json_out {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode restore report as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+    let verb = if report.dry_run {
+        "Would restore"
+    } else {
+        "Restored"
+    };
+    println!(
+        "{verb} {} item(s) across {} source(s): {}",
+        report.fetched,
+        report.sources.len(),
+        if report.sources.is_empty() {
+            "-".to_string()
+        } else {
+            report.sources.join(", ")
+        }
+    );
+    if !report.dry_run {
+        println!(
+            "  +{} created  ~{} updated  ={} unchanged  x{} deleted",
+            report.created, report.updated, report.unchanged, report.deleted
+        );
+    }
+    for w in &report.warnings {
+        println!("  warning: {w}");
+    }
+    0
+}
+
+/// Mirrors the reference's `maintain` command: flushes the WAL,
+/// refreshes planner statistics, and optionally compacts (`--vacuum`)
+/// and snapshots (`--snapshot PATH`) the database via
+/// `BackupService::maintain`.
+fn cmd_maintain(
+    config_path: &Path,
+    vacuum: bool,
+    snapshot: Option<PathBuf>,
+    json_out: bool,
+) -> i32 {
+    let cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return report_config_error(&e),
+    };
+    let mut storage = match SqliteStorage::open(&cfg.database) {
+        Ok(s) => s,
+        Err(e) => return report_config_error(&e),
+    };
+    if let Err(e) = storage.migrate() {
+        return report_config_error(&e);
+    }
+    let registry = build_registry(&cfg);
+    let runner = SubprocessRunner::new(&cfg);
+    let mut service = BackupService::new(&mut storage, &cfg, &registry, &runner);
+
+    let report = match service.maintain(vacuum, snapshot.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return report_config_error(&e),
+    };
+
+    if json_out {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("failed to encode maintenance report as JSON: {e}");
+                return CONFIG_ERROR_EXIT_CODE;
+            }
+        }
+        return 0;
+    }
+    println!("Database: {}", report.database);
+    println!(
+        "  WAL checkpoint: {}",
+        if report.wal_checkpointed {
+            "ok"
+        } else {
+            "blocked/none"
+        }
+    );
+    println!("  planner stats:  refreshed");
+    if report.revisions_pruned > 0 {
+        println!(
+            "  revisions:      pruned {} old row(s)",
+            report.revisions_pruned
+        );
+    }
+    if report.vacuumed {
+        println!(
+            "  vacuum:         done ({} -> {} bytes)",
+            report.size_before, report.size_after
+        );
+    } else {
+        println!(
+            "  vacuum:         skipped ({} bytes; --vacuum to compact)",
+            report.size_after
+        );
+    }
+    if let (Some(path), Some(bytes)) = (&report.snapshot_path, report.snapshot_bytes) {
+        println!("  snapshot:       {path} ({bytes} bytes)");
+    }
     0
 }
 
