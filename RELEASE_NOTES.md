@@ -8,6 +8,24 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Add `/api/export/profiles` and wire `wiki_grouping` into `/api/export` (closes #199)
+**2026-08-14**
+
+- **`GET /api/export/profiles`** — a route the reference has but this port's
+  `/api` layer never got — now bridges `BackupService::export_profiles()`
+  (each source's resolved export rules, and which fields its config
+  overrode). Was already wired into `dbs-cli`'s `dbs export-profiles`;
+  only the web route was missing.
+- **`GET /api/export`** now reads `wiki_grouping` from the query string
+  instead of always defaulting to `"topic"` — a web export to `wiki`
+  format could never use a non-default grouping the way `dbs export
+  --wiki-grouping` already could from the CLI. No new validation needed:
+  `WikiExporter` already rejects an unknown grouping with a
+  `DbsError::Config`, which `ApiError::from` already maps to 400.
+- Tests: 2 new `/api/export/profiles` tests (empty config, a source with
+  an override), 2 new `/api/export` tests (both valid `wiki_grouping`
+  values succeed, an invalid one 400s).
+
 ## `dbs-connector-skool`: wire `configure()` for real per-source scoping (closes #200)
 **2026-08-14**
 

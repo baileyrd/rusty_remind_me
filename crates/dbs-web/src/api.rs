@@ -121,6 +121,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/connectors/:type/import", post(import_connector))
         .route("/api/sources/:name/import", post(import_source))
         .route("/api/export", get(export_download))
+        .route("/api/export/profiles", get(export_profiles))
         .route("/api/export-notes", post(export_notes_route))
         .route("/api/research/meta", get(research_meta))
         .route("/api/research/install", post(research_install))
@@ -1240,6 +1241,75 @@ async fn import_source(
 
 // -- export (issue #176) --------------------------------------------------
 
+/// `GET /api/export/profiles` — each source's resolved export rules
+/// and which fields its config overrode. Mirrors the reference's
+/// `GET /api/export/profiles` (`src/dbs/web/app.py`).
+async fn export_profiles(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let config = state.config.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, DbsError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let mut profiles: Vec<(String, dbs_core::ExportProfile)> =
+            service.export_profiles().into_iter().collect();
+        profiles.sort_by(|a, b| a.0.cmp(&b.0));
+        let out: Vec<Value> = profiles
+            .into_iter()
+            .map(|(name, profile)| {
+                let type_ = config
+                    .sources
+                    .get(&name)
+                    .map(|sc| sc.type_.clone())
+                    .unwrap_or_default();
+                let overridden = source_export_overrides(&config, &name);
+                json!({
+                    "source": name,
+                    "type": type_,
+                    "enabled": profile.enabled,
+                    "item_kinds": profile.item_kinds,
+                    "group_by": profile.group_by,
+                    "body_from": profile.body_from,
+                    "page_per": profile.page_per,
+                    "overridden": overridden,
+                })
+            })
+            .collect();
+        Ok(json!({"profiles": out}))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(result))
+}
+
+/// Which of a source's `[sources.NAME.export]` fields it actually set —
+/// the reference's `overridden` field. Mirrors `dbs-cli`'s identical
+/// `source_export_overrides` helper (`main.rs`); duplicated rather
+/// than shared since the two crates don't otherwise depend on each
+/// other in that direction and it's a small pure function.
+fn source_export_overrides(cfg: &dbs_core::Config, name: &str) -> Vec<String> {
+    let Some(over) = cfg.sources.get(name).and_then(|sc| sc.export.as_ref()) else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    if over.enabled.is_some() {
+        fields.push("enabled".to_string());
+    }
+    if over.item_kinds.is_some() {
+        fields.push("item_kinds".to_string());
+    }
+    if over.group_by.is_some() {
+        fields.push("group_by".to_string());
+    }
+    if over.body_from.is_some() {
+        fields.push("body_from".to_string());
+    }
+    if over.page_per.is_some() {
+        fields.push("page_per".to_string());
+    }
+    fields
+}
+
 /// `GET /api/export` — a real file download, not JSON: the `export`
 /// form (`app.js`) submits by navigating the browser straight to this
 /// URL (`window.location.assign`), so the response has to carry its
@@ -1265,6 +1335,9 @@ async fn export_download(
     let include_deleted = q.one("include_deleted").as_deref() == Some("true");
     let include_revisions = q.one("include_revisions").as_deref() == Some("true");
     let no_raw = q.one("no_raw").as_deref() == Some("true");
+    let wiki_grouping = q
+        .one("wiki_grouping")
+        .unwrap_or_else(|| "topic".to_string());
 
     // `get_exporter` just validates `format` and hands back a lookup
     // table entry — extract the two `String`s this handler actually
@@ -1295,6 +1368,7 @@ async fn export_download(
             include_deleted,
             include_revisions,
             include_raw: !no_raw,
+            wiki_grouping,
             ..Default::default()
         };
         // Mirrors `notes_export.rs`'s own `temp_zip_path` convention —

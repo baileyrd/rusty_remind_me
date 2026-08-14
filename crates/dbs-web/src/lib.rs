@@ -1870,6 +1870,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_export_wiki_grouping_defaults_to_topic_and_accepts_item() {
+        // format=wiki's response is a real zip file, not JSON -- check
+        // status only, the same way api_export_downloads_a_json_file_
+        // with_the_right_content_type does for format=json.
+        for uri in [
+            "/api/export?format=wiki",
+            "/api/export?format=wiki&wiki_grouping=item",
+        ] {
+            let response = router(None, test_opts())
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::HOST, "127.0.0.1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_export_rejects_an_unknown_wiki_grouping() {
+        let (status, body) = get_json(
+            router(None, test_opts()),
+            "/api/export?format=wiki&wiki_grouping=bogus",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("bogus"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn api_export_profiles_with_no_sources_is_an_empty_array() {
+        let (status, body) = get_json(router(None, test_opts()), "/api/export/profiles").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["profiles"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn api_export_profiles_reports_a_sources_resolved_profile_and_overrides() {
+        let mut config = test_config();
+        config.sources.insert(
+            "a".to_string(),
+            dbs_core::SourceConfig {
+                name: "a".to_string(),
+                type_: "raindrop".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: Some(dbs_core::export_profile::ExportProfileOverride {
+                    enabled: Some(false),
+                    item_kinds: None,
+                    group_by: None,
+                    body_from: None,
+                    page_per: None,
+                }),
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = get_json(router(None, opts), "/api/export/profiles").await;
+        assert_eq!(status, StatusCode::OK);
+        let profiles = body["profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["source"], "a");
+        assert_eq!(profiles[0]["type"], "raindrop");
+        assert_eq!(profiles[0]["enabled"], false);
+        assert_eq!(profiles[0]["overridden"], serde_json::json!(["enabled"]));
+    }
+
+    #[tokio::test]
     async fn api_export_notes_writes_markdown_files_and_reports_the_count() {
         let seeded = seed_db("export-notes");
         let out_dir = std::env::temp_dir().join(format!(
