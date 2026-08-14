@@ -34,10 +34,9 @@
 //! `GITHUB_TOKEN`. No scopes needed for public data; `gist` (classic)
 //! or Gists read (fine-grained) to include secret gists.
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85)
-//! — this struct isn't reachable from a real `dbs backup` run yet; the
-//! plugin registry's run/stream bridge doesn't exist. Tested directly
-//! against the `Connector` trait and fixture HTTP responses.
+//! Reachable from a real `dbs backup github` run since #164's
+//! `dbs-connector-github` subprocess binary. Tested directly against
+//! the `Connector` trait and fixture HTTP responses.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

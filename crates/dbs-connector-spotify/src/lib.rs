@@ -23,13 +23,9 @@
 //! Deletion detection: reconcile/full enumerates both kinds and
 //! yields one [`ReconcileMarker`]; disabled kinds withhold it.
 //!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85),
-//! `dbs-connector-github` (#86), `dbs-connector-pinboard` (#87),
-//! `dbs-connector-readwise` (#88), `dbs-connector-mastodon` (#89), and
-//! `dbs-connector-bluesky` (#90) — this struct isn't reachable from a
-//! real `dbs backup` run yet; the plugin registry's run/stream bridge
-//! doesn't exist. Tested directly against the `Connector` trait and
-//! fixture HTTP responses.
+//! Reachable from a real `dbs backup spotify` run since #164's
+//! `dbs-connector-spotify` subprocess binary. Tested directly against
+//! the `Connector` trait and fixture HTTP responses.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

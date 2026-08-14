@@ -8,6 +8,33 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Fix more stale doc-comments claiming already-landed wiring is still open (closes #202)
+**2026-08-14**
+
+Documentation-only, no code changes. A follow-up audit past #196 found more of
+the same pattern:
+
+- 11 connector `lib.rs` module doc-comments (raindrop, github, pinboard,
+  readwise, mastodon, bluesky, spotify, pocketcasts, podcast, vimeo, udemy)
+  claimed "this struct isn't reachable from a real `dbs backup` run yet; the
+  plugin registry's run/stream bridge doesn't exist." False since #157/#164 —
+  every one has had a real subprocess binary reachable from `dbs backup` for
+  a while.
+- `dbs-research/src/lib.rs` claimed `dbs research` subcommands "still report
+  their own 'not yet implemented' stub." False since #189.
+- `dbs-core/src/service.rs`'s `ConnectorRunner` scope note described
+  `UnimplementedRunner` as "the production stand-in" and the run/stream wire
+  protocol as unbuilt follow-up work. Both landed as `run_stream.rs`'s real
+  `SubprocessRunner`, in production use everywhere.
+- `dbs-web/src/setup.rs`'s module doc-comment and both capture-job error
+  strings blamed the still-genuinely-blocked capture jobs on "issue #99
+  hasn't built yet." #99 (the generic Playwright-subprocess launcher) is
+  done and has real callers (reddit/skool's own acquisition scripts); the
+  capture jobs are blocked on a dedicated login-capture script that simply
+  hasn't been written, a different and more specific gap. Updated the
+  doc-comment, both error strings, and the tests asserting on their exact
+  wording.
+
 ## Wire `dbs verify`/`dbs restore`/`dbs maintain` CLI subcommands (closes #195)
 **2026-08-14**
 

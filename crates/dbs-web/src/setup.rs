@@ -21,14 +21,14 @@
 //!   [`dbs_core::Handshake::needs_playwright_browser`] (or the fixed
 //!   [`playwright_install_commands`] steps directly) and runs them for
 //!   real via [`run_commands`], streaming each line to the job.
-//! - [`run_capture_job`] is a documented stub, same as issue #76's `dbs
-//!   capture`: driving a real Playwright browser session needs the
-//!   shared Playwright-Python launch helper subprocess that gap-
-//!   analysis.md's Decision 3 calls for and issue #99 hasn't built yet.
-//!   It fails cleanly with that explanation rather than pretending to
-//!   open a browser — the acceptance criteria for *this* issue only
-//!   ask that a failing capture job "surfaces a clear error to the
-//!   caller," which this does, wired through the real job manager.
+//! - [`run_capture_job`] is a documented stub: driving a real
+//!   Playwright browser *login* session needs a dedicated capture
+//!   script this port hasn't written yet — unlike the generic
+//!   Playwright-subprocess launcher itself (#99's
+//!   `dbs_connector_support::python_launch`), which is done and has
+//!   real callers (`dbs-connector-reddit`/`-skool`'s own
+//!   `scripts/acquire.py`, #187/#188). It fails cleanly with that
+//!   explanation rather than pretending to open a browser.
 //!
 //! The pure validation/formatting helpers below
 //! ([`validate_netscape_cookies`], [`validate_storage_state`],
@@ -36,11 +36,14 @@
 //! gap — they're plain data transforms the reference itself calls out
 //! as "pure — unit-tested," ported directly.
 //!
-//! **Not wired up:** no `/api` routes call any of this yet. There's no
-//! filed issue yet for the general `/api/status`/`/api/sources`/etc.
-//! read surface these setup actions would sit alongside in the real
-//! UI — wiring `/api/connectors/:type/install` in isolation, ahead of
-//! that surface, would just be a different kind of half-built route.
+//! Every function in this module is wired into a real `/api` route
+//! (`dbs-web::api`, #175/#177): `install_commands`/`run_install_job`
+//! back `/api/connectors/:type/install`, `run_capture_job` backs
+//! `/api/connectors/:type/capture` and `/api/sources/:name/capture`,
+//! `extract_session_zip`/`validate_netscape_cookies`/
+//! `validate_storage_state` back the `/api/*/import` routes, and
+//! `research_install_commands`/`run_notebooklm_login_job` back
+//! `/api/research/install`/`/api/research/login`.
 
 use std::path::Path;
 use std::process::Command;
@@ -124,17 +127,17 @@ pub fn research_install_commands() -> Option<Vec<(String, Vec<String>)>> {
 
 /// A [`crate::jobs::JobManager::start`]-compatible NotebookLM login
 /// capture job body. Always fails cleanly — same reason and shape as
-/// [`run_capture_job`]: a real browser session needs the shared
-/// Playwright launch helper issue #99 hasn't built yet.
+/// [`run_capture_job`]: a real browser *login* session needs a
+/// dedicated capture script this port hasn't written yet (the generic
+/// Playwright-subprocess launcher itself, #99, is done).
 pub fn run_notebooklm_login_job(job: &Arc<Job>) -> Result<(), String> {
     job.emit(json!({
         "line": "Opening a browser window on the server host for NotebookLM login."
     }));
     Err(
-        "browser capture needs a Playwright launch helper this port doesn't have yet \
-         (gap-analysis.md's Connectors cluster, issue #99) — run `notebooklm login` on a \
-         desktop build of the reference instead, then copy its storage_state.json into \
-         <config dir>/.notebooklm/storage_state.json."
+        "browser login capture needs a dedicated Playwright script this port hasn't written \
+         yet — run `notebooklm login` on a desktop build of the reference instead, then copy \
+         its storage_state.json into <config dir>/.notebooklm/storage_state.json."
             .to_string(),
     )
 }
@@ -223,16 +226,17 @@ pub fn run_install_job(job: &Arc<Job>, commands: &[(String, Vec<String>)]) -> Re
 
 /// A [`crate::jobs::JobManager::start`]-compatible browser-auth
 /// capture job body. Always fails cleanly — see the module doc-comment
-/// on why real browser automation isn't implemented in this port yet
-/// (blocked on issue #99's shared Playwright launch helper).
+/// on why real browser login capture isn't implemented in this port
+/// yet (a dedicated capture script, not the generic Playwright
+/// launcher itself, which is done — #99).
 pub fn run_capture_job(job: &Arc<Job>, target: &str) -> Result<(), String> {
     job.emit(json!({
         "line": format!("Opening a browser window on the server host for {target:?}.")
     }));
     Err(
-        "browser capture needs a Playwright launch helper this port doesn't have yet \
-         (gap-analysis.md's Connectors cluster, issue #99) — capture on a desktop build of \
-         the reference and import the resulting session file instead."
+        "browser login capture needs a dedicated Playwright script this port hasn't written \
+         yet — capture on a desktop build of the reference and import the resulting session \
+         file instead."
             .to_string(),
     )
 }
@@ -558,7 +562,7 @@ mod tests {
         }
         assert_eq!(job.status(), crate::jobs::JobStatus::Error);
         let error = job.snapshot().error.unwrap();
-        assert!(error.contains("Playwright launch helper"), "{error}");
+        assert!(error.contains("dedicated Playwright script"), "{error}");
     }
 
     #[test]

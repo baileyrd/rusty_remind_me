@@ -1609,7 +1609,7 @@ mod tests {
         assert!(snap["error"]
             .as_str()
             .unwrap()
-            .contains("Playwright launch helper"));
+            .contains("dedicated Playwright script"));
     }
 
     #[cfg(unix)]
@@ -1657,7 +1657,7 @@ mod tests {
         assert!(snap["error"]
             .as_str()
             .unwrap()
-            .contains("Playwright launch helper"));
+            .contains("dedicated Playwright script"));
     }
 
     #[tokio::test]
@@ -2232,7 +2232,7 @@ mod tests {
         assert!(snap["error"]
             .as_str()
             .unwrap()
-            .contains("Playwright launch helper"));
+            .contains("dedicated Playwright script"));
     }
 
     #[tokio::test]

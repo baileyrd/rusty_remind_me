@@ -20,25 +20,24 @@
 //! whose run legitimately started after the batch began but before that
 //! particular reap call.
 //!
-//! **Scope note — the [`ConnectorRunner`] seam.** The reference's
-//! `backup_source` hands off to `self.engine.run_source(rc, ctx, ...)`,
-//! which drives the connector's actual fetch loop (spawn/handshake was
-//! #45; writing a `RunContext` and reading a `FetchEvent` stream back —
-//! ADR-0001 steps 2-3 — is separate follow-up work no issue covers yet).
-//! Rather than block this issue's connector-instantiation/VPN-guard/
-//! batching scope on that follow-up landing first, [`ConnectorRunner`]
-//! is the injected seam the reference's constructor-injected `engine`
-//! plays: `BackupService` does every preflight step for real (registry
-//! lookup, source registration, cursor/run-count load, mode selection,
-//! locking, run bookkeeping) and calls out to a `&dyn ConnectorRunner`
-//! for the actual fetch. [`UnimplementedRunner`] is the production
-//! stand-in until that follow-up issue supplies a real one; tests use a
-//! scripted fake. This is a **deliberate improvement**, not just a
-//! stopgap: unlike the reference (an uncaught exception from
-//! `engine.run_source` skips `finish_run` entirely, leaving the row
-//! `running` until the next reap), `backup_source` here always calls
-//! `finish_run` exactly once, translating a runner error into a `Failed`
-//! result instead.
+//! **The [`ConnectorRunner`] seam.** The reference's `backup_source`
+//! hands off to `self.engine.run_source(rc, ctx, ...)`, which drives
+//! the connector's actual fetch loop (spawn/handshake was #45; writing
+//! a `RunContext` and reading a `FetchEvent` stream back — ADR-0001
+//! steps 2-3 — was #157). `ConnectorRunner` is the injected seam the
+//! reference's constructor-injected `engine` plays: `BackupService`
+//! does every preflight step for real (registry lookup, source
+//! registration, cursor/run-count load, mode selection, locking, run
+//! bookkeeping) and calls out to a `&dyn ConnectorRunner` for the
+//! actual fetch. [`crate::run_stream::SubprocessRunner`] (#157) is the
+//! real, production `ConnectorRunner` — used everywhere in `dbs-cli`/
+//! `dbs-web` today; [`UnimplementedRunner`] is test-only, and tests use
+//! a scripted fake for the rest. This seam is a **deliberate
+//! improvement** over the reference, not just a stopgap: unlike the
+//! reference (an uncaught exception from `engine.run_source` skips
+//! `finish_run` entirely, leaving the row `running` until the next
+//! reap), `backup_source` here always calls `finish_run` exactly once,
+//! translating a runner error into a `Failed` result instead.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;

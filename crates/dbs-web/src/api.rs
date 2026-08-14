@@ -1489,7 +1489,9 @@ async fn research_install(State(state): State<AppState>) -> Result<Json<JobSnaps
 
 /// `POST /api/research/login` — NotebookLM's login capture, same
 /// shared `job_manager`/`/api/setup/:id/stream` as `research_install`
-/// and #175's connector capture; fails cleanly pending issue #99.
+/// and #175's connector capture; fails cleanly pending a dedicated
+/// login-capture script this port hasn't written yet (see
+/// `dbs-web::setup`'s module doc-comment).
 async fn research_login(State(state): State<AppState>) -> Result<Json<JobSnapshot>, ApiError> {
     require_setup_enabled(&state)?;
     let result = state
@@ -1575,9 +1577,9 @@ fn default_research_months() -> u32 {
 /// shared setup/backup manager — see `AppState::research_job_manager`'s
 /// doc-comment). Every real run fails cleanly at the NotebookLM step
 /// (`dbs_research::notebooklm::UnimplementedClient` — Decision 4's
-/// adapter isn't built yet, same external-tool boundary as issue #99),
-/// but search/selection, progress events, and report rendering are all
-/// real up to that point.
+/// real `nlm`/`notebooklm-mcp` adapter is deferred pending that tool's
+/// confirmed CLI surface), but search/selection, progress events, and
+/// report rendering are all real up to that point.
 async fn start_research(
     State(state): State<AppState>,
     Json(body): Json<StartResearchRequest>,
