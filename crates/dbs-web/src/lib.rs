@@ -48,6 +48,7 @@ pub mod api;
 pub mod auth;
 pub mod envfile;
 pub mod jobs;
+mod scheduler;
 pub mod setup;
 
 use auth::SecurityConfig;
@@ -149,9 +150,17 @@ pub fn router(token: Option<String>, opts: ServeOptions) -> Router {
     let security_config = Arc::new(SecurityConfig { token });
     let job_manager = Arc::new(jobs::JobManager::new());
     let research_job_manager = Arc::new(jobs::JobManager::new());
+    let config = Arc::new(opts.config);
+    if opts.schedule {
+        scheduler::spawn(
+            config.clone(),
+            job_manager.clone(),
+            scheduler::TICK_INTERVAL,
+        );
+    }
     let state = AppState {
         cache_stamp: cache_stamp_now(),
-        config: Arc::new(opts.config),
+        config,
         allow_setup: opts.allow_setup,
         scheduler_enabled: opts.schedule,
         job_manager: job_manager.clone(),

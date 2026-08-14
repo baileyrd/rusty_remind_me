@@ -295,6 +295,7 @@ impl Job {
     }
 }
 
+#[derive(Debug)]
 pub struct JobAlreadyRunning;
 
 struct Inner {

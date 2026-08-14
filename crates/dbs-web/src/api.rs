@@ -90,7 +90,7 @@ impl From<DbsError> for ApiError {
 /// `Mutex`-guarded connection in `AppState`) matches how the CLI
 /// already treats storage: cheap to open, no long-lived lock a slow
 /// request could hold across others.
-fn open_storage(config: &dbs_core::Config) -> Result<SqliteStorage, DbsError> {
+pub(crate) fn open_storage(config: &dbs_core::Config) -> Result<SqliteStorage, DbsError> {
     let mut storage = SqliteStorage::open(&config.database)?;
     storage.migrate()?;
     Ok(storage)
@@ -809,13 +809,13 @@ struct StartBackupRequest {
 /// until either that fires (and sets `core_cancel` to match) or the
 /// caller signals the run itself finished via the returned guard's
 /// `Drop`.
-struct CancelBridge {
+pub(crate) struct CancelBridge {
     done: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CancelBridge {
-    fn spawn(job: Arc<Job>, core_cancel: CancelToken) -> Self {
+    pub(crate) fn spawn(job: Arc<Job>, core_cancel: CancelToken) -> Self {
         let done = Arc::new(AtomicBool::new(false));
         let done_for_thread = done.clone();
         let handle = std::thread::spawn(move || {
@@ -856,8 +856,8 @@ impl Drop for CancelBridge {
 /// `dbs-cli`'s `cmd_backup`, which prints from that same return value,
 /// not from progress events), so no skipped source silently goes
 /// missing from `snap.results`.
-struct JobProgressSink {
-    job: Arc<Job>,
+pub(crate) struct JobProgressSink {
+    pub(crate) job: Arc<Job>,
 }
 
 impl ProgressSink for JobProgressSink {
