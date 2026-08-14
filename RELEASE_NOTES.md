@@ -2,6 +2,15 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-14 — Version bumped to 0.1.1, the first release the automation from #324 publishes
+
+### Added
+- **Bumped `[workspace.package].version` in `Cargo.toml` from `0.1.0` to `0.1.1`**, and `.claude-plugin/plugin.json`'s `"version"` alongside it — `scripts/check_plugin_version.sh` (added in #324) would otherwise fail this PR for exactly that mismatch. This is the first version bump since `.github/workflows/release.yml` started watching pushes to `main` that touch `Cargo.toml`: merging this triggers it to build `rusty-remind-me`/`rusty-remind-me-hub` for Linux, macOS (Intel + Apple Silicon), and Windows, package the Claude Code plugin archive, and publish all of it as the `v0.1.1` GitHub Release.
+
+### Provenance
+
+Verified with `scripts/get_workspace_version.sh` and `scripts/check_plugin_version.sh` (both report `0.1.1`), `cargo check --workspace` (regenerates `Cargo.lock`'s six workspace-member version entries, no dependency-graph changes), and `cargo fmt --all --check`, all clean.
+
 ## 2026-08-12 — thiserror bumped to 2.x workspace-wide, resolving the duplicate-major dependency (#280)
 
 ### Fixed

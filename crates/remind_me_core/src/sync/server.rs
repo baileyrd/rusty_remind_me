@@ -901,12 +901,11 @@ pub struct PeerServerStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Env vars are process-global; serialize this module's env-touching
-    // tests so they don't race each other the way `cargo test` otherwise
-    // would.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Shared with `sync::tests`, not a second module-local lock -- both
+    // modules mutate `SYNC_SECRET_ENV` (a process-global), and two
+    // independent locks over the same global would still race each other.
+    // See that module's `ENV_LOCK` for the failure this fixes.
+    use super::super::tests::ENV_LOCK;
 
     fn clear_env() {
         std::env::remove_var(super::super::SYNC_SECRET_ENV);
