@@ -55,16 +55,17 @@
 //! source's `store_media`/`max_media_mb`/download directory/`options`
 //! (per-source connector config, ADR-0002) from [`crate::config::Config`].
 //!
-//! **Out of scope, left for follow-up work:** this module drives
-//! whatever [`crate::registry::RegisteredConnector::command`] already
-//! resolves to — it does not itself make any of the 14 built-in
-//! `dbs-connector-*` crates into a real subprocess binary that speaks
-//! this protocol (none of them have a `main.rs` yet; they're plain
-//! libraries exercised by their own in-process unit tests today), and
-//! it does not wire real candidate discovery into `dbs-cli` (every
-//! `dbs backup` call site still passes `ConnectorRegistry::from_resolved([])`,
-//! an always-empty registry). Both are real, separate gaps surfaced
-//! while implementing this issue, not silently left for later.
+//! **Out of scope for this module:** it drives whatever
+//! [`crate::registry::RegisteredConnector::command`] already resolves
+//! to — it does not itself make a `dbs-connector-*` crate into a real
+//! subprocess binary, and it does not build a `ConnectorRegistry`.
+//! Both were real gaps when this module first landed; both are closed
+//! now: every one of the 14 built-in connector crates has a real
+//! `main.rs` subprocess binary (#164), and `dbs-cli` builds a real
+//! populated registry via `dbs_core::build_registry`/
+//! `connector_search_dirs` at every `dbs backup` call site (#160) —
+//! `ConnectorRegistry::from_resolved([])` now appears only in this
+//! crate's own unit tests, not in any real code path.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};

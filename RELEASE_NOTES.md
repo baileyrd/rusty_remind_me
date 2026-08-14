@@ -8,6 +8,22 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Fix stale doc-comments claiming already-landed wiring is still an open gap (closes #196)
+**2026-08-14**
+
+Documentation-only, no code changes. Four doc-comments described real gaps
+that later issues already closed, and had become actively misleading:
+
+- `dbs-connector-bluesky`/`-mastodon`/`-podcast`'s `main.rs` files each
+  claimed per-source config passthrough (`identifier`/`instance`/`feeds`)
+  was still an open gap. It isn't — `configure()` in all three has read
+  that value from `sources.<name>.*` since #166/ADR-0002, called by
+  `dbs_connector_support::run_connector_main` on every real run.
+- `dbs-core/src/run_stream.rs`'s module doc-comment claimed none of the
+  14 connector crates had a real subprocess `main.rs` yet, and that
+  every `dbs backup` call site still passed an always-empty
+  `ConnectorRegistry`. Both closed since #164 and #160 respectively.
+
 ## `dbs-connector-skool`: wire fetch() to real (catalog-only) Playwright acquisition (closes #188)
 **2026-08-14**
 

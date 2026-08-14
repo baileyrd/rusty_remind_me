@@ -17,10 +17,13 @@
 //! `""` — there's no single default Mastodon instance to fall back
 //! to, since each account picks its own. `fetch()` rejects an empty
 //! `instance` outright (it must start with `http://`/`https://`), so
-//! without this override the binary can't do *any* real run today,
-//! test or otherwise. A real per-source config passthrough — still a
-//! gap here, same as raindrop's — would supply a real instance URL
-//! instead of relying on this env var.
+//! without this override the binary can't do a real run in *this
+//! integration test file* specifically (it never sets a real source
+//! config). A real `dbs backup` run supplies `instance` from
+//! `sources.<name>.instance` via `MastodonConnector::configure()`,
+//! called by `dbs_connector_support::run_connector_main` with the
+//! per-source wire config on every real run (#166/ADR-0002) — this
+//! env var exists only for tests that spawn the binary directly.
 use dbs_connector_mastodon::{MastodonConfig, MastodonConnector};
 
 fn main() {
