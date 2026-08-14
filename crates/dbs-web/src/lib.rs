@@ -147,7 +147,8 @@ pub fn router(token: Option<String>, opts: ServeOptions) -> Router {
         .route("/static/:name", get(static_asset))
         .merge(api::router())
         .with_state(state)
-        .nest("/api/backup", jobs::sse_router(job_manager))
+        .nest("/api/backup", jobs::sse_router(job_manager.clone()))
+        .nest("/api/setup", jobs::sse_router(job_manager))
         .layer(axum::middleware::from_fn_with_state(
             security_config,
             auth::security_gate,
@@ -1447,6 +1448,354 @@ mod tests {
         let sse_body = body_string(response).await;
         assert!(sse_body.contains("event: end"), "{sse_body}");
         assert!(sse_body.contains(r#""status":"done""#), "{sse_body}");
+    }
+
+    // -- /api/connectors/:type/install|capture, /api/sources/:name/capture,
+    // /api/connectors/:type/import, /api/sources/:name/import (issue #175) --
+
+    /// Like `connectors_dir_with_a_fixture_connector_requiring_auth`
+    /// (#173), but the handshake also declares `auth_capture` — the
+    /// piece capture/import routes need to resolve a target at all.
+    #[cfg(unix)]
+    fn connectors_dir_with_a_fixture_auth_capture_connector(
+        label: &str,
+        kind: &str,
+        secret_key: &str,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "dbs-web-api-setup-connectors-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("dbs-connector-fixture");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho '{{\"type\":\"fixture\",\"core_api_version\":{},\"schema_version\":1,\
+                 \"capabilities\":{{\"requires_auth\":true}},\"item_kinds\":[\"item\"],\
+                 \"secret_keys\":[\"{secret_key}\"],\"auth_capture\":{{\"kind\":\"{kind}\",\
+                 \"secret_key\":\"{secret_key}\",\"login_url\":\"\",\"label\":\"Fixture login\",\
+                 \"target_dir_option\":\"\",\"target_path\":\"\",\"per_source\":false}}}}'\nexit 0\n",
+                dbs_core::CURRENT_API_VERSION
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    /// Polls `GET /api/setup/:id` (the plain JSON snapshot route
+    /// `jobs::sse_router` nests under `/api/setup`) until the job is no
+    /// longer `running`.
+    async fn wait_until_setup_job_done(router: Router, id: u64) -> serde_json::Value {
+        for _ in 0..200 {
+            let (status, body) = get_json(router.clone(), &format!("/api/setup/{id}")).await;
+            assert_eq!(status, StatusCode::OK);
+            if body["status"] != "running" {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("job {id} never finished");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_install_connector_completes_when_nothing_needs_installing() {
+        let dir = connectors_dir_with_a_fixture_connector("install-noop");
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/connectors/fixture/install",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_u64().unwrap();
+        let snap = wait_until_setup_job_done(router, id).await;
+        assert_eq!(snap["status"], "done");
+    }
+
+    #[tokio::test]
+    async fn api_install_connector_job_errors_for_an_unregistered_connector_type() {
+        let router = router(None, test_opts());
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/connectors/nonexistent/install",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_u64().unwrap();
+        let snap = wait_until_setup_job_done(router, id).await;
+        assert_eq!(snap["status"], "error");
+        assert!(snap["error"].as_str().unwrap().contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn api_install_connector_is_forbidden_when_setup_is_disabled() {
+        let opts = ServeOptions {
+            config: test_config(),
+            allow_setup: false,
+            schedule: false,
+        };
+        let (status, body) = post_json(
+            router(None, opts),
+            "/api/connectors/fixture/install",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["detail"].as_str().unwrap().contains("--no-setup"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_capture_connector_fails_cleanly_pending_issue_99() {
+        let dir = connectors_dir_with_a_fixture_auth_capture_connector(
+            "capture-connector",
+            "browser_cookies",
+            "FIXTURE_COOKIES_FILE",
+        );
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/connectors/fixture/capture",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_u64().unwrap();
+        let snap = wait_until_setup_job_done(router, id).await;
+        assert_eq!(snap["status"], "error");
+        assert!(snap["error"]
+            .as_str()
+            .unwrap()
+            .contains("Playwright launch helper"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_capture_source_resolves_the_connector_via_the_configured_source_name() {
+        let dir = connectors_dir_with_a_fixture_auth_capture_connector(
+            "capture-source",
+            "browser_session",
+            "FIXTURE_SESSION_DIR",
+        );
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        config.sources.insert(
+            "a".to_string(),
+            dbs_core::SourceConfig {
+                name: "a".to_string(),
+                type_: "fixture".to_string(),
+                enabled: true,
+                schedule: None,
+                reconcile_every_runs: None,
+                store_media: false,
+                max_media_mb: 0,
+                requires_vpn: false,
+                keep_revisions: 0,
+                export: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/sources/a/capture",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_u64().unwrap();
+        let snap = wait_until_setup_job_done(router, id).await;
+        assert_eq!(snap["status"], "error");
+        assert!(snap["error"]
+            .as_str()
+            .unwrap()
+            .contains("Playwright launch helper"));
+    }
+
+    #[tokio::test]
+    async fn api_capture_connector_job_errors_for_an_unresolvable_target() {
+        let router = router(None, test_opts());
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/connectors/nonexistent/capture",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_u64().unwrap();
+        let snap = wait_until_setup_job_done(router, id).await;
+        assert_eq!(snap["status"], "error");
+        assert!(snap["error"]
+            .as_str()
+            .unwrap()
+            .contains("no such connector or source"));
+    }
+
+    /// A hand-built `multipart/form-data` body with one `file` field —
+    /// the exact shape `apiUpload` (`app.js`) sends, and simple enough
+    /// not to need a multipart-building dependency just for tests.
+    fn multipart_file_body(filename: &str, content: &[u8]) -> (String, Vec<u8>) {
+        let boundary = "dbsWebTestBoundary".to_string();
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        (boundary, body)
+    }
+
+    async fn post_multipart_file(
+        router: Router,
+        path: &str,
+        filename: &str,
+        content: &[u8],
+    ) -> (StatusCode, serde_json::Value) {
+        let (boundary, body) = multipart_file_body(filename, content);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::HOST, "127.0.0.1")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let resp_body = body_string(response).await;
+        (
+            status,
+            serde_json::from_str(&resp_body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_import_connector_writes_cookies_and_registers_the_secret() {
+        let dir = connectors_dir_with_a_fixture_auth_capture_connector(
+            "import-cookies",
+            "browser_cookies",
+            "FIXTURE_COOKIES_FILE",
+        );
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        config.base_dir = temp_base_dir("import-cookies");
+        let env_path = config.env_file_path();
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let router = router(None, opts);
+        let cookies = b"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tsid\tabc\n";
+        let (status, body) = post_multipart_file(
+            router,
+            "/api/connectors/fixture/import",
+            "cookies.txt",
+            cookies,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["note"]
+            .as_str()
+            .unwrap()
+            .contains("FIXTURE_COOKIES_FILE"));
+
+        let env_contents = std::fs::read_to_string(&env_path).unwrap();
+        assert!(env_contents.contains("FIXTURE_COOKIES_FILE="));
+        assert!(env_contents.contains("fixture-cookies.txt"));
+
+        let written_path = env_contents
+            .lines()
+            .find(|l| l.starts_with("FIXTURE_COOKIES_FILE="))
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .trim_matches('"');
+        assert_eq!(std::fs::read(written_path).unwrap(), cookies);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_import_connector_rejects_invalid_cookies_content() {
+        let dir = connectors_dir_with_a_fixture_auth_capture_connector(
+            "import-invalid",
+            "browser_cookies",
+            "FIXTURE_COOKIES_FILE",
+        );
+        let mut config = test_config();
+        config.connectors_dir = Some(dir);
+        config.base_dir = temp_base_dir("import-invalid");
+        let opts = ServeOptions {
+            config,
+            allow_setup: true,
+            schedule: false,
+        };
+        let (status, body) = post_multipart_file(
+            router(None, opts),
+            "/api/connectors/fixture/import",
+            "cookies.txt",
+            b"not cookies at all",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["detail"].as_str().unwrap().contains("Netscape"));
+    }
+
+    #[tokio::test]
+    async fn api_import_is_forbidden_when_setup_is_disabled() {
+        let opts = ServeOptions {
+            config: test_config(),
+            allow_setup: false,
+            schedule: false,
+        };
+        let (status, body) = post_multipart_file(
+            router(None, opts),
+            "/api/connectors/fixture/import",
+            "cookies.txt",
+            b"whatever",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["detail"].as_str().unwrap().contains("--no-setup"));
     }
 
     #[tokio::test]

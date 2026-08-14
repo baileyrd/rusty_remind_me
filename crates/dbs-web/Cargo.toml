@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Web app skeleton for rusty_dbs, mirroring dbs.web.app in baileyrd/Daily-Backup-System"
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["multipart"] }
 chrono = "0.4"
 dbs-core = { path = "../dbs-core" }
 futures-util = "0.3"

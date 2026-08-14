@@ -16,11 +16,12 @@
 //! (#171-#177) reuses.
 
 use std::collections::HashMap;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, RawQuery, State};
+use axum::extract::{Multipart, Path, Query, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Redirect, Response};
 use axum::routing::{delete, get, post};
@@ -105,6 +106,11 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/backup", post(start_backup))
         .route("/api/backup/current", get(current_backup))
         .route("/api/backup/:id/cancel", post(cancel_backup))
+        .route("/api/connectors/:type/install", post(install_connector))
+        .route("/api/connectors/:type/capture", post(capture_connector))
+        .route("/api/sources/:name/capture", post(capture_source))
+        .route("/api/connectors/:type/import", post(import_connector))
+        .route("/api/sources/:name/import", post(import_source))
 }
 
 async fn meta(State(state): State<AppState>) -> Json<Value> {
@@ -948,4 +954,254 @@ async fn cancel_backup(
     }
     let cancelled = state.job_manager.cancel(id);
     Ok(Json(json!({"cancelled": cancelled})))
+}
+
+// -- in-UI setup & capture (issue #175) -----------------------------------
+
+/// `dbs serve --no-setup` disables every mutating setup/capture/import
+/// route server-side, not just their buttons in the UI (`allow_setup`'s
+/// own doc-comment in `lib.rs` names this issue as the one that wires
+/// the gate up) — a `--no-setup` server refuses to run installers or
+/// write capture files even if a client calls these routes directly.
+fn require_setup_enabled(state: &AppState) -> Result<(), ApiError> {
+    if state.allow_setup {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "setup routes are disabled (dbs serve --no-setup)".to_string(),
+        ))
+    }
+}
+
+fn job_already_running_error() -> ApiError {
+    ApiError(StatusCode::CONFLICT, "a job is already running".to_string())
+}
+
+/// `POST /api/connectors/:type/install` — starts `dbs-web::setup`'s
+/// dependency-install job (`installConnector`, `app.js`) as a background
+/// [`crate::jobs::Job`]; progress streams over the shared
+/// `GET /api/setup/:id/stream` mount (`crate::jobs::sse_router`, mounted
+/// in `lib.rs` on the same [`crate::jobs::JobManager`] `/api/backup`
+/// uses — one at-most-one-job-at-a-time primitive for the whole app,
+/// same as the reference's single `SetupManager`).
+async fn install_connector(
+    State(state): State<AppState>,
+    Path(type_): Path<String>,
+) -> Result<Json<JobSnapshot>, ApiError> {
+    require_setup_enabled(&state)?;
+    let config = state.config.clone();
+    let type_for_job = type_.clone();
+    let result = state
+        .job_manager
+        .start(json!({"kind": "install", "type": type_}), move |job| {
+            let (registry, _report) = build_registry(&config);
+            let rc = registry
+                .get(&type_for_job)
+                .ok_or_else(|| format!("no such connector: {type_for_job:?}"))?;
+            let commands = crate::setup::install_commands(rc)
+                .ok_or_else(|| "no Python interpreter found on PATH to install with".to_string())?;
+            crate::setup::run_install_job(&job, &commands)
+        });
+    match result {
+        Ok(job) => Ok(Json(job.snapshot())),
+        Err(JobAlreadyRunning) => Err(job_already_running_error()),
+    }
+}
+
+/// Shared body for `POST /api/connectors/:type/capture` and
+/// `POST /api/sources/:name/capture` — `target` is whichever URL
+/// segment the caller sent; [`BackupService::resolve_capture_target`]
+/// already accepts either a bare connector type or a configured source
+/// name (same lookup `dbs capture` uses CLI-side), so both routes share
+/// one implementation. Resolves `target` for real before starting the
+/// job (mirrors `cmd_capture`'s own resolve-then-report order) so an
+/// unknown connector/source gets a specific 400, not a job that starts
+/// only to fail with the generic #99 message.
+async fn start_capture_job(
+    state: &AppState,
+    target: String,
+) -> Result<Json<JobSnapshot>, ApiError> {
+    require_setup_enabled(state)?;
+    let config = state.config.clone();
+    let target_for_job = target.clone();
+    let result =
+        state
+            .job_manager
+            .start(json!({"kind": "capture", "target": target}), move |job| {
+                let mut storage = open_storage(&config).map_err(|e| e.to_string())?;
+                let (registry, _report) = build_registry(&config);
+                let runner = SubprocessRunner::new(&config);
+                let service = BackupService::new(&mut storage, &config, &registry, &runner);
+                service
+                    .resolve_capture_target(&target_for_job)
+                    .map_err(|e| e.to_string())?;
+                crate::setup::run_capture_job(&job, &target_for_job)
+            });
+    match result {
+        Ok(job) => Ok(Json(job.snapshot())),
+        Err(JobAlreadyRunning) => Err(job_already_running_error()),
+    }
+}
+
+async fn capture_connector(
+    State(state): State<AppState>,
+    Path(type_): Path<String>,
+) -> Result<Json<JobSnapshot>, ApiError> {
+    start_capture_job(&state, type_).await
+}
+
+async fn capture_source(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<JobSnapshot>, ApiError> {
+    start_capture_job(&state, name).await
+}
+
+/// Writes `data` to `path`, creating parent directories first — the
+/// captures directory (`<base_dir>/captures/`) won't exist on a fresh
+/// server until the first import.
+fn write_capture_file(path: &FsPath, data: &[u8]) -> Result<(), ApiError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not create {}: {e}", parent.display()),
+            )
+        })?;
+    }
+    std::fs::write(path, data).map_err(|e| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not write {}: {e}", path.display()),
+        )
+    })
+}
+
+/// Shared body for `POST /api/connectors/:type/import` and
+/// `POST /api/sources/:name/import` — `apiUpload`'s (`app.js`)
+/// counterpart to live capture for a headless server: `dbs capture` on
+/// a machine with a display produces a session artifact, uploaded here
+/// as a single `multipart/form-data` `file` field. Validated with the
+/// same functions `dbs-web::setup` already built for this
+/// (`validate_netscape_cookies`/`validate_storage_state`/
+/// `extract_session_zip`), written to `AuthCapture::target_path` (or a
+/// default under `<base_dir>/captures/` when the connector doesn't
+/// declare one — every real connector today doesn't), and registered
+/// as a secret via `dbs-web::envfile` keyed by `AuthCapture::secret_key`
+/// — exactly what the issue body specifies.
+async fn import_capture(
+    state: &AppState,
+    target: String,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    require_setup_enabled(state)?;
+    let mut data: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?
+    {
+        if field.name() == Some("file") {
+            data = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?
+                    .to_vec(),
+            );
+        }
+    }
+    let data = data.ok_or_else(|| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            "no \"file\" field in the upload".to_string(),
+        )
+    })?;
+
+    let config = state.config.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
+        let mut storage = open_storage(&config)?;
+        let (registry, _report) = build_registry(&config);
+        let runner = SubprocessRunner::new(&config);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+        let (_rc, spec) = service.resolve_capture_target(&target)?;
+
+        if spec.secret_key.is_empty() {
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{target:?}'s connector declares no secret_key for its capture"),
+            ));
+        }
+
+        let default_path = |suffix: &str| -> PathBuf {
+            config
+                .base_dir
+                .join("captures")
+                .join(format!("{target}-{suffix}"))
+        };
+        let explicit_path =
+            (!spec.target_path.is_empty()).then(|| PathBuf::from(&spec.target_path));
+
+        let target_path = match spec.kind.as_str() {
+            "browser_session" => {
+                let dir = explicit_path.unwrap_or_else(|| default_path("session"));
+                crate::setup::extract_session_zip(&data, &dir)
+                    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+                dir
+            }
+            "browser_cookies" => {
+                let text = String::from_utf8_lossy(&data);
+                crate::setup::validate_netscape_cookies(&text)
+                    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+                let path = explicit_path.unwrap_or_else(|| default_path("cookies.txt"));
+                write_capture_file(&path, &data)?;
+                path
+            }
+            "browser_storage_state" => {
+                let text = String::from_utf8_lossy(&data);
+                crate::setup::validate_storage_state(&text)
+                    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+                let path = explicit_path.unwrap_or_else(|| default_path("storage_state.json"));
+                write_capture_file(&path, &data)?;
+                path
+            }
+            other => {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("unsupported capture kind: {other:?}"),
+                ))
+            }
+        };
+
+        crate::envfile::set_var(
+            &config.env_file_path(),
+            &spec.secret_key,
+            &target_path.to_string_lossy(),
+        )
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        Ok(json!({
+            "note": format!("Imported \u{2014} {} set.", spec.secret_key),
+        }))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(result))
+}
+
+async fn import_connector(
+    State(state): State<AppState>,
+    Path(type_): Path<String>,
+    multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    import_capture(&state, type_, multipart).await
+}
+
+async fn import_source(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    import_capture(&state, name, multipart).await
 }

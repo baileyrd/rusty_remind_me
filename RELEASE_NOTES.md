@@ -8,6 +8,51 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-web`: real in-UI setup & browser-auth capture routes (closes #175)
+**2026-08-14**
+
+- **`POST /api/connectors/:type/install`** derives and runs the
+  connector's `pip install`/`playwright install chromium` steps
+  (`dbs-web::setup::install_commands`/`run_install_job`, already fully
+  real since #83) as a background job on the shared `JobManager`
+  `/api/backup` (#174) uses — progress streams over the same
+  `GET /api/setup/:id/stream` mount `jobs::sse_router` provides for
+  free once nested at `/api/setup` in `lib.rs`.
+- **`POST /api/connectors/:type/capture`** and
+  **`POST /api/sources/:name/capture`** both resolve their target via
+  `BackupService::resolve_capture_target` (accepts either a bare
+  connector type or a configured source name) before starting a job
+  that fails cleanly with the documented issue #99 blocker
+  (`run_capture_job`) — an unresolvable target gets a specific error
+  instead of the generic "needs Playwright" one.
+- **`POST /api/connectors/:type/import`** and
+  **`POST /api/sources/:name/import`** are the headless-server
+  workaround: a `multipart/form-data` upload of a session artifact
+  `dbs capture` produced on a machine with a display. Validated with
+  the functions already built for this
+  (`validate_netscape_cookies`/`validate_storage_state`/
+  `extract_session_zip`), written to `AuthCapture::target_path` (or a
+  default under `<base_dir>/captures/` — every real connector today
+  leaves `target_path` unset), and registered as a secret via
+  `dbs-web::envfile::set_var` keyed by `AuthCapture::secret_key`.
+- **`allow_setup` (`dbs serve --no-setup` inverted) now actually gates
+  these five routes**, not just their buttons in the UI — a
+  `--no-setup` server refuses to install/capture/import even if a
+  client calls the routes directly. (`lib.rs`'s own doc-comment on
+  `allow_setup` named this issue as the one that would wire this up.)
+- `GET /api/setup/:id/stream` inherits #174's `jobs::sse_router`
+  terminal `end`-event fix for free (the shared primitive both routes
+  nest, fixed once rather than per-route) — `streamSetup` (`app.js`)
+  gets the real snapshot its own `end` listener expects, not just an
+  unnamed event stream that silently closes.
+- `/import`'s scope (originally under #172) moved here during #172's
+  implementation — it shares this issue's `dbs-web::setup` validation
+  machinery, not #172's connectors/sources listing routes.
+- 9 new router-level tests, including a fixture connector handshake
+  declaring `auth_capture` (extending #172/#173's fixture-connector
+  technique) and a hand-built `multipart/form-data` body (no new
+  dependency needed just for tests).
+
 ## `dbs-web`: real `/api` backup trigger + live progress routes (closes #174)
 **2026-08-14**
 
