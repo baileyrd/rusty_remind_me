@@ -63,6 +63,7 @@ const TOKEN_PATH: &str = "/token";
 const REGISTRATION_PATH: &str = "/register";
 const REVOCATION_PATH: &str = "/revoke";
 const AS_METADATA_PATH: &str = "/.well-known/oauth-authorization-server";
+const AS_METADATA_ALIAS_PATH: &str = "/.well-known/oauth-authorization-server/mcp";
 const PR_METADATA_PATH: &str = "/.well-known/oauth-protected-resource/mcp";
 const PR_METADATA_ALIAS_PATH: &str = "/.well-known/oauth-protected-resource";
 
@@ -920,6 +921,7 @@ pub async fn require_bearer(
 pub fn oauth_router(state: OAuthAppState) -> Router {
     Router::new()
         .route(AS_METADATA_PATH, get(as_metadata))
+        .route(AS_METADATA_ALIAS_PATH, get(as_metadata))
         .route(PR_METADATA_PATH, get(protected_resource_metadata))
         .route(PR_METADATA_ALIAS_PATH, get(protected_resource_metadata))
         .route(AUTHORIZATION_PATH, get(authorize_get).post(authorize_post))
