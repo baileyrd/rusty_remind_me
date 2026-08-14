@@ -184,6 +184,18 @@ impl Config {
         self.download_root_path().join(source_name)
     }
 
+    /// `<config file's directory>/.env` — the secrets file `dbs init`
+    /// writes an example of, and [`parse_env_file`] reads for
+    /// [`crate::crypto::resolve_passphrase`]'s `secret_store`. `base_dir`
+    /// is already exactly that directory (set from `source_path`'s
+    /// parent at load time), generalized here (issue #173, same move as
+    /// #170's `build_registry`) so `dbs-web`'s `/api/secrets` routes
+    /// read/write the identical file a `dbs backup` invocation would,
+    /// not a second, drifting path convention.
+    pub fn env_file_path(&self) -> PathBuf {
+        self.base_dir.join(".env")
+    }
+
     /// Translates `[connectors.<type>]` blocks into a registry override
     /// map (ADR-0001's manifest-based registry consumes this).
     pub fn registry_override(&self) -> HashMap<String, String> {
