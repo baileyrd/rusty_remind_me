@@ -86,14 +86,32 @@ failures above — also green at 1874, home directory still clean, scratch landi
 in `target/tmp` and (for `updater`) beside the workspace. `cargo clippy
 --workspace --all-targets` and `cargo fmt --all --check` both clean.
 
-Two pre-existing failures seen on the first run of this branch — `sync::tests`'
-`a_real_triple_still_enables_sync` and
-`unresolved_user_config_placeholder_does_not_enable_sync` — are unrelated to
-this change and are not fixed here: `sync/mod.rs` and `sync/server.rs` each
-declare their own private `ENV_LOCK` while both mutating
-`REMIND_ME_SYNC_SECRET`, so two mutexes serialize nothing against each other.
-They pass under `--test-threads=1` and on subsequent parallel runs. Tracked
-separately.
+### Also fixed — a pre-existing test race, surfaced by this branch
+
+- **`sync/mod.rs` and `sync/server.rs` each declared a private `ENV_LOCK`
+  while both mutating `REMIND_ME_SYNC_SECRET`.** Two separate mutexes
+  serialize nothing against each other, and libtest runs both modules' tests
+  on parallel threads of one binary, so `server`'s `clear_env()` could wipe
+  the secret `mod`'s test had just set: `a_real_triple_still_enables_sync`
+  failed with `left: ""` against `right: "s3cr3t"`, and because it panicked
+  while holding its lock,
+  `unresolved_user_config_placeholder_does_not_enable_sync` failed behind it
+  with a `PoisonError` that buried the real cause. Order-dependent, so it
+  reproduced only sometimes — it hit the first run of this branch, passed on
+  the next two, then failed the Windows CI job. Replaced with one
+  `pub(crate) ENV_LOCK` in `sync/mod.rs`, beside the variables it guards,
+  taken with `.unwrap_or_else(|e| e.into_inner())` — this crate's established
+  convention (`cloud_backup`, `query_expansion`, `updater`) — so one panic can
+  no longer cascade into misleading poison failures in its siblings.
+- `sync/peers.rs` keeps its own private lock deliberately: it guards
+  `STATIC_PEERS_ENV` and `TAILSCALE_SOCKET_ENV`, which nothing else touches.
+  The rule is one lock per set of variables, not one per crate — sharing it
+  there would serialize unrelated tests for no correctness gain. Recorded in a
+  comment so the distinction survives.
+
+Verified for the race specifically: the `sync` tests 40× and the full
+`remind_me_core` lib suite 8× — where the failure originally surfaced — all
+clean.
 
 ## 2026-08-12 — thiserror bumped to 2.x workspace-wide, resolving the duplicate-major dependency (#280)
 
