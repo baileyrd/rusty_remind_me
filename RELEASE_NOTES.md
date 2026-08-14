@@ -8,6 +8,25 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-skool`: wire `configure()` for real per-source scoping (closes #200)
+**2026-08-14**
+
+`SkoolConnector` had no `Connector::configure()` override — every other
+connector with per-source targeting config (bluesky's `identifier`,
+mastodon's `instance`, podcast's `feeds`) implements it per ADR-0002, but
+skool silently fell through to the trait's no-op default. Concretely,
+`SkoolConfig`'s `communities`/`courses`/`no_download_communities` fields
+could never be set from a real `[sources.NAME]` config block — the
+already-tested `course_selected()` selector-matching logic had no way to
+ever receive a real, non-empty selector list in production, and
+auto-discover-everything always won.
+
+Added `configure()`, reading all three fields as string arrays (mirrors
+`dbs-connector-podcast`'s `feeds` parsing — the closest existing precedent
+for an array-valued option, including its exact validation-error shape). 6
+new tests: one per field's happy path, a no-matching-keys no-op case, and
+two rejection cases (non-array value, non-string array entry).
+
 ## Remove the dead `reap_once` helper in dbs-core (closes #201)
 **2026-08-14**
 
