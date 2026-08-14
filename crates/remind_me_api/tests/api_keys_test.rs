@@ -25,7 +25,7 @@ struct Store(std::path::PathBuf);
 
 impl Store {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = remind_me_testkit::scratch_root().join(format!(
             "rrm_keys_{}_{}_{:?}",
             tag,
             std::process::id(),

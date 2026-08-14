@@ -24,8 +24,11 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
-        .join(format!("rrm_mempalace_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::import_export_root().join(format!(
+        "rrm_mempalace_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

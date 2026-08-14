@@ -172,7 +172,8 @@ fn a_real_content_change_still_reaches_the_outbox() {
 #[test]
 fn an_existing_database_has_its_stale_trigger_rebuilt_on_open() {
     ensure_sync_enabled();
-    let dir = std::env::temp_dir().join(format!("rrm_outbox_trigger_{}", std::process::id()));
+    let dir = remind_me_testkit::scratch_root()
+        .join(format!("rrm_outbox_trigger_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("memories.db");
     let _ = std::fs::remove_file(&path);
@@ -329,7 +330,7 @@ fn pruning_is_idempotent() {
 #[test]
 fn opening_a_database_prunes_it() {
     ensure_sync_enabled();
-    let dir = std::env::temp_dir().join(format!("rrm_outbox_{}", std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!("rrm_outbox_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("memories.db");
     let _ = std::fs::remove_file(&path);
@@ -352,7 +353,8 @@ fn opening_a_database_prunes_it() {
 #[test]
 fn a_realistic_mix_of_traffic_stays_bounded() {
     ensure_sync_enabled();
-    let dir = std::env::temp_dir().join(format!("rrm_outbox_mix_{}", std::process::id()));
+    let dir =
+        remind_me_testkit::scratch_root().join(format!("rrm_outbox_mix_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("memories.db");
     let _ = std::fs::remove_file(&path);

@@ -3649,8 +3649,11 @@ mod tests {
     /// directory — a test using it would write into the machine user's actual
     /// wiki.
     fn wiki_server(name: &str) -> (McpServer, std::path::PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("rrm_mcp_wiki_{}_{}", name, std::process::id()));
+        let root = remind_me_testkit::scratch_root().join(format!(
+            "rrm_mcp_wiki_{}_{}",
+            name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let db = Database::open_in_memory().unwrap();
         (
@@ -3964,7 +3967,7 @@ mod tests {
         // No other test in this file touches REMIND_ME_REMOTE_OAUTH_STATE_FILE,
         // so (matching this file's existing convention, e.g. the reindex
         // test's EMBEDDING_BACKEND_ENV) this doesn't need a cross-test lock.
-        let dir = std::env::temp_dir().join(format!(
+        let dir = remind_me_testkit::scratch_root().join(format!(
             "rrm_mcp_revoke_clients_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -4527,7 +4530,7 @@ mod tests {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
-        let dir = std::env::temp_dir().join(format!(
+        let dir = remind_me_testkit::scratch_root().join(format!(
             "rrm_mcp_dashboard_status_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -4676,7 +4679,8 @@ mod tests {
         let _lock = CODE_ROOTS_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let root = std::env::temp_dir().join(format!("rrm_mcp_coderefs_{}", std::process::id()));
+        let root = remind_me_testkit::scratch_root()
+            .join(format!("rrm_mcp_coderefs_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("auth.rs");
@@ -4710,8 +4714,8 @@ mod tests {
         let _lock = CODE_ROOTS_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let root =
-            std::env::temp_dir().join(format!("rrm_mcp_coderefs_total_{}", std::process::id()));
+        let root = remind_me_testkit::scratch_root()
+            .join(format!("rrm_mcp_coderefs_total_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("auth.rs");

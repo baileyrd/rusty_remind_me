@@ -241,7 +241,8 @@ mod tests {
 
     #[test]
     fn no_pid_file_reports_not_running() {
-        let dir = std::env::temp_dir().join(format!("rrm_pid_none_{}", std::process::id()));
+        let dir =
+            remind_me_testkit::scratch_root().join(format!("rrm_pid_none_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("server.pid");
 
@@ -254,7 +255,8 @@ mod tests {
 
     #[test]
     fn a_malformed_pid_file_is_removed_and_reported_not_running() {
-        let dir = std::env::temp_dir().join(format!("rrm_pid_bad_{}", std::process::id()));
+        let dir =
+            remind_me_testkit::scratch_root().join(format!("rrm_pid_bad_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("server.pid");
         std::fs::write(&path, "not json").unwrap();

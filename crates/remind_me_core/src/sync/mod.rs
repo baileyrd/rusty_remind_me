@@ -76,6 +76,28 @@ pub const DEFAULT_PEER_PORT: u16 = 8766;
 
 pub const DEFAULT_CLIENT: &str = "unknown";
 
+/// Serializes every test in this module *and its children* that mutates the
+/// environment variables above.
+///
+/// One lock for the whole `sync` subtree rather than one per file, because
+/// the variables it guards are process-global while the tests touching them
+/// are not confined to a single module: `sync::tests` and
+/// `sync::server::tests` both write [`SYNC_SECRET_ENV`], and each previously
+/// held a private `ENV_LOCK` of its own. Two separate mutexes serialize
+/// nothing against each other -- libtest ran both modules' tests on parallel
+/// threads of one binary, so `server`'s `clear_env()` could wipe the secret
+/// `mod`'s test had just set, and `a_real_triple_still_enables_sync` failed
+/// with `left: ""` against `right: "s3cr3t"`. Order-dependent, so it
+/// reproduced only sometimes.
+///
+/// Take it with `.unwrap_or_else(|e| e.into_inner())`, this crate's
+/// established convention (`cloud_backup`, `query_expansion`, `updater`): a
+/// test that panicked while holding the lock has already reported its own
+/// failure, and propagating the poison only turns each sibling into a second,
+/// misleading `PoisonError` that buries the real one.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The literal text a `${user_config.KEY}` reference in an MCP client's
 /// `env` config would leave behind if that substitution were attempted
 /// against an unfilled value, rather than falling back to an empty string --
@@ -435,12 +457,6 @@ pub(crate) fn record_pull(conn: &Connection, remote_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Env vars are process-global; serialize this module's env-touching
-    // tests so they don't race each other the way `cargo test` otherwise
-    // would.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear_env() {
         std::env::remove_var(NODE_ID_ENV);
@@ -456,7 +472,7 @@ mod tests {
     /// garbage endpoint.
     #[test]
     fn unresolved_user_config_placeholder_does_not_enable_sync() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_env();
         std::env::set_var(NODE_ID_ENV, "${user_config.node_id}");
         std::env::set_var(HUB_URL_ENV, "${user_config.hub_url}");
@@ -475,7 +491,7 @@ mod tests {
     /// or otherwise resemble the pattern by coincidence.
     #[test]
     fn a_real_triple_still_enables_sync() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_env();
         std::env::set_var(NODE_ID_ENV, "my-laptop");
         std::env::set_var(HUB_URL_ENV, "https://hub.example.com");

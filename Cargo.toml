@@ -7,6 +7,7 @@ members = [
     "crates/remind_me_cli",
     "crates/remind_me_remote",
     "crates/remind_me_hub",
+    "crates/remind_me_testkit",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ remind_me_mcp = { path = "crates/remind_me_mcp" }
 remind_me_api = { path = "crates/remind_me_api" }
 remind_me_remote = { path = "crates/remind_me_remote" }
 remind_me_hub = { path = "crates/remind_me_hub" }
+remind_me_testkit = { path = "crates/remind_me_testkit" }
 
 # Rusty Mill ecosystem dependencies
 #

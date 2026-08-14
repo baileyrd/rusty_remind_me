@@ -422,7 +422,7 @@ mod with_the_feature {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_env();
 
-        let dir = std::env::temp_dir().join("remind_me_rerank_bad_model_test");
+        let dir = remind_me_testkit::scratch_root().join("remind_me_rerank_bad_model_test");
         std::fs::create_dir_all(&dir).unwrap();
         let model = dir.join("reranker.rten");
         let tokenizer = dir.join("tokenizer.json");

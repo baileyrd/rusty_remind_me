@@ -12,10 +12,13 @@ use remind_me_core::{
 use rusqlite::Connection;
 use std::sync::Mutex;
 
-/// A scratch directory inside the default import root (the home directory).
+/// A scratch directory inside the configured import root.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
-        .join(format!("rrm_import_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::import_export_root().join(format!(
+        "rrm_import_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -543,22 +546,26 @@ fn a_path_outside_the_roots_is_rejected_without_revealing_existence() {
 
 #[test]
 fn a_traversal_out_of_the_roots_is_rejected() {
-    let home = remind_me_core::import_paths::home_dir_var().unwrap();
+    let root = remind_me_testkit::import_export_root()
+        .display()
+        .to_string();
     assert!(matches!(
-        validate_import_file(&format!("{}/../../etc/passwd", home)),
+        validate_import_file(&format!("{}/../../etc/passwd", root)),
         Err(ImportPathError::OutsideRoots(_))
     ));
     assert!(matches!(
-        validate_import_dir(&format!("{}/../../etc", home)),
+        validate_import_dir(&format!("{}/../../etc", root)),
         Err(ImportPathError::OutsideRoots(_))
     ));
 }
 
 #[test]
 fn a_missing_file_inside_the_roots_reports_not_found() {
-    let home = remind_me_core::import_paths::home_dir_var().unwrap();
+    let root = remind_me_testkit::import_export_root()
+        .display()
+        .to_string();
     assert!(matches!(
-        validate_import_file(&format!("{}/no_such_file_54321.md", home)),
+        validate_import_file(&format!("{}/no_such_file_54321.md", root)),
         Err(ImportPathError::NotFound(_))
     ));
 }
@@ -673,12 +680,14 @@ fn a_second_directory_run_skips_everything() {
 #[test]
 fn a_missing_directory_reports_a_failure_rather_than_erroring() {
     let db = Database::open_in_memory().unwrap();
-    let home = remind_me_core::import_paths::home_dir_var().unwrap();
+    let root = remind_me_testkit::import_export_root()
+        .display()
+        .to_string();
 
     let result = import_directory(
         &db.conn(),
         &BulkImportDirInput {
-            directory: format!("{}/no_such_dir_11111", home),
+            directory: format!("{}/no_such_dir_11111", root),
             category: "chat_import".into(),
             tags: vec![],
             extract_mode: "assistant_messages".into(),

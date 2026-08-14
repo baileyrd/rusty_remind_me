@@ -30,7 +30,7 @@ fn clear_env() {
 /// Serves one `GET /localapi/v0/status` request over a Unix socket at a
 /// fresh temp path, replying with `body`, and returns that path.
 fn fake_tailscale_socket(tag: &str, body: &str) -> String {
-    let path = std::env::temp_dir().join(
+    let path = remind_me_testkit::scratch_root().join(
         format!(
             "rmm_ts_{tag}_{}_{:?}",
             std::process::id(),

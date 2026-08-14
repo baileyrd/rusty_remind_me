@@ -580,7 +580,7 @@ mod tests {
     use super::*;
 
     fn temp_store(label: &str) -> OAuthStateStore {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = remind_me_testkit::scratch_root().join(format!(
             "rrm_oauth_provider_{label}_{}_{}",
             std::process::id(),
             generate_token()
@@ -590,19 +590,19 @@ mod tests {
 
     /// Remove the per-test directory holding `store`'s state file.
     ///
-    /// Refuses to delete the temp root itself. A caller that passes a store
+    /// Refuses to delete the scratch root itself. A caller that passes a store
     /// whose *path* is the directory (rather than the file inside it) would
-    /// otherwise resolve `parent()` one level too high and recursively
-    /// delete `/tmp` — which is exactly what one test here used to do, and
-    /// what made unrelated tests fail roughly one run in eight (issue
-    /// #160). Cheap guard, catastrophic failure mode.
+    /// otherwise resolve `parent()` one level too high and recursively delete
+    /// every other test's scratch space — which is exactly what one test here
+    /// used to do, and what made unrelated tests fail roughly one run in eight
+    /// (issue #160). Cheap guard, catastrophic failure mode.
     fn cleanup(store: &OAuthStateStore) {
         let Some(parent) = store.path().parent() else {
             return;
         };
-        if parent == std::env::temp_dir() || parent.parent().is_none() {
+        if parent == remind_me_testkit::scratch_root() || parent.parent().is_none() {
             panic!(
-                "refusing to remove {} -- that is the temp root, not a test directory",
+                "refusing to remove {} -- that is the scratch root, not a test directory",
                 parent.display()
             );
         }

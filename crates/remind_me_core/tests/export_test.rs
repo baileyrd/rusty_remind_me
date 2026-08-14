@@ -63,10 +63,13 @@ fn of_type<'a>(records: &'a [serde_json::Value], kind: &str) -> Vec<&'a serde_js
         .collect()
 }
 
-/// A scratch directory inside the default export root (the home directory).
+/// A scratch directory inside the configured export root.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
-        .join(format!("rrm_export_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::import_export_root().join(format!(
+        "rrm_export_{}_{}",
+        name,
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -399,11 +402,13 @@ fn a_path_outside_the_roots_is_rejected() {
 
 #[test]
 fn a_traversal_out_of_the_roots_is_rejected() {
-    let home = remind_me_core::import_paths::home_dir_var().unwrap();
+    let root = remind_me_testkit::import_export_root()
+        .display()
+        .to_string();
 
     // Resolving before the containment test is what stops this.
     assert!(matches!(
-        validate_export_path(&format!("{}/../../etc/passwd", home)),
+        validate_export_path(&format!("{}/../../etc/passwd", root)),
         Err(ExportPathError::OutsideRoots(_))
     ));
 }
@@ -422,10 +427,12 @@ fn a_directory_destination_is_rejected() {
 
 #[test]
 fn a_missing_parent_directory_is_rejected() {
-    let home = remind_me_core::import_paths::home_dir_var().unwrap();
+    let root = remind_me_testkit::import_export_root()
+        .display()
+        .to_string();
 
     assert!(matches!(
-        validate_export_path(&format!("{}/no_such_dir_98765/export.json", home)),
+        validate_export_path(&format!("{}/no_such_dir_98765/export.json", root)),
         Err(ExportPathError::NoParentDirectory(_))
     ));
 }

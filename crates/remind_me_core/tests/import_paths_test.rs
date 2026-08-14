@@ -188,8 +188,9 @@ fn a_nonexistent_path_still_resolves_rather_than_failing() {
 }
 
 // ---------------------------------------------------------------------------
-// `validate_import_file`, against an explicit, isolated root (rather than
-// the default home-directory root other tests in this crate rely on) --
+// `validate_import_file`, against an explicit, isolated root (rather than the
+// shared one `remind_me_testkit::import_export_root` gives the other test
+// binaries in this crate) --
 // direct coverage of the module the security property lives in, one level
 // below the importer entry points `importer_test.rs` already covers.
 // ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ struct Root {
 
 impl Root {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = remind_me_testkit::scratch_root().join(format!(
             "rrm_import_paths_{}_{}_{:?}",
             tag,
             std::process::id(),
@@ -265,7 +266,7 @@ fn a_symlink_inside_the_root_pointing_outside_it_does_not_grant_access() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let root = Root::new("symlink-root");
 
-    let outside = std::env::temp_dir().join(format!(
+    let outside = remind_me_testkit::scratch_root().join(format!(
         "rrm_import_paths_outside_{}_{:?}",
         std::process::id(),
         std::thread::current().id()

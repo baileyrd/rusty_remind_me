@@ -36,7 +36,11 @@ fn add(conn: &Connection, content: &str) {
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("rrm_status_{}_{}", name, std::process::id()));
+    let dir = remind_me_testkit::scratch_root().join(format!(
+        "rrm_status_{}_{}",
+        name,
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

@@ -292,7 +292,7 @@ mod with_the_feature {
     #[test]
     fn a_model_path_that_is_not_a_model_is_an_error_about_the_model() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = std::env::temp_dir().join("remind_me_audio_bad_model.bin");
+        let path = remind_me_testkit::scratch_root().join("remind_me_audio_bad_model.bin");
         std::fs::write(&path, b"not a whisper model").unwrap();
         std::env::set_var(audio_import::MODEL_ENV, &path);
 

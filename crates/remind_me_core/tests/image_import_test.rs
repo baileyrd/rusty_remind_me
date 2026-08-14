@@ -131,7 +131,7 @@ fn a_configured_pair_of_real_files_is_accepted() {
 
     // Not real models — this asserts the *configuration* check passes them
     // through to the loader, which is where a fake model is caught.
-    let dir = std::env::temp_dir().join("remind_me_ocr_model_paths_test");
+    let dir = remind_me_testkit::scratch_root().join("remind_me_ocr_model_paths_test");
     std::fs::create_dir_all(&dir).unwrap();
     let detection = dir.join("det.rten");
     let recognition = dir.join("rec.rten");
@@ -212,7 +212,7 @@ mod with_the_feature {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_model_env();
 
-        let dir = std::env::temp_dir().join("remind_me_ocr_bad_model_test");
+        let dir = remind_me_testkit::scratch_root().join("remind_me_ocr_bad_model_test");
         std::fs::create_dir_all(&dir).unwrap();
         let detection = dir.join("det.rten");
         let recognition = dir.join("rec.rten");

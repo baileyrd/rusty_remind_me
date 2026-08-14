@@ -57,6 +57,7 @@ symphonia = { version = "0.6", optional = true, default-features = false, featur
 # confirmed by the build warning it produces, and it would otherwise
 # silently pull in the full `postgres`/`tokio-postgres` tree here).
 remind_me_hub = { path = "../remind_me_hub", default-features = false }
+remind_me_testkit.workspace = true
 
 [features]
 default = []

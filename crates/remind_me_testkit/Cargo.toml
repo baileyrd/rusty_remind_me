@@ -1,0 +1,10 @@
+[package]
+name = "remind_me_testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Test scaffolding, never a runtime dependency. Every crate that uses it lists
+# it under `[dev-dependencies]` only, so it is absent from any shipped build.
+publish = false
+
+[dependencies]

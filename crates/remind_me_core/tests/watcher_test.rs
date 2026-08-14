@@ -13,9 +13,9 @@ use remind_me_core::{Database, MemoryListInput};
 use rusqlite::Connection;
 use std::path::PathBuf;
 
-/// A watch directory inside the default import root (the home directory).
+/// A watch directory inside the configured import root.
 fn scratch(name: &str) -> PathBuf {
-    let dir = PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap()).join(format!(
+    let dir = remind_me_testkit::import_export_root().join(format!(
         "rrm_watch_{}_{}",
         name,
         std::process::id()
@@ -359,8 +359,7 @@ fn unsupported_files_are_ignored() {
 fn a_missing_watch_directory_is_skipped_rather_than_failing() {
     let db = Database::open_in_memory().unwrap();
     let conn = db.conn();
-    let absent = PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap())
-        .join("rrm_watch_absent_99999");
+    let absent = remind_me_testkit::import_export_root().join("rrm_watch_absent_99999");
     let mut w = Watcher::new(vec![absent], Vec::new()).with_grace(0);
 
     // It may be created later; a scan should not error on its absence.
@@ -478,8 +477,8 @@ fn a_watch_dir_outside_the_import_roots_is_refused() {
 
 #[test]
 fn a_watch_dir_inside_the_roots_is_accepted_even_if_it_does_not_exist_yet() {
-    let home = PathBuf::from(remind_me_core::import_paths::home_dir_var().unwrap());
-    let (accepted, rejected) = validate_watch_dirs(&[home.join("rrm_watch_future_dir_12345")]);
+    let root = remind_me_testkit::import_export_root();
+    let (accepted, rejected) = validate_watch_dirs(&[root.join("rrm_watch_future_dir_12345")]);
 
     assert_eq!(accepted.len(), 1);
     assert!(rejected.is_empty());

@@ -22,8 +22,8 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn a_stuck_peer_connection_never_blocks_an_ordinary_database_read() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let dir =
-        std::env::temp_dir().join(format!("rrm_peer_server_lock_test_{}", std::process::id()));
+    let dir = remind_me_testkit::scratch_root()
+        .join(format!("rrm_peer_server_lock_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let db = Arc::new(Database::open(dir.join("memory.db")).unwrap());
