@@ -8,6 +8,42 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-skool`: wire fetch() to real (catalog-only) Playwright acquisition (closes #188)
+**2026-08-14**
+
+- **`SkoolConnector::fetch()`** now really walks communities → selected
+  courses → lesson trees, instead of returning a canned "blocked on
+  #99" error — the same `dbs_connector_support::python_launch` split
+  `dbs-connector-reddit` (#187) established. Two calls to a new
+  `scripts/acquire.py` (embedded via `include_str!`, staged to a temp
+  file at run time): one navigates each community's classroom page
+  (auto-discovering joined communities from the home page when none
+  are configured), the other navigates every selected course's
+  classroom page. Both hand back raw, undecoded `__NEXT_DATA__` blobs;
+  Rust does 100% of the parsing (`parse_courses`, `course_selected`,
+  `parse_lessons`, the community/course/lesson → `BackupItem` mapping)
+  with the exact same pure functions its fixture-data tests already
+  exercised before this issue existed.
+- **Deliberately catalog-only**: no per-lesson page visits, no
+  resource/video downloads, no `.meta.json` sidecar/resume, no
+  GitHub-zip archiving of linked repos. `videoLink`/`videoId`/
+  `resources` only populate when the course-tree payload itself
+  happens to carry them — every community effectively backs up the
+  way the reference's `no_download_communities` mode already works.
+  Per-lesson enrichment and the download pipeline are a follow-up.
+- Ported faithfully from the reference: auto-discovery finding zero
+  communities is a hard `ConnectorAuthError` (a degraded-but-not-
+  logged-out session should never silently "succeed" with 0 items); a
+  community whose classroom page fails to load is simply skipped, not
+  fatal; a `courses` filter or any course-page load failure withholds
+  that community's `ReconcileMarker` (scoped `tag:<group>`, one per
+  community) so deletion detection never runs against a partial walk.
+- Tested against a fake acquisition-script stub for both call modes
+  (mirrors `dbs-connector-reddit`'s identical convention — no real
+  Playwright/network access needed in CI), plus direct tests of the
+  per-record bookkeeping (`emit_and_track`) fetch() uses to build
+  `live_by_group`/checkpoints.
+
 ## `dbs-connector-reddit`: wire fetch() to a real Playwright acquisition script (closes #187)
 **2026-08-14**
 

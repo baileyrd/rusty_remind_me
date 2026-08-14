@@ -13,13 +13,27 @@
 //! or a shadow-DOM `<video>.src`, falling back to reconstructing the
 //! signed HLS URL from `__NEXT_DATA__`.
 //!
-//! **Acquisition is blocked on issue #99** (the shared Playwright
-//! launch helper), the same gap `dbs-connector-reddit` (#96) is
-//! blocked on. `fetch()` performs every check that doesn't need a
-//! browser (`video_cookies_file_env` is declared correctly, the
-//! `SKOOL_SESSION_DIR` secret is set, the session directory actually
-//! exists, a downloads folder resolves) before returning a clear
-//! [`ConnectorError::Config`] pointing at #99.
+//! **Acquisition (issue #188), catalog only.** `fetch()` shells out
+//! (via issue #99's `dbs_connector_support::python_launch`) to
+//! `scripts/acquire.py`, embedded into the binary via `include_str!`
+//! and staged to a temp file at run time — the same split
+//! `dbs-connector-reddit` (#187) established. That script's only job
+//! is driving a real Chromium page: it navigates wherever Rust tells
+//! it to and hands back each page's raw, undecoded `__NEXT_DATA__`
+//! blob; every parse below (community/course/lesson extraction,
+//! course-selector matching, the raw record → `BackupItem` mapping)
+//! is the exact same pure, already-tested Rust code, now reachable
+//! from a real run.
+//!
+//! **Deliberately catalog-only** — no per-lesson page visits, no
+//! resource/video downloads, no `.meta.json` sidecar/resume, no
+//! GitHub-zip archiving of linked repos. The reference's course tree
+//! carries only titles/ids; `videoLink`/`videoId`/`resources` need a
+//! visit to each lesson's own page to populate, which this v1 doesn't
+//! do — every community backs up the way the reference's
+//! `no_download_communities` mode already works (index from the
+//! course tree, nothing more). Per-lesson enrichment and the download
+//! pipeline are a follow-up, out of scope here (see gap-analysis.md).
 //!
 //! Everything that's genuinely pure — no browser, no HTTP — is
 //! ported and tested here: extracting a community's display name,
@@ -32,29 +46,16 @@
 //! and the community/course/lesson → `BackupItem` mapping. A lesson's
 //! `desc` field is rendered to markdown via
 //! `dbs_connector_support::tiptap_markdown` (issue #100) for `body`.
-//!
-//! Deliberately **not** ported for the same reason as the rest of
-//! acquisition: resource-file downloads, the `yt-dlp`-driven video
-//! download once a URL is found, the `.meta.json` sidecar / resume
-//! pipeline, directory-naming and note-writing, and GitHub-zip
-//! archiving of code lessons link to. All of these are pipeline
-//! mechanics with zero reachable callers until #99 exists; porting
-//! them now would be speculative work with no way to exercise them
-//! against the real site.
-//!
-//! **Not wired up:** same boundary as `dbs-connector-raindrop` (#85)
-//! through `dbs-connector-reddit` (#96) for the registry run/stream
-//! bridge — and, separately, blocked on issue #99 for acquisition
-//! specifically, as described above.
 
-use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use dbs_connector_support::tiptap_markdown;
+use dbs_connector_support::{find_python, run_python_script_using, tiptap_markdown};
 use dbs_core::parse_iso;
 use dbs_core::{
-    AuthCapture, BackupItem, Capabilities, Connector, ConnectorError, FetchEvent, ItemKind,
-    MediaRef, RunContext,
+    AuthCapture, BackupItem, Capabilities, Checkpoint, Connector, ConnectorError, Cursor,
+    FetchEvent, ItemKind, MediaRef, ReconcileMarker, RunContext,
 };
 use serde_json::Value;
 
@@ -191,11 +192,6 @@ impl SkoolConnector {
     }
 }
 
-// Everything below is pure — no browser, no HTTP — and unreachable
-// from `fetch()` yet (see the module doc-comment), so kept alive by
-// tests via `#[allow(dead_code)]` until issue #99's future
-// acquisition step can call into it for real.
-
 fn value_to_id_string(v: &Value) -> Option<String> {
     match v {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
@@ -206,7 +202,6 @@ fn value_to_id_string(v: &Value) -> Option<String> {
 
 /// A community's display name: `metadata.displayName`, falling back
 /// to `metadata.name`, falling back to the group's own `name`.
-#[allow(dead_code)]
 fn group_name(group: &Value) -> Option<String> {
     let meta = group.get("metadata").cloned().unwrap_or(Value::Null);
     meta.get("displayName")
@@ -218,7 +213,6 @@ fn group_name(group: &Value) -> Option<String> {
 
 /// Breadth-first search over a nested `__NEXT_DATA__`-shaped value
 /// for the first object carrying `key`; `None` if never found.
-#[allow(dead_code)]
 fn deep_find(obj: &Value, key: &str) -> Option<Value> {
     let mut queue: VecDeque<Value> = VecDeque::new();
     queue.push_back(obj.clone());
@@ -248,7 +242,6 @@ fn deep_find(obj: &Value, key: &str) -> Option<Value> {
 /// value; passes anything else through unchanged; a string that
 /// isn't valid JSON is returned as-is (it's just a plain string
 /// field, not an encoding failure).
-#[allow(dead_code)]
 fn json_field(value: &Value) -> Value {
     match value {
         Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| value.clone()),
@@ -259,7 +252,6 @@ fn json_field(value: &Value) -> Value {
 /// Decodes one lesson node's video/resources/description out of its
 /// (possibly JSON-encoded) `metadata`, normalizing resources that
 /// carry a bare `link` (no `downloadUrl`) into external references.
-#[allow(dead_code)]
 fn lesson_fields(node: &Value) -> Value {
     let meta = node.get("metadata").cloned().unwrap_or(Value::Null);
     let video_raw = meta
@@ -332,6 +324,11 @@ fn lesson_fields(node: &Value) -> Value {
 /// (requiring an object `metadata`), then two named fallbacks
 /// (`props.lesson`, `props.course.course`, neither id-checked), then
 /// finally the whole document.
+///
+/// Unreachable from `fetch()` in this catalog-only v1 (#188) — it
+/// exists for a future per-lesson-page-visit enrichment step, which
+/// is the only caller that would ever need to locate a single lesson
+/// node within a *lesson page's* `__NEXT_DATA__`. Kept alive by tests.
 #[allow(dead_code)]
 fn find_lesson_node(next_data: &Value, lesson_id: &str) -> Option<Value> {
     if lesson_id.is_empty() {
@@ -390,7 +387,6 @@ fn find_lesson_node(next_data: &Value, lesson_id: &str) -> Option<Value> {
 /// (`communities`/`courses` config lists), by title or slug,
 /// case-insensitively, with an optional `"community/course"` scope
 /// prefix. No selectors means everything matches.
-#[allow(dead_code)]
 fn course_selected(selectors: &[String], community_slug: &str, course: &Value) -> bool {
     if selectors.is_empty() {
         return true;
@@ -427,6 +423,10 @@ fn course_selected(selectors: &[String], community_slug: &str, course: &Value) -
 /// Reconstructs the signed Mux HLS URL from a classroom page's
 /// `__NEXT_DATA__`, when its embedded video id matches `video_id`
 /// exactly.
+///
+/// Unreachable from `fetch()` in this catalog-only v1 (#188) — native
+/// video URL resolution needs the per-lesson video-download pipeline,
+/// out of scope here. Kept alive by tests.
 #[allow(dead_code)]
 fn mux_hls_url(next_data: &Value, video_id: &Value) -> Option<String> {
     if video_id.is_null() {
@@ -456,6 +456,11 @@ fn mux_hls_url(next_data: &Value, video_id: &Value) -> Option<String> {
 
 /// Whether `url`'s host is `hosts[i]` or a subdomain of it (`www.`
 /// stripped from the URL's own host first).
+///
+/// Unreachable from `fetch()` in this catalog-only v1 (#188) — used to
+/// decide which external video hosts need TLS-fingerprint
+/// impersonation, part of the not-yet-ported download pipeline. Kept
+/// alive by tests.
 #[allow(dead_code)]
 fn url_host_matches(url_str: &str, hosts: &[String]) -> bool {
     let Ok(parsed) = url::Url::parse(url_str) else {
@@ -475,6 +480,9 @@ fn url_host_matches(url_str: &str, hosts: &[String]) -> bool {
 /// (removed/private/terminated/DMCA'd), `"failed"` for everything
 /// else (transient, retried on a later run). Deliberately does not
 /// match a bot-check message — that stays retryable.
+///
+/// Unreachable from `fetch()` in this catalog-only v1 (#188) — part of
+/// the not-yet-ported video-download pipeline. Kept alive by tests.
 #[allow(dead_code)]
 fn classify_video_error(message: &str) -> &'static str {
     const PERMANENT_PATTERNS: &[&str] = &[
@@ -502,6 +510,13 @@ fn classify_video_error(message: &str) -> &'static str {
 /// Parses the logged-in account's joined communities out of a
 /// `__NEXT_DATA__` blob (from `self.allGroups`), deduplicated by
 /// slug.
+///
+/// Unreachable from `fetch()` in this catalog-only v1 (#188) —
+/// auto-discovery needs only the bare slug list to know which
+/// classroom pages to visit next, so `scripts/acquire.py` does that
+/// minimal extraction itself (see its module doc-comment); this
+/// richer, tested parse (id/displayName included) is kept for when a
+/// caller needs more than slugs. Kept alive by tests.
 #[allow(dead_code)]
 fn parse_memberships(next_data: &Value) -> Vec<Value> {
     let props = next_data
@@ -565,7 +580,6 @@ fn parse_memberships(next_data: &Value) -> Vec<Value> {
 
 /// Parses the community's course catalog out of a classroom page's
 /// `__NEXT_DATA__`.
-#[allow(dead_code)]
 fn parse_courses(next_data: &Value) -> Vec<Value> {
     let props = next_data
         .get("props")
@@ -625,7 +639,6 @@ fn parse_courses(next_data: &Value) -> Vec<Value> {
 /// flat list of raw lesson records — a wrapper node with children is
 /// a module (each child becomes a lesson tagged with the module's
 /// title), a childless wrapper is a bare lesson.
-#[allow(dead_code)]
 fn parse_lessons(course_next_data: &Value) -> Vec<Value> {
     fn unwrap_node(node: &Value) -> Value {
         node.get("course")
@@ -706,7 +719,6 @@ fn parse_lessons(course_next_data: &Value) -> Vec<Value> {
 
 /// Extracts the community slug from a `communities` config entry —
 /// either a bare slug or a full `skool.com/<slug>` URL.
-#[allow(dead_code)]
 fn slug_from_community(community: &str) -> String {
     if let Some(idx) = community.find("skool.com/") {
         let rest = &community[idx + "skool.com/".len()..];
@@ -716,7 +728,6 @@ fn slug_from_community(community: &str) -> String {
     community.trim_matches(|c| c == '/' || c == ' ').to_string()
 }
 
-#[allow(dead_code)]
 fn community_item(raw: &Value) -> Option<BackupItem> {
     let slug = raw
         .get("slug")
@@ -736,7 +747,6 @@ fn community_item(raw: &Value) -> Option<BackupItem> {
     Some(item)
 }
 
-#[allow(dead_code)]
 fn course_item(raw: &Value) -> Option<BackupItem> {
     let name = raw.get("courseName").and_then(|v| v.as_str())?;
     let group = raw
@@ -780,7 +790,6 @@ fn course_item(raw: &Value) -> Option<BackupItem> {
     Some(item)
 }
 
-#[allow(dead_code)]
 fn lesson_item(raw: &Value) -> Option<BackupItem> {
     let lesson_id = value_to_id_string(raw.get("lessonId")?)?;
     let mut media = Vec::new();
@@ -870,7 +879,6 @@ fn lesson_item(raw: &Value) -> Option<BackupItem> {
 }
 
 /// Dispatches a raw walk record (tagged `_kind`) to its mapper.
-#[allow(dead_code)]
 fn to_item(raw: &Value) -> Option<BackupItem> {
     match raw.get("_kind").and_then(|v| v.as_str()) {
         Some("community") => community_item(raw),
@@ -878,6 +886,120 @@ fn to_item(raw: &Value) -> Option<BackupItem> {
         Some("lesson") => lesson_item(raw),
         _ => None,
     }
+}
+
+// -- acquisition (Playwright-driven, via a Python subprocess; #188) -----
+
+/// The embedded acquisition script — staged to a temp file at run time
+/// and run through `dbs_connector_support::python_launch`. See the
+/// module doc-comment for the two-call (`communities`/`courses`) design.
+const ACQUIRE_SCRIPT: &str = include_str!("../scripts/acquire.py");
+
+/// How long a single acquisition call (browser launch + however many
+/// page navigations it was given) may take before being abandoned.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(900);
+
+fn script_error_to_connector_error(kind: &str, message: String) -> ConnectorError {
+    match kind {
+        "auth" => ConnectorError::Auth(message),
+        "rate_limited" => ConnectorError::RateLimited(message),
+        "config" => ConnectorError::Config(message),
+        _ => ConnectorError::Transient(message),
+    }
+}
+
+/// Runs the acquisition script in `mode` (`"communities"` or
+/// `"courses"`) under `interpreter` and returns the parsed JSON result
+/// object on success. Split from [`acquire`] so tests can inject a
+/// fake interpreter/script instead of real Python + Playwright + a
+/// live Skool session.
+fn acquire_using(
+    interpreter: &str,
+    script: &Path,
+    mode: &str,
+    session_dir: &str,
+    headless: bool,
+    payload: &Value,
+    timeout: Duration,
+) -> Result<Value, ConnectorError> {
+    let args = vec![
+        mode.to_string(),
+        session_dir.to_string(),
+        headless.to_string(),
+        payload.to_string(),
+    ];
+    let output = run_python_script_using(interpreter, script, &args, timeout).map_err(|e| {
+        ConnectorError::Transient(format!(
+            "skool: failed to run the {mode} acquisition script: {e}"
+        ))
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last_line = stdout.lines().last().unwrap_or("").trim();
+    if last_line.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ConnectorError::Transient(format!(
+            "skool: {mode} acquisition script produced no output (exit {:?}); stderr: {}",
+            output.status.code(),
+            stderr.trim()
+        )));
+    }
+    let parsed: Value = serde_json::from_str(last_line).map_err(|e| {
+        ConnectorError::Transient(format!(
+            "skool: {mode} acquisition script produced unparseable output ({e}): {last_line}"
+        ))
+    })?;
+    if !parsed.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let kind = parsed
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("transient");
+        let message = parsed
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("skool: acquisition failed")
+            .to_string();
+        return Err(script_error_to_connector_error(kind, message));
+    }
+    Ok(parsed)
+}
+
+/// Stages [`ACQUIRE_SCRIPT`] to a temp file and runs it through
+/// whichever interpreter [`find_python`] resolves.
+fn acquire(
+    mode: &str,
+    session_dir: &str,
+    headless: bool,
+    payload: &Value,
+) -> Result<Value, ConnectorError> {
+    let interpreter = find_python().ok_or_else(|| {
+        ConnectorError::Config(
+            "the Skool connector needs Playwright; install it with `pip install playwright` \
+             and run `playwright install chromium` (no python3/python interpreter found on \
+             PATH)."
+                .to_string(),
+        )
+    })?;
+    let script_path = std::env::temp_dir().join(format!(
+        "dbs-connector-skool-acquire-{}-{:?}.py",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(&script_path, ACQUIRE_SCRIPT).map_err(|e| {
+        ConnectorError::Transient(format!(
+            "skool: failed to stage the acquisition script: {e}"
+        ))
+    })?;
+    let result = acquire_using(
+        interpreter,
+        &script_path,
+        mode,
+        session_dir,
+        headless,
+        payload,
+        ACQUIRE_TIMEOUT,
+    );
+    let _ = std::fs::remove_file(&script_path);
+    result
 }
 
 impl Connector for SkoolConnector {
@@ -989,20 +1111,290 @@ impl Connector for SkoolConnector {
             return Box::new(out.into_iter());
         }
 
-        // The rest of acquisition — launching the captured session as
-        // a Chromium context, reading each page's __NEXT_DATA__ blob,
-        // and visiting every lesson's own page to sniff its video and
-        // resources — needs the shared Playwright launch helper this
-        // port doesn't have yet (see the module doc-comment).
-        out.push(Err(ConnectorError::Config(
-            "skool: community/course/lesson acquisition needs a Playwright launch helper this \
-             port doesn't have yet (gap-analysis.md's Connectors cluster, issue #99) — the \
-             session directory and downloads folder are valid; this connector will be wired up \
-             once #99 lands."
-                .to_string(),
-        )));
+        // -- phase 1: communities (auto-discovered or explicit) -----
+        let auto_discover = self.config.communities.is_empty();
+        let communities_payload = if auto_discover {
+            serde_json::json!([])
+        } else {
+            serde_json::json!(self
+                .config
+                .communities
+                .iter()
+                .map(|c| slug_from_community(c))
+                .collect::<Vec<_>>())
+        };
+        let communities_result = match acquire(
+            "communities",
+            &session_dir,
+            self.config.headless,
+            &communities_payload,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                out.push(Err(e));
+                return Box::new(out.into_iter());
+            }
+        };
+        let communities: Vec<Value> = communities_result
+            .get("communities")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        if auto_discover && communities.is_empty() {
+            out.push(Err(ConnectorError::Auth(
+                "skool: could not auto-detect any joined communities — the captured session may \
+                 be degraded (still loads pages, but reports no memberships). If the session is \
+                 actually fine and the account has joined communities, set `communities` \
+                 explicitly instead of relying on auto-detection."
+                    .to_string(),
+            )));
+            return Box::new(out.into_iter());
+        }
+        if communities.is_empty() {
+            eprintln!(
+                "skool: no communities to back up — set `communities` in the source config, or \
+                 join a community with the logged-in account."
+            );
+        }
+
+        let mut live_by_group: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut community_complete: HashMap<String, bool> = HashMap::new();
+        let mut skipped_courses: HashMap<String, u32> = HashMap::new();
+        // (community slug, course slug) -> (group display name, parsed course record)
+        let mut course_lookup: HashMap<(String, String), (String, Value)> = HashMap::new();
+        let mut course_pairs: Vec<(String, String)> = Vec::new();
+        let mut seen: u32 = 0;
+
+        for entry in &communities {
+            let Some(slug) = entry.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            let slug = slug.to_string();
+            let next_data = entry.get("next_data").cloned().unwrap_or(Value::Null);
+            let props = next_data
+                .get("props")
+                .and_then(|p| p.get("pageProps"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let render = props.get("renderData").cloned().unwrap_or(Value::Null);
+            let group = props
+                .get("currentGroup")
+                .filter(|v| !v.is_null())
+                .cloned()
+                .or_else(|| render.get("currentGroup").cloned())
+                .unwrap_or(Value::Null);
+            let group_updated = group
+                .get("metadata")
+                .and_then(|m| m.get("updatedAt"))
+                .cloned()
+                .filter(|v| !v.is_null())
+                .or_else(|| group.get("updatedAt").cloned());
+            let group_name_str = group_name(&group).unwrap_or_else(|| slug.clone());
+
+            emit_and_track(
+                &mut out,
+                &mut live_by_group,
+                &mut seen,
+                self.config.checkpoint_every,
+                &self.config.include_kinds,
+                &serde_json::json!({
+                    "_kind": "community",
+                    "slug": slug,
+                    "groupName": group_name_str,
+                    "updatedAt": group_updated,
+                }),
+                &group_name_str,
+            );
+            community_complete
+                .entry(group_name_str.clone())
+                .or_insert(true);
+            skipped_courses.entry(group_name_str.clone()).or_insert(0);
+
+            let courses = parse_courses(&next_data);
+            if courses.is_empty() {
+                eprintln!(
+                    "skool: found 0 courses for {slug} (layout change, or a genuinely empty \
+                     community)."
+                );
+            }
+            for course in &courses {
+                let course_slug = course
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| course.get("id").and_then(value_to_id_string));
+                let Some(course_slug) = course_slug else {
+                    continue;
+                };
+                if !course_selected(&self.config.courses, &slug, course) {
+                    *skipped_courses.entry(group_name_str.clone()).or_insert(0) += 1;
+                    continue;
+                }
+                course_pairs.push((slug.clone(), course_slug.clone()));
+                course_lookup.insert(
+                    (slug.clone(), course_slug),
+                    (group_name_str.clone(), course.clone()),
+                );
+            }
+        }
+
+        // -- phase 2: the lesson tree for every selected course ------
+        let courses_result: Vec<Value> = if course_pairs.is_empty() {
+            Vec::new()
+        } else {
+            let payload = serde_json::json!(course_pairs
+                .iter()
+                .map(|(s, c)| vec![s.clone(), c.clone()])
+                .collect::<Vec<_>>());
+            match acquire("courses", &session_dir, self.config.headless, &payload) {
+                Ok(r) => r
+                    .get("courses")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+                Err(e) => {
+                    out.push(Err(e));
+                    return Box::new(out.into_iter());
+                }
+            }
+        };
+
+        let mut returned_pairs: HashSet<(String, String)> = HashSet::new();
+        for entry in &courses_result {
+            let (Some(slug), Some(course_slug)) = (
+                entry.get("slug").and_then(Value::as_str),
+                entry.get("course_slug").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let key = (slug.to_string(), course_slug.to_string());
+            returned_pairs.insert(key.clone());
+            let Some((group_name_str, course_record)) = course_lookup.get(&key) else {
+                continue;
+            };
+            let group_name_str = group_name_str.clone();
+            let course_record = course_record.clone();
+            let next_data = entry.get("next_data").cloned().unwrap_or(Value::Null);
+            let course_name = course_record
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| course_slug.to_string());
+
+            emit_and_track(
+                &mut out,
+                &mut live_by_group,
+                &mut seen,
+                self.config.checkpoint_every,
+                &self.config.include_kinds,
+                &serde_json::json!({
+                    "_kind": "course",
+                    "courseName": course_name,
+                    "courseImageUrl": course_record.get("coverImageUrl").cloned().unwrap_or(Value::Null),
+                    "updatedAt": course_record.get("updatedAt").cloned().unwrap_or(Value::Null),
+                    "hasAccess": course_record.get("hasAccess").cloned().unwrap_or(Value::Null),
+                    "privacy": course_record.get("privacy").cloned().unwrap_or(Value::Null),
+                    "numModules": course_record.get("numModules").cloned().unwrap_or(Value::Null),
+                    "_group_slug": slug,
+                    "groupName": group_name_str,
+                }),
+                &group_name_str,
+            );
+
+            for mut lesson in parse_lessons(&next_data) {
+                if let Value::Object(map) = &mut lesson {
+                    map.insert("_kind".to_string(), Value::String("lesson".to_string()));
+                    map.insert(
+                        "_group_name".to_string(),
+                        Value::String(group_name_str.clone()),
+                    );
+                    map.insert(
+                        "_course_name".to_string(),
+                        Value::String(course_name.clone()),
+                    );
+                }
+                emit_and_track(
+                    &mut out,
+                    &mut live_by_group,
+                    &mut seen,
+                    self.config.checkpoint_every,
+                    &self.config.include_kinds,
+                    &lesson,
+                    &group_name_str,
+                );
+            }
+        }
+        for pair in &course_pairs {
+            if !returned_pairs.contains(pair) {
+                if let Some((group_name_str, _)) = course_lookup.get(pair) {
+                    community_complete.insert(group_name_str.clone(), false);
+                }
+            }
+        }
+
+        out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: serde_json::json!({"items_seen": seen}),
+            },
+            note: "final".to_string(),
+        })));
+
+        let mut groups: Vec<&String> = live_by_group.keys().collect();
+        groups.sort();
+        let mut incomplete: Vec<&str> = Vec::new();
+        for group in groups {
+            let complete = community_complete.get(group).copied().unwrap_or(false);
+            let skipped = skipped_courses.get(group).copied().unwrap_or(0);
+            if complete && skipped == 0 {
+                out.push(Ok(FetchEvent::ReconcileMarker(ReconcileMarker {
+                    live_ids: live_by_group[group].clone(),
+                    scope: format!("tag:{group}"),
+                })));
+            } else {
+                incomplete.push(group.as_str());
+            }
+        }
+        if !incomplete.is_empty() {
+            eprintln!(
+                "skool: partial enumeration for {} (communities/courses filter, or a course \
+                 failed to load) — deletion detection skipped there",
+                incomplete.join(", ")
+            );
+        }
 
         Box::new(out.into_iter())
+    }
+}
+
+fn emit_and_track(
+    out: &mut Vec<Result<FetchEvent, ConnectorError>>,
+    live_by_group: &mut HashMap<String, HashSet<String>>,
+    seen: &mut u32,
+    checkpoint_every: u32,
+    include_kinds: &[String],
+    raw: &Value,
+    group: &str,
+) {
+    let Some(item) = to_item(raw) else {
+        return;
+    };
+    live_by_group
+        .entry(group.to_string())
+        .or_default()
+        .insert(item.external_id().to_string());
+    if !include_kinds.is_empty() && !include_kinds.contains(&item.item_kind) {
+        return;
+    }
+    out.push(Ok(FetchEvent::Item(item)));
+    *seen += 1;
+    if checkpoint_every > 0 && seen.is_multiple_of(checkpoint_every) {
+        out.push(Ok(FetchEvent::Checkpoint(Checkpoint {
+            cursor: Cursor {
+                value: serde_json::json!({"items_seen": seen}),
+            },
+            note: format!("after {seen} items"),
+        })));
     }
 }
 
@@ -1094,18 +1486,22 @@ mod tests {
         assert!(matches!(result[0], Err(ConnectorError::Config(_))));
     }
 
+    /// With a valid (but real-session-less) directory, `fetch()` now
+    /// actually runs the acquisition script (#188) instead of
+    /// returning a static "blocked" error. It still can't succeed in
+    /// a sandbox with no live Playwright/Skool session, but exactly
+    /// what it fails with is environment-dependent (see
+    /// `dbs-connector-reddit`'s identical test for the same
+    /// reasoning) — so this only asserts a single error result.
     #[test]
-    fn fetch_with_everything_valid_is_blocked_pending_the_playwright_helper() {
+    fn fetch_with_everything_valid_but_no_real_session_fails_cleanly() {
         let session = temp_dir("valid-session");
         let downloads = temp_dir("valid-downloads");
         let mut connector = SkoolConnector::new(SkoolConfig::default());
         let ctx = ctx_with(Some(&session.to_string_lossy()), Some(downloads));
         let result: Vec<_> = connector.fetch(&ctx).collect();
-        assert_eq!(result.len(), 1);
-        match &result[0] {
-            Err(ConnectorError::Config(msg)) => assert!(msg.contains("issue #99"), "{msg}"),
-            other => panic!("expected a Config error mentioning issue #99, got {other:?}"),
-        }
+        assert_eq!(result.len(), 1, "{result:?}");
+        assert!(result[0].is_err(), "{result:?}");
     }
 
     #[test]
@@ -1395,5 +1791,214 @@ mod tests {
         let capture = connector.auth_capture().unwrap();
         assert_eq!(capture.kind, "browser_session");
         assert_eq!(capture.secret_key, "SKOOL_SESSION_DIR");
+    }
+
+    // -- acquire_using: exercised against a fake stub "interpreter"
+    // (mirrors dbs-connector-reddit's identical convention) so the
+    // JSON result contract between the Python script and this Rust
+    // code is tested without needing real Python, Playwright, or
+    // network access. -----------------------------------------------
+
+    fn write_stub_script(dir: &std::path::Path, stdout: &str, exit_code: i32) -> PathBuf {
+        let path = dir.join("stub.sh");
+        let body = format!("#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {exit_code}\n");
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn acquire_using_parses_a_successful_communities_result() {
+        let dir = temp_dir("acquire-communities-ok");
+        let script = write_stub_script(
+            &dir,
+            r#"{"ok": true, "communities": [{"slug": "chase-ai", "next_data": {"a": 1}}]}"#,
+            0,
+        );
+        let result = acquire_using(
+            "/bin/sh",
+            &script,
+            "communities",
+            "/some/dir",
+            true,
+            &serde_json::json!([]),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let communities = result.get("communities").and_then(Value::as_array).unwrap();
+        assert_eq!(communities.len(), 1);
+        assert_eq!(communities[0]["slug"], "chase-ai");
+    }
+
+    #[test]
+    fn acquire_using_parses_a_successful_courses_result() {
+        let dir = temp_dir("acquire-courses-ok");
+        let script = write_stub_script(
+            &dir,
+            r#"{"ok": true, "courses": [{"slug": "chase-ai", "course_slug": "c1", "next_data": {}}]}"#,
+            0,
+        );
+        let result = acquire_using(
+            "/bin/sh",
+            &script,
+            "courses",
+            "/some/dir",
+            true,
+            &serde_json::json!([["chase-ai", "c1"]]),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let courses = result.get("courses").and_then(Value::as_array).unwrap();
+        assert_eq!(courses.len(), 1);
+        assert_eq!(courses[0]["course_slug"], "c1");
+    }
+
+    fn acquire_with_error_kind(dir: &std::path::Path, kind: &str) -> Result<Value, ConnectorError> {
+        let script = write_stub_script(
+            dir,
+            &format!(r#"{{"ok": false, "kind": "{kind}", "message": "boom"}}"#),
+            1,
+        );
+        acquire_using(
+            "/bin/sh",
+            &script,
+            "communities",
+            "/some/dir",
+            true,
+            &serde_json::json!([]),
+            Duration::from_secs(5),
+        )
+    }
+
+    #[test]
+    fn acquire_using_maps_each_error_kind_to_the_matching_connector_error() {
+        let dir = temp_dir("acquire-errors");
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "auth"),
+            Err(ConnectorError::Auth(_))
+        ));
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "config"),
+            Err(ConnectorError::Config(_))
+        ));
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "rate_limited"),
+            Err(ConnectorError::RateLimited(_))
+        ));
+        assert!(matches!(
+            acquire_with_error_kind(&dir, "something_unrecognized"),
+            Err(ConnectorError::Transient(_))
+        ));
+    }
+
+    #[test]
+    fn acquire_using_passes_mode_and_payload_through_as_positional_arguments() {
+        let dir = temp_dir("acquire-args");
+        // The payload arg is JSON (so it contains literal quotes) --
+        // round-tripping it through a shell-echoed JSON string would
+        // fight the shell's own quoting, so the stub script instead
+        // writes each raw argv element to its own file for the test
+        // to read back directly.
+        let args_out = dir.join("args.txt");
+        let script = dir.join("dump_args.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" > \"{}\"\n\
+                 echo '{{\"ok\": true, \"communities\": []}}'\n",
+                args_out.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        acquire_using(
+            "/bin/sh",
+            &script,
+            "communities",
+            "/my/session/dir",
+            false,
+            &serde_json::json!(["a", "b"]),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let recorded = std::fs::read_to_string(&args_out).unwrap();
+        let lines: Vec<&str> = recorded.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["communities", "/my/session/dir", "false", r#"["a","b"]"#]
+        );
+    }
+
+    #[test]
+    fn acquire_using_treats_unparseable_output_as_transient() {
+        let dir = temp_dir("acquire-garbage");
+        let script = write_stub_script(&dir, "not json at all", 1);
+        let result = acquire_using(
+            "/bin/sh",
+            &script,
+            "communities",
+            "/some/dir",
+            true,
+            &serde_json::json!([]),
+            Duration::from_secs(5),
+        );
+        match result {
+            Err(ConnectorError::Transient(msg)) => assert!(msg.contains("unparseable"), "{msg}"),
+            other => panic!("expected a Transient error, got {other:?}"),
+        }
+    }
+
+    // -- emit_and_track: the pure per-record bookkeeping fetch() uses,
+    // tested directly. ------------------------------------------------
+
+    #[test]
+    fn emit_and_track_records_every_id_in_live_by_group_even_when_excluded() {
+        let mut out = Vec::new();
+        let mut live_by_group = HashMap::new();
+        let mut seen = 0u32;
+        emit_and_track(
+            &mut out,
+            &mut live_by_group,
+            &mut seen,
+            200,
+            &["lesson".to_string()], // excludes "course"
+            &serde_json::json!({"_kind": "course", "courseName": "x"}),
+            "chase-ai",
+        );
+        assert!(out.is_empty());
+        assert_eq!(seen, 0);
+        assert!(live_by_group["chase-ai"].contains("course:x"));
+    }
+
+    #[test]
+    fn emit_and_track_checkpoints_every_n_yielded_items() {
+        let mut out = Vec::new();
+        let mut live_by_group = HashMap::new();
+        let mut seen = 0u32;
+        for i in 0..4 {
+            emit_and_track(
+                &mut out,
+                &mut live_by_group,
+                &mut seen,
+                2,
+                &[],
+                &serde_json::json!({"_kind": "lesson", "lessonId": i.to_string()}),
+                "chase-ai",
+            );
+        }
+        assert_eq!(seen, 4);
+        let checkpoints = out
+            .iter()
+            .filter(|e| matches!(e, Ok(FetchEvent::Checkpoint(_))))
+            .count();
+        assert_eq!(checkpoints, 2);
     }
 }

@@ -7,18 +7,21 @@
 //!
 //! Unlike a fully-implemented connector (e.g. `dbs-connector-raindrop`,
 //! #161), there's no mock HTTP server here and no `mockito` dev
-//! dependency — `SkoolConnector` makes zero outbound HTTP calls
-//! anywhere, and its `fetch()` is permanently blocked pending issue
-//! #99 (the shared Playwright launch helper) regardless of input. So
-//! the second test below builds a genuinely "fully valid" run — a
-//! real session directory that exists, a real downloads directory,
-//! and the one secret `fetch()` actually reads (`SKOOL_SESSION_DIR`)
-//! — the same way `src/lib.rs`'s
-//! `fetch_with_everything_valid_is_blocked_pending_the_playwright_helper`
-//! unit test does, and asserts the run/stream bridge relays
-//! `fetch()`'s `ConnectorError::Config` (naming issue #99) back
-//! through the real subprocess boundary. This proves the wiring is
-//! correct, not that the connector does real work — it can't yet.
+//! dependency — `SkoolConnector` makes zero outbound HTTP calls;
+//! since #188, `fetch()` really does shell out to a Playwright-driven
+//! Python script (see `src/lib.rs`'s module doc-comment), but this
+//! sandbox has neither a captured Skool session nor (usually)
+//! Playwright itself installed, so a real run still can't succeed —
+//! it just fails for a real reason now instead of a canned "not
+//! implemented yet" message. So the second test below builds a
+//! genuinely "fully valid" run — a real session directory that
+//! exists, a real downloads directory, and the one secret `fetch()`
+//! actually reads (`SKOOL_SESSION_DIR`) — the same way `src/lib.rs`'s
+//! `fetch_with_everything_valid_but_no_real_session_fails_cleanly`
+//! unit test does, and asserts the run/stream bridge relays a
+//! connector-level error back through the real subprocess boundary.
+//! Which exact error is environment-dependent, so only the
+//! non-empty-error and no-items-committed invariants are asserted.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -87,8 +90,7 @@ fn the_real_binarys_handshake_is_valid_and_matches_the_connector() {
 }
 
 #[test]
-fn a_real_run_with_fully_valid_input_relays_the_issue_99_config_error_through_the_subprocess_boundary(
-) {
+fn a_real_run_with_fully_valid_input_relays_a_clean_error_through_the_subprocess_boundary() {
     let session = temp_dir("valid-session");
     let downloads = temp_dir("valid-downloads");
 
@@ -135,9 +137,6 @@ fn a_real_run_with_fully_valid_input_relays_the_issue_99_config_error_through_th
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
 
     let error = outcome.error.expect("expected a relayed connector error");
-    assert!(
-        error.contains("issue #99"),
-        "expected the relayed error to mention issue #99, got: {error}"
-    );
+    assert!(!error.is_empty(), "{error}");
     assert_eq!(outcome.items_seen, 0);
 }
