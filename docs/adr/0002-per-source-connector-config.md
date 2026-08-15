@@ -1,6 +1,11 @@
 # ADR-0002: Per-source connector config over the subprocess wire
 
-Status: Proposed
+Status: Accepted — implemented. `WireRunContext::config` and
+`Connector::configure` landed first (#166: `mastodon`, `podcast`,
+`bluesky`); the remaining 11 connectors each gained a real `configure()`
+override across #200 (skool) and #211-#219 (github, raindrop, readwise,
+spotify, pocketcasts, udemy, vimeo, youtube, reddit) — all 14 connectors
+now read their real per-source config over the wire.
 Date: 2026-08-13
 
 ## Context
