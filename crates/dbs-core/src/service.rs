@@ -193,6 +193,35 @@ fn run_status_str(status: RunStatus) -> &'static str {
     }
 }
 
+/// Escapes `s` for embedding inside a double-quoted TOML basic string.
+fn escape_toml_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// Formats `s` as a TOML key for [`BackupService::add_source`]: a bare
+/// identifier when every character is a valid TOML bare-key character
+/// (`A-Za-z0-9_-`), otherwise a properly escaped quoted string. A quoted
+/// key's content can never be misparsed as closing the enclosing
+/// `[section]` header or starting a new `key = value` line, no matter
+/// what characters it contains — the key that made this necessary:
+/// `add_source`'s `name` and each `options` key both come from an
+/// untrusted caller (`POST /api/sources`, `dbs sources add --set`) and
+/// are appended verbatim into the live config file.
+fn toml_key(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        s.to_string()
+    } else {
+        format!("\"{}\"", escape_toml_string(s))
+    }
+}
+
 /// Serializes a JSON value back to a TOML literal, for
 /// [`BackupService::add_source`] appending `--set key=value` pairs to
 /// the config file. Mirrors the reference's `_toml_value`.
@@ -210,13 +239,7 @@ fn toml_value(value: &Value) -> String {
                 .as_str()
                 .map(str::to_string)
                 .unwrap_or_else(|| other.to_string());
-            let escaped = text
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t");
-            format!("\"{escaped}\"")
+            format!("\"{}\"", escape_toml_string(&text))
         }
     }
 }
@@ -1271,7 +1294,11 @@ impl<'a> BackupService<'a> {
                 "no config file to append the new source to".to_string(),
             ));
         };
-        let mut block = format!("\n[sources.{name}]\ntype = \"{type_}\"\nenabled = true\n");
+        let mut block = format!(
+            "\n[sources.{}]\ntype = \"{}\"\nenabled = true\n",
+            toml_key(name),
+            escape_toml_string(type_)
+        );
         if store_media {
             block.push_str("store_media = true\n");
             if max_media_mb > 0 {
@@ -1284,7 +1311,11 @@ impl<'a> BackupService<'a> {
         let mut option_keys: Vec<&String> = options.keys().collect();
         option_keys.sort();
         for key in option_keys {
-            block.push_str(&format!("{key} = {}\n", toml_value(&options[key])));
+            block.push_str(&format!(
+                "{} = {}\n",
+                toml_key(key),
+                toml_value(&options[key])
+            ));
         }
 
         let mut file = std::fs::OpenOptions::new()
@@ -4088,6 +4119,73 @@ mod tests {
         assert!(text.contains("[sources.a]"), "{text}");
         assert!(text.contains("type = \"raindrop\""), "{text}");
         assert!(text.contains("collection = \"123\""), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_source_quotes_and_escapes_a_name_that_would_otherwise_break_out_of_its_toml_header() {
+        let dir = restore_temp_dir("add-source-injection");
+        let config_path = dir.join("dbs.toml");
+        std::fs::write(&config_path, "[dbs]\ndatabase = \"dbs.sqlite3\"\n").unwrap();
+
+        let mut storage = FakeStorage::default();
+        let mut config = test_config(HashMap::new());
+        config.source_path = Some(config_path.clone());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let malicious_name = "x]\nrogue_key = \"pwned\"\n[sources.y";
+        service
+            .add_source(malicious_name, "raindrop", &HashMap::new(), false, 0, false)
+            .unwrap();
+
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        // The attacker string must never appear as a raw, unescaped table
+        // header or a bare `rogue_key = ...` line of its own.
+        assert!(!text.contains("[sources.x]"), "{text}");
+        assert!(!text.contains("\nrogue_key ="), "{text}");
+        assert!(!text.contains("\n[sources.y]"), "{text}");
+
+        // Re-parsing the file must recover exactly one source, under the
+        // exact (unmangled) name, with no injected top-level keys.
+        let parsed = crate::config::load_config(&config_path).unwrap();
+        assert_eq!(parsed.sources.len(), 1);
+        assert!(parsed.sources.contains_key(malicious_name), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_source_quotes_an_option_key_that_would_otherwise_start_a_new_toml_line() {
+        let dir = restore_temp_dir("add-source-option-injection");
+        let config_path = dir.join("dbs.toml");
+        std::fs::write(&config_path, "[dbs]\ndatabase = \"dbs.sqlite3\"\n").unwrap();
+
+        let mut storage = FakeStorage::default();
+        let mut config = test_config(HashMap::new());
+        config.source_path = Some(config_path.clone());
+        let registry = ConnectorRegistry::from_resolved([fake_connector("raindrop", true, true)]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let mut options = HashMap::new();
+        let malicious_key = "x\"\nrogue_key = \"pwned";
+        options.insert(malicious_key.to_string(), serde_json::Value::from("v"));
+        service
+            .add_source("a", "raindrop", &options, false, 0, false)
+            .unwrap();
+
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!text.contains("\nrogue_key ="), "{text}");
+
+        let parsed = crate::config::load_config(&config_path).unwrap();
+        let source = &parsed.sources["a"];
+        assert_eq!(
+            source.options.get(malicious_key).and_then(|v| v.as_str()),
+            Some("v")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
