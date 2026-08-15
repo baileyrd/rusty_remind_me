@@ -290,6 +290,18 @@ fn classify_api_error(e: dbs_core::HttpError) -> ConnectorError {
     }
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
 impl Connector for PocketCastsConnector {
     fn type_name(&self) -> &str {
         "pocketcasts"
@@ -336,6 +348,22 @@ impl Connector for PocketCastsConnector {
             paginated: false,
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = bool_option(options, "include_subscriptions")? {
+            self.config.include_subscriptions = v;
+        }
+        if let Some(v) = bool_option(options, "include_starred")? {
+            self.config.include_starred = v;
+        }
+        if let Some(v) = bool_option(options, "include_history")? {
+            self.config.include_history = v;
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -821,5 +849,42 @@ mod tests {
             connector.volatile_fields(),
             &["playedUpTo".to_string(), "playingStatus".to_string()]
         );
+    }
+
+    #[test]
+    fn configure_applies_include_subscriptions_starred_and_history_from_options() {
+        let mut connector = PocketCastsConnector::new(PocketCastsConfig::default());
+        let options = HashMap::from([
+            (
+                "include_subscriptions".to_string(),
+                serde_json::json!(false),
+            ),
+            ("include_starred".to_string(), serde_json::json!(false)),
+            ("include_history".to_string(), serde_json::json!(false)),
+        ]);
+        connector.configure(&options).unwrap();
+        assert!(!connector.config.include_subscriptions);
+        assert!(!connector.config.include_starred);
+        assert!(!connector.config.include_history);
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = PocketCastsConnector::new(PocketCastsConfig::default());
+        connector.configure(&HashMap::new()).unwrap();
+        assert!(connector.config.include_subscriptions);
+        assert!(connector.config.include_starred);
+        assert!(connector.config.include_history);
+    }
+
+    #[test]
+    fn configure_rejects_a_non_bool_include_subscriptions() {
+        let mut connector = PocketCastsConnector::new(PocketCastsConfig::default());
+        let options = HashMap::from([(
+            "include_subscriptions".to_string(),
+            serde_json::json!("yes"),
+        )]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }

@@ -8,6 +8,16 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-pocketcasts`: wire `configure()` for real per-source scoping (closes #215)
+**2026-08-15**
+
+`PocketCastsConnector` had no `Connector::configure()` override —
+`PocketCastsConfig`'s `include_subscriptions`/`include_starred`/`include_history`
+(all consumed in `fetch()`) could never be set from a real `[sources.NAME]`
+config block, same bug shape as the already-fixed #200 (skool). Added
+`configure()`. 3 new tests: happy path, no-matching-keys no-op, and one
+rejection case.
+
 ## `dbs-connector-spotify`: wire `configure()` for real per-source scoping (closes #214)
 **2026-08-15**
 
