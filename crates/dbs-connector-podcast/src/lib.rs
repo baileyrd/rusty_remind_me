@@ -462,6 +462,9 @@ fn classify_feed_error(e: dbs_core::HttpError) -> ConnectorError {
             Some(status) => ConnectorError::Transient(format!("podcast feed error {status}")),
             None => ConnectorError::Transient(error.to_string()),
         },
+        too_large @ dbs_core::HttpError::TooLarge { .. } => {
+            ConnectorError::Transient(too_large.to_string())
+        }
     }
 }
 

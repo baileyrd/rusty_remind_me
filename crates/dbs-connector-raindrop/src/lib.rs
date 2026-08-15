@@ -418,6 +418,9 @@ fn classify_http_error(e: dbs_core::HttpError) -> ConnectorError {
             Some(401) | Some(403) => ConnectorError::Auth(error.to_string()),
             _ => ConnectorError::Transient(error.to_string()),
         },
+        too_large @ dbs_core::HttpError::TooLarge { .. } => {
+            ConnectorError::Transient(too_large.to_string())
+        }
     }
 }
 

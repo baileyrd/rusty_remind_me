@@ -68,6 +68,14 @@ pub enum HttpError {
         error: reqwest::Error,
         headers: reqwest::header::HeaderMap,
     },
+    /// The response declared a `Content-Length` exceeding the caller's
+    /// configured [`ManagedHttpClient::max_response_bytes`] — rejected
+    /// before the body is ever read, so an oversized response can never
+    /// be buffered into memory. Only catches a server that honestly
+    /// declares its size; a response with no `Content-Length` (chunked
+    /// transfer-encoding) or a lying one still reaches the caller's own
+    /// `.json()`/`.text()`/`.bytes()` uncapped.
+    TooLarge { limit: u64, declared: u64 },
 }
 
 impl fmt::Display for HttpError {
@@ -75,6 +83,10 @@ impl fmt::Display for HttpError {
         match self {
             Self::Exhausted(e) => write!(f, "{e}"),
             Self::Status { error, .. } => write!(f, "{error}"),
+            Self::TooLarge { limit, declared } => write!(
+                f,
+                "response declared Content-Length {declared} bytes, exceeding the {limit}-byte limit"
+            ),
         }
     }
 }
@@ -89,6 +101,7 @@ pub struct ManagedHttpClient {
     base_backoff: Duration,
     max_backoff: Duration,
     max_retry_after: Duration,
+    max_response_bytes: Option<u64>,
     sleep: Box<dyn FnMut(Duration) + Send>,
     request_times: VecDeque<Instant>,
     jitter_state: u32,
@@ -116,6 +129,7 @@ impl ManagedHttpClient {
             base_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(30),
             max_retry_after: Duration::from_secs(300),
+            max_response_bytes: None,
             sleep: Box::new(sleep),
             request_times: VecDeque::new(),
             jitter_state: 0x9E37_79B9,
@@ -144,6 +158,18 @@ impl ManagedHttpClient {
 
     pub fn max_retry_after(mut self, d: Duration) -> Self {
         self.max_retry_after = d;
+        self
+    }
+
+    /// Rejects any response whose `Content-Length` declares more than
+    /// `n` bytes, before the body is ever read — a connector opts in
+    /// per-call-shape (a JSON API response and a media/enclosure
+    /// download have very different legitimate sizes) via this builder,
+    /// not a single global default. `None` (the default) applies no
+    /// limit, preserving existing behavior for every connector that
+    /// doesn't opt in.
+    pub fn max_response_bytes(mut self, n: u64) -> Self {
+        self.max_response_bytes = Some(n);
         self
     }
 
@@ -201,6 +227,13 @@ impl ManagedHttpClient {
                     error: response.error_for_status().unwrap_err(),
                     headers,
                 });
+            }
+            if let Some(limit) = self.max_response_bytes {
+                if let Some(declared) = response.content_length() {
+                    if declared > limit {
+                        return Err(HttpError::TooLarge { limit, declared });
+                    }
+                }
             }
             return Ok(response);
         }
@@ -394,6 +427,49 @@ mod tests {
         assert!(matches!(err, HttpError::Status { .. }));
         // No retry, so no backoff sleep happened.
         assert!(sleeps.lock().unwrap().is_empty());
+        mock.assert();
+    }
+
+    #[test]
+    fn a_declared_content_length_over_the_limit_is_rejected_before_reading_the_body() {
+        let mut server = mockito::Server::new();
+        // mockito sets Content-Length itself from the body it's given, so
+        // a 100-byte body with a 10-byte limit exercises the real header
+        // path, not a hand-crafted one.
+        let mock = server
+            .mock("GET", "/big")
+            .with_status(200)
+            .with_body(vec![b'x'; 100])
+            .create();
+        let (client, _) = sleepless_client();
+        let mut client = client.max_response_bytes(10);
+        let err = client.get(&format!("{}/big", server.url())).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                HttpError::TooLarge {
+                    limit: 10,
+                    declared: 100
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("100"), "{err}");
+        mock.assert();
+    }
+
+    #[test]
+    fn a_declared_content_length_within_the_limit_is_allowed_through() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/small")
+            .with_status(200)
+            .with_body(vec![b'x'; 10])
+            .create();
+        let (client, _) = sleepless_client();
+        let mut client = client.max_response_bytes(100);
+        let response = client.get(&format!("{}/small", server.url())).unwrap();
+        assert_eq!(response.status(), 200);
         mock.assert();
     }
 
