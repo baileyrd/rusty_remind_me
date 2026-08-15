@@ -72,6 +72,7 @@ not left as one oversized issue.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Config loading (`dbs.toml` + `.env`, per-source blocks, inline-secret rejection) | fn | spec | both | `src/dbs/config.py` | — | no | M | Done (#13) — `toml` dependency added |
 | Export profile (`ExportProfile`/`ExportProfileOverride` — per-source export rules: which item kinds export, wiki grouping) | type | spec | both | `src/dbs/core/export_profile.py` | — | no | S | Done (#49) |
+| Webhook notification (`notify_url`/`notify_on` — POST a batch summary after `dbs backup`/`--all`, Slack/Discord-compatible payload) | fn | spec | both | `src/dbs/core/service.py::notify_results` | — | no | S | Done (#208) — `BackupService::notify_results`, called from the CLI `backup` path and both web-triggered (`/api/backup`) and scheduled (`dbs serve --schedule`) batch jobs |
 
 ## Crypto
 

@@ -936,6 +936,7 @@ async fn start_backup(
                 for result in &results {
                     job.record_result(serde_json::to_value(result).unwrap_or(Value::Null));
                 }
+                service.notify_results(&results);
             })
         } else {
             let opts = BackupSourceOptions {
@@ -947,6 +948,7 @@ async fn start_backup(
                 .backup_source(source.as_deref().unwrap_or_default(), &opts)
                 .map(|result| {
                     job.record_result(serde_json::to_value(&result).unwrap_or(Value::Null));
+                    service.notify_results(std::slice::from_ref(&result));
                 })
         };
         drop(bridge);
