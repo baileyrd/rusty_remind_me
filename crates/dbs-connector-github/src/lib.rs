@@ -470,6 +470,39 @@ fn classify_http_error(e: dbs_core::HttpError) -> ConnectorError {
     }
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
+/// Mirrors the reference's `page_size: int = Field(100, ge=1, le=100)`.
+fn page_size_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<u32>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a positive integer, got {v}"
+        ))
+    })?;
+    if !(1..=100).contains(&n) {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be between 1 and 100, got {n}"
+        )));
+    }
+    Ok(Some(n as u32))
+}
+
 impl Connector for GitHubConnector {
     fn type_name(&self) -> &str {
         "github"
@@ -516,6 +549,22 @@ impl Connector for GitHubConnector {
             paginated: true,
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = bool_option(options, "include_stars")? {
+            self.config.include_stars = v;
+        }
+        if let Some(v) = bool_option(options, "include_gists")? {
+            self.config.include_gists = v;
+        }
+        if let Some(v) = page_size_option(options, "page_size")? {
+            self.config.page_size = v;
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -934,5 +983,52 @@ mod tests {
         assert!(connector.capabilities().requires_auth);
         assert!(!connector.capabilities().supports_native_deletes);
         assert_eq!(connector.volatile_fields(), &["repo".to_string()]);
+    }
+
+    #[test]
+    fn configure_applies_include_stars_include_gists_and_page_size_from_options() {
+        let mut connector = GitHubConnector::new(GitHubConfig::default());
+        let options = HashMap::from([
+            ("include_stars".to_string(), serde_json::json!(false)),
+            ("include_gists".to_string(), serde_json::json!(false)),
+            ("page_size".to_string(), serde_json::json!(25)),
+        ]);
+        connector.configure(&options).unwrap();
+        assert!(!connector.config.include_stars);
+        assert!(!connector.config.include_gists);
+        assert_eq!(connector.config.page_size, 25);
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = GitHubConnector::new(GitHubConfig::default());
+        connector.configure(&HashMap::new()).unwrap();
+        assert!(connector.config.include_stars);
+        assert!(connector.config.include_gists);
+        assert_eq!(connector.config.page_size, 100);
+    }
+
+    #[test]
+    fn configure_rejects_a_non_bool_include_stars() {
+        let mut connector = GitHubConnector::new(GitHubConfig::default());
+        let options = HashMap::from([("include_stars".to_string(), serde_json::json!("yes"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_page_size_outside_1_to_100() {
+        let mut connector = GitHubConnector::new(GitHubConfig::default());
+        let options = HashMap::from([("page_size".to_string(), serde_json::json!(101))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_non_integer_page_size() {
+        let mut connector = GitHubConnector::new(GitHubConfig::default());
+        let options = HashMap::from([("page_size".to_string(), serde_json::json!("big"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }

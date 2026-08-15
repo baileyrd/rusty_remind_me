@@ -8,6 +8,18 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-github`: wire `configure()` for real per-source scoping (closes #211)
+**2026-08-15**
+
+`GitHubConnector` had no `Connector::configure()` override — `GitHubConfig`'s
+`include_stars`/`include_gists`/`page_size` (all consumed in `fetch()`)
+could never be set from a real `[sources.NAME]` config block, same bug
+shape as the already-fixed #200 (skool). Added `configure()`, reading
+`include_stars`/`include_gists` as bools and `page_size` as a 1-100
+integer (mirrors the reference's `Field(100, ge=1, le=100)`). 5 new tests:
+happy path, no-matching-keys no-op, and three rejection cases (non-bool,
+out-of-range, non-integer).
+
 ## Wire `batch_max` from config instead of the hardcoded `BATCH_MAX` constant (closes #210)
 **2026-08-15**
 
