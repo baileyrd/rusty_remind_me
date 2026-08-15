@@ -107,7 +107,10 @@ fn read_wire_context() -> Option<WireRunContext> {
 fn build_run_context(connector: &dyn Connector, wire: WireRunContext) -> RunContext {
     let secrets = Secrets::new(wire.secrets, connector.secret_keys().to_vec());
     let http = connector.wants_managed_http().then(|| {
-        RefCell::new(managed_http_client(wire.http_timeout, wire.http_rate_limit_per_min))
+        RefCell::new(managed_http_client(
+            wire.http_timeout,
+            wire.http_rate_limit_per_min,
+        ))
     });
     RunContext {
         source_id: wire.source_id,
