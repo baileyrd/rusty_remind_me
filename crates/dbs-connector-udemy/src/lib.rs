@@ -641,6 +641,91 @@ fn classify_api_error(e: dbs_core::HttpError) -> ConnectorError {
     }
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
+fn string_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<String>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_str().map(str::to_string).map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a string, got {v}"))
+    })
+}
+
+fn u64_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_u64().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a non-negative integer, got {v}"
+        ))
+    })
+}
+
+fn ranged_u32_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+    min: u32,
+    max: u32,
+) -> Result<Option<u32>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a positive integer, got {v}"
+        ))
+    })?;
+    if n < min as u64 || n > max as u64 {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be between {min} and {max}, got {n}"
+        )));
+    }
+    Ok(Some(n as u32))
+}
+
+fn string_array_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let arr = v.as_array().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be an array of strings, got {v}"
+        ))
+    })?;
+    let strings = arr
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(str::to_string).ok_or_else(|| {
+                ConnectorError::Config(format!(
+                    "sources.<name>.{key} entries must be strings, got {entry}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(strings))
+}
+
 impl Connector for UdemyConnector {
     fn type_name(&self) -> &str {
         "udemy"
@@ -690,6 +775,28 @@ impl Connector for UdemyConnector {
             concurrency: "serial".to_string(), // bulk video downloads are resource-heavy
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = ranged_u32_option(options, "page_size", 1, 100)? {
+            self.config.page_size = v;
+        }
+        if let Some(v) = string_array_option(options, "course_filter")? {
+            self.config.course_filter = v;
+        }
+        if let Some(v) = bool_option(options, "download_videos")? {
+            self.config.download_videos = v;
+        }
+        if let Some(v) = string_option(options, "video_format")? {
+            self.config.video_format = v;
+        }
+        if let Some(v) = u64_option(options, "download_timeout")? {
+            self.config.download_timeout = v;
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -1571,5 +1678,73 @@ exit 0"#,
                 "last_accessed_time".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn configure_applies_every_field_from_options() {
+        let mut connector = UdemyConnector::new(UdemyConfig::default());
+        let options = HashMap::from([
+            ("page_size".to_string(), serde_json::json!(25)),
+            (
+                "course_filter".to_string(),
+                serde_json::json!(["123", "some-course-slug"]),
+            ),
+            ("download_videos".to_string(), serde_json::json!(true)),
+            ("video_format".to_string(), serde_json::json!("bestvideo")),
+            ("download_timeout".to_string(), serde_json::json!(60)),
+        ]);
+        connector.configure(&options).unwrap();
+        assert_eq!(connector.config.page_size, 25);
+        assert_eq!(
+            connector.config.course_filter,
+            vec!["123".to_string(), "some-course-slug".to_string()]
+        );
+        assert!(connector.config.download_videos);
+        assert_eq!(connector.config.video_format, "bestvideo");
+        assert_eq!(connector.config.download_timeout, 60);
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = UdemyConnector::new(UdemyConfig::default());
+        let defaults = UdemyConfig::default();
+        connector.configure(&HashMap::new()).unwrap();
+        assert_eq!(connector.config.page_size, defaults.page_size);
+        assert_eq!(connector.config.course_filter, defaults.course_filter);
+        assert_eq!(connector.config.download_videos, defaults.download_videos);
+        assert_eq!(connector.config.video_format, defaults.video_format);
+        assert_eq!(connector.config.download_timeout, defaults.download_timeout);
+    }
+
+    #[test]
+    fn configure_rejects_a_page_size_outside_1_to_100() {
+        let mut connector = UdemyConnector::new(UdemyConfig::default());
+        let options = HashMap::from([("page_size".to_string(), serde_json::json!(101))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_non_array_course_filter() {
+        let mut connector = UdemyConnector::new(UdemyConfig::default());
+        let options = HashMap::from([("course_filter".to_string(), serde_json::json!("123"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_non_string_video_format() {
+        let mut connector = UdemyConnector::new(UdemyConfig::default());
+        let options = HashMap::from([("video_format".to_string(), serde_json::json!(42))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_negative_download_timeout() {
+        let mut connector = UdemyConnector::new(UdemyConfig::default());
+        let options = HashMap::from([("download_timeout".to_string(), serde_json::json!(-1))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }
