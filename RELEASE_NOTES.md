@@ -8,6 +8,19 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-vimeo`: wire `configure()` for real per-source scoping (closes #217)
+**2026-08-15**
+
+`VimeoConnector` had no `Connector::configure()` override — `VimeoConfig`'s
+`page_size`/`download_videos`/`downloads_dir`/`video_quality`/
+`video_stall_timeout` (all consumed in `fetch()`) could never be set from
+a real `[sources.NAME]` config block, same bug shape as the already-fixed
+#200 (skool). Notably, `download_videos` could previously never actually
+be turned on from a real config — only the connector's own hardcoded
+default (`false`) ever applied. Added `configure()`, validating
+`page_size` (1-100). 5 new tests: happy path (all five fields),
+no-matching-keys no-op, and three rejection cases.
+
 ## `dbs-connector-github`: wire `configure()` for real per-source scoping (closes #211)
 **2026-08-15**
 
