@@ -411,6 +411,40 @@ fn classify_api_error(e: dbs_core::HttpError) -> ConnectorError {
     }
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
+fn ranged_u32_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+    min: u32,
+    max: u32,
+) -> Result<Option<u32>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a positive integer, got {v}"
+        ))
+    })?;
+    if n < min as u64 || n > max as u64 {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be between {min} and {max}, got {n}"
+        )));
+    }
+    Ok(Some(n as u32))
+}
+
 impl Connector for SpotifyConnector {
     fn type_name(&self) -> &str {
         "spotify"
@@ -457,6 +491,22 @@ impl Connector for SpotifyConnector {
             paginated: true,
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = bool_option(options, "include_liked_tracks")? {
+            self.config.include_liked_tracks = v;
+        }
+        if let Some(v) = bool_option(options, "include_playlists")? {
+            self.config.include_playlists = v;
+        }
+        if let Some(v) = ranged_u32_option(options, "page_size", 1, 50)? {
+            self.config.page_size = v;
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -1017,5 +1067,45 @@ mod tests {
                 "tracks".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn configure_applies_include_liked_tracks_include_playlists_and_page_size_from_options() {
+        let mut connector = SpotifyConnector::new(SpotifyConfig::default());
+        let options = HashMap::from([
+            ("include_liked_tracks".to_string(), serde_json::json!(false)),
+            ("include_playlists".to_string(), serde_json::json!(false)),
+            ("page_size".to_string(), serde_json::json!(20)),
+        ]);
+        connector.configure(&options).unwrap();
+        assert!(!connector.config.include_liked_tracks);
+        assert!(!connector.config.include_playlists);
+        assert_eq!(connector.config.page_size, 20);
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = SpotifyConnector::new(SpotifyConfig::default());
+        connector.configure(&HashMap::new()).unwrap();
+        assert!(connector.config.include_liked_tracks);
+        assert!(connector.config.include_playlists);
+        assert_eq!(connector.config.page_size, 50);
+    }
+
+    #[test]
+    fn configure_rejects_a_non_bool_include_liked_tracks() {
+        let mut connector = SpotifyConnector::new(SpotifyConfig::default());
+        let options =
+            HashMap::from([("include_liked_tracks".to_string(), serde_json::json!("yes"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_page_size_outside_1_to_50() {
+        let mut connector = SpotifyConnector::new(SpotifyConfig::default());
+        let options = HashMap::from([("page_size".to_string(), serde_json::json!(51))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }
