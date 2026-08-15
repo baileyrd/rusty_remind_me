@@ -119,6 +119,18 @@ pub fn render_report(result: &ResearchResult) -> String {
     lines.join("\n")
 }
 
+/// Neutralizes characters that would let externally-sourced text (video
+/// titles, channel names) break out of Markdown link syntax or a GFM table
+/// cell: `[`/`]` end a link's text span, `|` ends a table cell, and a raw
+/// newline would split one table row into two.
+fn escape_md_cell(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('|', "\\|")
+        .replace(['\n', '\r'], " ")
+}
+
 fn video_table(videos: &[&VideoMeta]) -> Vec<String> {
     if videos.is_empty() {
         return vec!["_(none)_".to_string()];
@@ -138,9 +150,12 @@ fn video_table(videos: &[&VideoMeta]) -> Vec<String> {
             .unwrap_or_else(|| "?".to_string());
         rows.push(format!(
             "| [{}]({}) | {} | {} | {} | {:.2} |",
-            v.title,
+            escape_md_cell(&v.title),
             v.url,
-            v.channel.as_deref().unwrap_or("?"),
+            v.channel
+                .as_deref()
+                .map(escape_md_cell)
+                .unwrap_or_else(|| "?".to_string()),
             views,
             subs,
             v.engagement()
@@ -174,9 +189,12 @@ fn source_table(outcomes: &[IndexOutcome]) -> Vec<String> {
             .unwrap_or_else(|| "?".to_string());
         rows.push(format!(
             "| [{}]({}) | {} | {} | {} | {:.2} | {} | {} | {} |",
-            v.title,
+            escape_md_cell(&v.title),
             v.url,
-            v.channel.as_deref().unwrap_or("?"),
+            v.channel
+                .as_deref()
+                .map(escape_md_cell)
+                .unwrap_or_else(|| "?".to_string()),
             subs,
             views,
             v.engagement(),
@@ -295,5 +313,35 @@ mod tests {
         assert_eq!(rows.len(), 4); // header + separator + 2 rows
         assert!(rows[2].contains("Video a"));
         assert!(rows[3].contains("Video b"));
+    }
+
+    #[test]
+    fn video_table_escapes_a_title_and_channel_that_would_break_out_of_link_and_cell_syntax() {
+        let mut v = video("a", Some(10), Some(1));
+        v.title = "Evil](https://evil.example) [Click me|extra".to_string();
+        v.channel = Some("Bad\nChannel|Name".to_string());
+        let rows = video_table(&[&v]);
+        assert_eq!(rows.len(), 3);
+        let row = &rows[2];
+        // The row must still be exactly one physical line.
+        assert!(!row.contains('\n'));
+        // Exactly five `| ` cell delimiters, matching the header — proves
+        // the escaped `|` inside title/channel no longer reads as a new
+        // delimiter.
+        assert_eq!(row.matches("| ").count(), 5);
+        assert!(row.contains("Evil\\](https://evil.example) \\[Click me\\|extra"));
+        assert!(row.contains("Bad Channel\\|Name"));
+        // The link still points at the real, unmodified video URL.
+        assert!(row.contains(&format!("]({})", v.url)));
+    }
+
+    #[test]
+    fn source_table_escapes_a_title_that_would_break_out_of_link_and_cell_syntax() {
+        let mut result = base_result();
+        result.outcomes[0].video.title = "[Fake](https://evil.example)".to_string();
+        let rows = source_table(&result.outcomes);
+        let row = &rows[2];
+        assert!(!row.contains('\n'));
+        assert!(row.contains("\\[Fake\\](https://evil.example)"));
     }
 }
