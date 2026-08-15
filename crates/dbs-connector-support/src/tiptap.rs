@@ -13,6 +13,15 @@ use serde_json::{Map, Value};
 
 const V2_PREFIX: &str = "[v2]";
 
+/// Recursion cap for `blocks`/`block`/`list_items`/`inline`/`inline_node`,
+/// which are mutually recursive over an untrusted TipTap document with no
+/// depth limit otherwise — a maliciously or accidentally deeply-nested
+/// `desc` (a few thousand nested containers, an easily-craftable payload)
+/// would otherwise exhaust the thread stack and abort the process. Deep
+/// enough for any real document; content nested past this is dropped
+/// (best-effort rendering, same philosophy as an undecodable payload).
+const MAX_DEPTH: usize = 64;
+
 /// Escapes `]` in markdown link text — unescaped, it closes the link
 /// early and mangles everything after it in the rendered note.
 fn md_link_text(text: &str) -> String {
@@ -42,14 +51,14 @@ pub fn tiptap_markdown(desc: &Value) -> String {
         text
     };
     match serde_json::from_str::<Value>(payload) {
-        Ok(Value::Array(nodes)) => blocks(&nodes).trim().to_string(),
+        Ok(Value::Array(nodes)) => blocks(&nodes, 0).trim().to_string(),
         Ok(Value::Object(map)) => {
             let content = map
                 .get("content")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            blocks(&content).trim().to_string()
+            blocks(&content, 0).trim().to_string()
         }
         Ok(_) => raw.to_string(),
         Err(_) if has_prefix => payload.to_string(),
@@ -59,17 +68,23 @@ pub fn tiptap_markdown(desc: &Value) -> String {
 
 // -- node rendering -----------------------------------------------------
 
-fn blocks(nodes: &[Value]) -> String {
+fn blocks(nodes: &[Value], depth: usize) -> String {
+    if depth > MAX_DEPTH {
+        return String::new();
+    }
     nodes
         .iter()
         .filter_map(|n| n.as_object())
-        .map(block)
+        .map(|n| block(n, depth + 1))
         .filter(|b| !b.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-fn block(node: &Map<String, Value>) -> String {
+fn block(node: &Map<String, Value>, depth: usize) -> String {
+    if depth > MAX_DEPTH {
+        return String::new();
+    }
     let kind = node.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let content: Vec<Value> = node
         .get("content")
@@ -82,14 +97,18 @@ fn block(node: &Map<String, Value>) -> String {
         .and_then(|v| v.as_object())
         .unwrap_or(&empty_attrs);
     match kind {
-        "paragraph" => inline(&content),
+        "paragraph" => inline(&content, depth + 1),
         "heading" => {
             let level = attrs
                 .get("level")
                 .and_then(|v| v.as_i64())
                 .filter(|l| (1..=6).contains(l))
                 .unwrap_or(1);
-            format!("{} {}", "#".repeat(level as usize), inline(&content))
+            format!(
+                "{} {}",
+                "#".repeat(level as usize),
+                inline(&content, depth + 1)
+            )
         }
         "codeBlock" => {
             let lang = attrs.get("language").and_then(|v| v.as_str()).unwrap_or("");
@@ -101,7 +120,7 @@ fn block(node: &Map<String, Value>) -> String {
             format!("```{lang}\n{code}\n```")
         }
         "blockquote" => {
-            let inner = blocks(&content);
+            let inner = blocks(&content, depth + 1);
             inner
                 .split('\n')
                 .map(|line| {
@@ -114,10 +133,12 @@ fn block(node: &Map<String, Value>) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         }
-        "bulletList" => list_items(&content, |_i| "- ".to_string()),
+        "bulletList" => list_items(&content, depth + 1, |_i| "- ".to_string()),
         "orderedList" => {
             let start = attrs.get("start").and_then(|v| v.as_i64()).unwrap_or(1);
-            list_items(&content, move |i| format!("{}. ", start + i as i64))
+            list_items(&content, depth + 1, move |i| {
+                format!("{}. ", start + i as i64)
+            })
         }
         "horizontalRule" => "---".to_string(),
         "image" => {
@@ -126,19 +147,22 @@ fn block(node: &Map<String, Value>) -> String {
             format!("![{alt}]({src})")
         }
         // A stray inline node at block level.
-        "text" => inline_node(node),
+        "text" => inline_node(node, depth + 1),
         // Unknown container (tables, embeds, ...): render what's inside.
         _ => {
             if content.is_empty() {
                 String::new()
             } else {
-                blocks(&content)
+                blocks(&content, depth + 1)
             }
         }
     }
 }
 
-fn list_items(nodes: &[Value], bullet: impl Fn(usize) -> String) -> String {
+fn list_items(nodes: &[Value], depth: usize, bullet: impl Fn(usize) -> String) -> String {
+    if depth > MAX_DEPTH {
+        return String::new();
+    }
     let mut lines: Vec<String> = Vec::new();
     let mut idx = 0usize;
     for item in nodes {
@@ -150,7 +174,7 @@ fn list_items(nodes: &[Value], bullet: impl Fn(usize) -> String) -> String {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let inner = blocks(&content);
+        let inner = blocks(&content, depth + 1);
         if inner.is_empty() {
             continue;
         }
@@ -171,15 +195,21 @@ fn list_items(nodes: &[Value], bullet: impl Fn(usize) -> String) -> String {
     lines.join("\n")
 }
 
-fn inline(nodes: &[Value]) -> String {
+fn inline(nodes: &[Value], depth: usize) -> String {
+    if depth > MAX_DEPTH {
+        return String::new();
+    }
     nodes
         .iter()
         .filter_map(|n| n.as_object())
-        .map(inline_node)
+        .map(|n| inline_node(n, depth + 1))
         .collect()
 }
 
-fn inline_node(n: &Map<String, Value>) -> String {
+fn inline_node(n: &Map<String, Value>, depth: usize) -> String {
+    if depth > MAX_DEPTH {
+        return String::new();
+    }
     let kind = n.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if kind == "hardBreak" {
         return "\n".to_string();
@@ -197,7 +227,7 @@ fn inline_node(n: &Map<String, Value>) -> String {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        return inline(&content);
+        return inline(&content, depth + 1);
     }
     let mut text = n
         .get("text")
@@ -370,5 +400,53 @@ mod tests {
         let bare_array = json!([p(vec![t("first", vec![])]), p(vec![t("second", vec![])])]);
         let payload = format!("[v2]{}", serde_json::to_string(&bare_array).unwrap());
         assert_eq!(tiptap_markdown(&json!(payload)), "first\n\nsecond");
+    }
+
+    #[test]
+    fn a_maliciously_deep_raw_payload_does_not_crash_tiptap_markdown() {
+        // Builds the raw JSON text directly (string concatenation, not a
+        // nested serde_json::Value -- constructing/serializing/dropping a
+        // Value nested this deep is its own, unrelated stack-overflow risk
+        // in serde_json itself, orthogonal to what this test is checking).
+        // 10,000 levels is far deeper than any real Skool lesson could be,
+        // easily craftable by a malicious/compromised community's `desc`.
+        let depth = 10_000;
+        let mut payload = String::from("[v2]");
+        payload.push_str(&"{\"type\":\"blockquote\",\"content\":[".repeat(depth));
+        payload
+            .push_str("{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}");
+        payload.push_str(&"]}".repeat(depth));
+        // Must return -- not crash -- regardless of whether serde_json's
+        // own parser recursion limit rejects the payload first (falling
+        // back to the raw text) or a shallower-but-still-deep payload
+        // reaches this module's own MAX_DEPTH-capped render functions.
+        let _ = tiptap_markdown(&json!(payload));
+    }
+
+    #[test]
+    fn blocks_stops_recursing_once_the_depth_cap_is_exceeded() {
+        // Exercises the guard clause directly, without needing to
+        // construct (or later drop) a genuinely deep serde_json::Value
+        // tree -- a real payload can never parse deep enough to reach
+        // MAX_DEPTH through tiptap_markdown's own from_str call (serde_json
+        // rejects anything that deep well before this module's recursive
+        // functions would), but the cap is still explicit, connector-owned
+        // defense-in-depth rather than an implicit reliance on that
+        // upstream default.
+        let nodes = vec![p(vec![t("should be dropped", vec![])])];
+        let rendered = blocks(&nodes, MAX_DEPTH + 1);
+        assert_eq!(rendered, "");
+    }
+
+    #[test]
+    fn nesting_within_the_depth_cap_still_renders_correctly() {
+        let mut node = p(vec![t("innermost", vec![])]);
+        for _ in 0..10 {
+            node = json!({"type": "blockquote", "content": [node]});
+        }
+        let payload = format!("[v2]{}", serde_json::to_string(&json!([node])).unwrap());
+        let rendered = tiptap_markdown(&json!(payload));
+        assert!(rendered.contains("innermost"), "{rendered}");
+        assert!(rendered.starts_with("> > > > > > > > > >"), "{rendered}");
     }
 }
