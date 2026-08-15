@@ -306,6 +306,40 @@ fn classify_http_error(e: dbs_core::HttpError) -> ConnectorError {
     }
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
+fn ranged_u32_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+    min: u32,
+    max: u32,
+) -> Result<Option<u32>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a positive integer, got {v}"
+        ))
+    })?;
+    if n < min as u64 || n > max as u64 {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be between {min} and {max}, got {n}"
+        )));
+    }
+    Ok(Some(n as u32))
+}
+
 impl Connector for ReadwiseConnector {
     fn type_name(&self) -> &str {
         "readwise"
@@ -347,6 +381,22 @@ impl Connector for ReadwiseConnector {
             paginated: true,
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = bool_option(options, "include_books")? {
+            self.config.include_books = v;
+        }
+        if let Some(v) = bool_option(options, "include_highlights")? {
+            self.config.include_highlights = v;
+        }
+        if let Some(v) = ranged_u32_option(options, "page_size", 1, 1000)? {
+            self.config.page_size = v;
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -841,5 +891,44 @@ mod tests {
         assert!(connector.capabilities().requires_auth);
         assert!(connector.capabilities().paginated);
         assert!(!connector.capabilities().supports_native_deletes);
+    }
+
+    #[test]
+    fn configure_applies_include_books_include_highlights_and_page_size_from_options() {
+        let mut connector = ReadwiseConnector::new(ReadwiseConfig::default());
+        let options = HashMap::from([
+            ("include_books".to_string(), serde_json::json!(false)),
+            ("include_highlights".to_string(), serde_json::json!(false)),
+            ("page_size".to_string(), serde_json::json!(200)),
+        ]);
+        connector.configure(&options).unwrap();
+        assert!(!connector.config.include_books);
+        assert!(!connector.config.include_highlights);
+        assert_eq!(connector.config.page_size, 200);
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = ReadwiseConnector::new(ReadwiseConfig::default());
+        connector.configure(&HashMap::new()).unwrap();
+        assert!(connector.config.include_books);
+        assert!(connector.config.include_highlights);
+        assert_eq!(connector.config.page_size, 1000);
+    }
+
+    #[test]
+    fn configure_rejects_a_non_bool_include_books() {
+        let mut connector = ReadwiseConnector::new(ReadwiseConfig::default());
+        let options = HashMap::from([("include_books".to_string(), serde_json::json!("yes"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_page_size_outside_1_to_1000() {
+        let mut connector = ReadwiseConnector::new(ReadwiseConfig::default());
+        let options = HashMap::from([("page_size".to_string(), serde_json::json!(1001))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }
