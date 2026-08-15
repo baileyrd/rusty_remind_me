@@ -129,7 +129,7 @@ fn a_real_run_with_a_fully_valid_session_dir_still_relays_a_clean_error() {
         http_rate_limit_per_min: 0,
     };
 
-    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, 500, None).unwrap();
 
     // Proves the subprocess boundary correctly relays a
     // connector-level error end to end. This sandbox has no captured

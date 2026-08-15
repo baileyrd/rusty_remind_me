@@ -85,7 +85,7 @@ fn a_clean_run_commits_items_and_reports_success() {
     let rc = connector(&["run", "ok", "3"], Capabilities::default());
     let ctx = wire_ctx(source_id, run_id, "incremental");
 
-    let outcome = run_connector_subprocess(&mut storage, &rc, ctx, 0.5, None).unwrap();
+    let outcome = run_connector_subprocess(&mut storage, &rc, ctx, 0.5, 500, None).unwrap();
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
     assert_eq!(outcome.items_seen, 3);
@@ -111,7 +111,7 @@ fn the_wire_context_the_connector_receives_matches_what_the_host_sent() {
     // subprocess, not just constructed and inspected in-process.
     ctx.config = HashMap::from([("instance".to_string(), serde_json::json!("https://x.test"))]);
 
-    run_connector_subprocess(&mut storage, &rc, ctx, 0.5, None).unwrap();
+    run_connector_subprocess(&mut storage, &rc, ctx, 0.5, 500, None).unwrap();
 
     let query = dbs_core::ExportQuery {
         sources: Some(vec!["fixture-source".to_string()]),
@@ -273,6 +273,75 @@ enabled = true
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// #210: a real `[dbs] batch_max` — not the old hardcoded `BATCH_MAX`
+/// constant — bounds how often `run_connector_subprocess` flushes to
+/// storage. `batch_max = 1` forces a flush after every single item (5
+/// separate flushes for 5 items, instead of one trailing flush) —
+/// proving the configured value is what actually drives the flush
+/// cadence, the final committed state must still be exactly correct.
+#[test]
+fn subprocess_runner_honors_a_small_configured_batch_max() {
+    let dir = std::env::temp_dir().join(format!(
+        "dbs-core-run-stream-batch-max-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("dbs.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[dbs]
+database = "dbs.sqlite3"
+export_dir = "exports"
+download_root = "downloads"
+batch_max = 1
+
+[sources.fixture-source]
+type = "fixture"
+enabled = true
+"#,
+    )
+    .unwrap();
+    let cfg = load_config(&config_path).unwrap();
+    assert_eq!(cfg.batch_max, 1);
+
+    let (mut storage, source_id) = open_storage_with_source();
+    let run_id = storage
+        .begin_run(source_id, "rusty_dbs:fixture", "incremental", None)
+        .unwrap();
+    let rc = connector(&["run", "ok", "5"], Capabilities::default());
+    let runner = SubprocessRunner::new(&cfg);
+
+    let outcome = runner
+        .run_connector(
+            &mut storage,
+            &rc,
+            run_id,
+            source_id,
+            "fixture-source",
+            "incremental",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(outcome.items_seen, 5);
+    assert_eq!(outcome.stats.created, 5);
+
+    let query = dbs_core::ExportQuery {
+        sources: Some(vec!["fixture-source".to_string()]),
+        ..Default::default()
+    };
+    let (rows, total) = storage.browse_items(&query, None, 10, 0).unwrap();
+    assert_eq!(total, 5);
+    assert_eq!(rows.len(), 5);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn a_full_enumeration_run_sweeps_items_missing_from_the_reconcile_marker() {
     let (mut storage, source_id) = open_storage_with_source();
@@ -294,6 +363,7 @@ fn a_full_enumeration_run_sweeps_items_missing_from_the_reconcile_marker() {
         &rc,
         wire_ctx(source_id, seed_run, "full"),
         0.5,
+        500,
         None,
     );
 
@@ -312,6 +382,7 @@ fn a_full_enumeration_run_sweeps_items_missing_from_the_reconcile_marker() {
         &rc,
         wire_ctx(source_id, run_id, "full"),
         0.5,
+        500,
         None,
     )
     .unwrap();
@@ -341,6 +412,7 @@ fn a_connector_reported_error_is_partial_when_items_were_already_committed() {
         &rc,
         wire_ctx(source_id, run_id, "incremental"),
         0.5,
+        500,
         None,
     )
     .unwrap();
@@ -371,6 +443,7 @@ fn a_malformed_line_is_a_contract_violation() {
         &rc,
         wire_ctx(source_id, run_id, "incremental"),
         0.5,
+        500,
         None,
     )
     .unwrap();
@@ -391,6 +464,7 @@ fn exiting_without_a_terminal_line_is_a_contract_violation() {
         &rc,
         wire_ctx(source_id, run_id, "incremental"),
         0.5,
+        500,
         None,
     )
     .unwrap();
@@ -419,6 +493,7 @@ fn cancelling_mid_run_actually_kills_the_child_instead_of_waiting_for_it() {
         &rc,
         wire_ctx(source_id, run_id, "incremental"),
         0.5,
+        500,
         Some(&cancel),
     )
     .unwrap();

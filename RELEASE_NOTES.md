@@ -8,6 +8,22 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Wire `batch_max` from config instead of the hardcoded `BATCH_MAX` constant (closes #210)
+**2026-08-15**
+
+`[dbs] batch_max` was parsed and documented as the flush-batch size, but
+`dbs-core::run_stream` defined its own `const BATCH_MAX: usize = 500;` and
+that hardcoded constant — not `Config.batch_max` — was what actually bounded
+host-side memory during a run. Setting `batch_max` in `dbs.toml` previously
+had zero effect.
+
+Added a `batch_max: usize` parameter to `run_connector_subprocess`
+(mirroring the existing `sweep_safety_fraction` pattern), passed from
+`SubprocessRunner::run_connector` as `self.config.batch_max`; removed the
+constant. Test: a `dbs-core` end-to-end test with `batch_max = 1` (forcing a
+flush after every single item) confirming the final committed state is
+still exactly correct.
+
 ## Wire `http_timeout`/`http_rate_limit_per_min` into the connector's real HTTP client (closes #209)
 **2026-08-15**
 
