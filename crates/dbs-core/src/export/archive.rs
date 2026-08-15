@@ -77,7 +77,13 @@ fn bytes_from_value(value: &Value) -> Option<Vec<u8>> {
 
 /// Replaces every run of characters outside `[A-Za-z0-9._-]` with a
 /// single `_`, strips leading/trailing `_`, and falls back to
-/// `"source"` if that leaves nothing.
+/// `"source"` if that leaves nothing -- including a result that's
+/// nothing but dots (e.g. a connector-supplied `external_id`/`filename`
+/// of literally `".."`). `.`/`-`/`_` are otherwise allowed unescaped so
+/// ordinary filenames stay readable in the zip, but an all-dot segment
+/// used as one of `write_media`'s three path components
+/// (`media/{source}/{external_id}/{filename}`) would otherwise be a
+/// literal path-traversal component in the archive entry name.
 fn slug(name: &str) -> String {
     let mut out = String::new();
     let mut in_run = false;
@@ -91,7 +97,7 @@ fn slug(name: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('_');
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.chars().all(|c| c == '.') {
         "source".to_string()
     } else {
         trimmed.to_string()
@@ -509,6 +515,48 @@ mod tests {
             manifest_json["checksums"]["media/raindrop/e1/photo.png"],
             Value::String(expected)
         );
+    }
+
+    #[test]
+    fn media_blob_with_a_dot_only_external_id_and_filename_never_produces_a_traversal_path() {
+        let source = FakeSource {
+            items: Vec::new(),
+            revisions: Vec::new(),
+            media_blobs: vec![row(&[
+                ("source", json!("raindrop")),
+                ("external_id", json!("..")),
+                ("filename", json!("..")),
+                ("data", json!([1, 2, 3, 4])),
+            ])],
+        };
+        let (archive, result) = write_zip(&source, &ExportQuery::default());
+        assert_eq!(result.extra.get("media"), Some(&Value::from(1)));
+        // Every zip entry name must be free of literal ".." path
+        // components -- proves the dot-only inputs were neutralized
+        // rather than surviving into the archive entry name verbatim.
+        for name in archive.file_names() {
+            assert!(
+                !name.split('/').any(|segment| segment == ".."),
+                "traversal-shaped entry name: {name}"
+            );
+        }
+        assert!(archive
+            .file_names()
+            .any(|n| n.starts_with("media/raindrop/source/")));
+    }
+
+    #[test]
+    fn slug_replaces_a_dot_only_result_with_the_fallback() {
+        assert_eq!(slug(".."), "source");
+        assert_eq!(slug("."), "source");
+        assert_eq!(slug("..."), "source");
+        // A leading/trailing run of other disallowed characters around
+        // dots still collapses to an all-dot trimmed result.
+        assert_eq!(slug("/../"), "source");
+        // A dot that's part of a real name (not the whole slug) is left
+        // alone -- only an ALL-dot result triggers the fallback.
+        assert_eq!(slug("photo.png"), "photo.png");
+        assert_eq!(slug(""), "source");
     }
 
     #[test]
