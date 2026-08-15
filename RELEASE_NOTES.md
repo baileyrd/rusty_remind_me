@@ -8,6 +8,17 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-spotify`: wire `configure()` for real per-source scoping (closes #214)
+**2026-08-15**
+
+`SpotifyConnector` had no `Connector::configure()` override — `SpotifyConfig`'s
+`include_liked_tracks`/`include_playlists`/`page_size` (all consumed in
+`fetch()`) could never be set from a real `[sources.NAME]` config block,
+same bug shape as the already-fixed #200 (skool). Added `configure()`,
+validating `page_size` as a 1-50 integer (mirrors the reference's
+`Field(50, ge=1, le=50)`). 4 new tests: happy path, no-matching-keys
+no-op, and two rejection cases.
+
 ## `dbs-connector-readwise`: wire `configure()` for real per-source scoping (closes #213)
 **2026-08-15**
 
