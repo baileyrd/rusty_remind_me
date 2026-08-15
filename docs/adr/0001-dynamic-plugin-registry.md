@@ -1,6 +1,7 @@
 # ADR-0001: Dynamic plugin registry for connectors
 
-Status: Proposed
+Status: Accepted — implemented (#45 handshake/registry, #164 all 14
+connectors as real subprocess binaries)
 Date: 2026-08-12
 
 ## Context

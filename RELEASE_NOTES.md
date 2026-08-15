@@ -8,6 +8,24 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Update README/ARCHITECTURE/CHANGELOG/ADRs to reflect current repo state
+**2026-08-15**
+
+Top-level docs still described a pre-code repo (README: "Experimental —
+pre-code"; ARCHITECTURE: "No code has landed yet", empty boundaries/
+structure/data-flow sections; CHANGELOG: empty scaffold template) despite
+full feature parity with the reference having landed. Rewrote README.md
+(status, quickstart, CLI/connector overview, dev commands) and
+ARCHITECTURE.md (ports-and-adapters table, workspace crate structure,
+subprocess data-flow walkthrough, non-goals) to describe the real system.
+Populated CHANGELOG.md's `[Unreleased]` section with a high-level
+Added/Changed/Fixed summary (RELEASE_NOTES.md remains the detailed
+per-PR log). Updated both ADRs' `Status:` field from `Proposed` to
+`Accepted — implemented`, since both the subprocess plugin protocol
+(ADR-0001) and per-source `configure()` (ADR-0002) are fully live across
+all 14 connectors as of #219. `gap-analysis.md` was already current (every
+row already marked Done) — no changes needed there.
+
 ## `dbs-connector-reddit`: wire `configure()` for real per-source scoping (closes #219)
 **2026-08-15**
 
