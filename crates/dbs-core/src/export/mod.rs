@@ -27,7 +27,7 @@ mod csv;
 mod json;
 mod markdown;
 mod ndjson;
-mod obsidian;
+pub(crate) mod obsidian;
 mod wiki;
 
 use std::collections::HashMap;
