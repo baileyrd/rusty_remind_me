@@ -163,7 +163,16 @@ fn dedup_and_filter(videos: Vec<VideoMeta>, months: Option<u32>) -> Vec<VideoMet
     let Some(months) = months.filter(|m| *m > 0) else {
         return deduped;
     };
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(months) * 30);
+    // chrono::Duration::days panics past its representable range (~1.07e11
+    // days) -- an attacker-influenceable months value (POST /api/research's
+    // months field, or the CLI's --months, neither bounded before reaching
+    // here) can exceed that. A months value too large to represent as a
+    // duration has no meaningful recency cutoff anyway, so treat it the
+    // same as months=0: no filtering, not a crash.
+    let Some(window) = chrono::TimeDelta::try_days(i64::from(months) * 30) else {
+        return deduped;
+    };
+    let cutoff = chrono::Utc::now() - window;
 
     deduped
         .into_iter()
@@ -291,6 +300,19 @@ mod tests {
             ..blank_video("old")
         };
         let out = dedup_and_filter(vec![old], Some(0));
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn dedup_and_filter_does_not_panic_on_a_months_value_too_large_for_chrono() {
+        // months * 30 must not overflow chrono::Duration::days' representable
+        // range (~1.07e11 days) -- u32::MAX comfortably exceeds it. Must
+        // return (unfiltered, same as months=0), never crash.
+        let old = VideoMeta {
+            upload_date: Some("20100101".to_string()),
+            ..blank_video("old")
+        };
+        let out = dedup_and_filter(vec![old], Some(u32::MAX));
         assert_eq!(out.len(), 1);
     }
 

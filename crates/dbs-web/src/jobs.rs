@@ -368,7 +368,19 @@ impl JobManager {
 
         let job_for_thread = job.clone();
         tokio::task::spawn_blocking(move || {
-            let outcome = work(job_for_thread.clone());
+            // Catches a panic inside `work` so `finish` always runs. Without
+            // this, a panic (e.g. a malformed request field the caller
+            // failed to validate) unwinds straight out of this closure —
+            // `finish` never sets the job's status past `Running`, and
+            // `current` (set above) never clears, so `start` permanently
+            // rejects every future call with `JobAlreadyRunning`: one bad
+            // request wedges the whole job manager for the process's life.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work(job_for_thread.clone())
+            }))
+            .unwrap_or_else(|payload| {
+                Err(format!("job panicked: {}", panic_message(payload.as_ref())))
+            });
             job_for_thread.finish(outcome);
         });
         Ok(job)
@@ -394,6 +406,20 @@ impl JobManager {
     pub fn current(&self) -> Option<Arc<Job>> {
         let inner = self.inner.lock().unwrap();
         inner.current.and_then(|id| inner.by_id.get(&id).cloned())
+    }
+}
+
+/// Best-effort human-readable text out of a caught panic's payload —
+/// `std::panic!`'s two common payload shapes (`&str`/`String`); anything
+/// else (a custom `panic_any` payload) falls back to a fixed message
+/// rather than failing to report at all.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -514,6 +540,34 @@ mod tests {
         }
         assert_eq!(job.status(), JobStatus::Error);
         assert_eq!(job.snapshot().error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_job_still_transitions_to_error_and_does_not_wedge_the_manager() {
+        let manager = JobManager::new();
+        let job = manager
+            .start(json!({}), |_job| panic!("boom"))
+            .ok()
+            .unwrap();
+        for _ in 0..200 {
+            if job.status() != JobStatus::Running {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert_eq!(job.status(), JobStatus::Error);
+        assert_eq!(job.snapshot().error.as_deref(), Some("job panicked: boom"));
+
+        // A wedged manager (the bug this guards against) would return
+        // JobAlreadyRunning here forever -- confirm a fresh job can start.
+        let second = manager.start(json!({}), |_job| Ok(())).ok().unwrap();
+        for _ in 0..200 {
+            if second.status() != JobStatus::Running {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert_eq!(second.status(), JobStatus::Done);
     }
 
     #[tokio::test]
