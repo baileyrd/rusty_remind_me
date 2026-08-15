@@ -66,6 +66,10 @@ each.
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for boundaries, key decisions, and
 data flow.
 
+![System architecture: dbs-cli and dbs-web both drive dbs-core's BackupService, which spawns each dbs-connector-<type> as its own subprocess across a stdin/stdout JSON-line boundary, classifies and upserts results into SqliteStorage, and fans out to exporters, the CLI/API, and an optional webhook.](./docs/diagrams/architecture.svg)
+
+![Use cases: an Operator configures sources, runs and schedules backups, browses, exports, verifies/restores, and researches a topic; a Scheduler can trigger a backup on its own; only "Pull via connector" and "Research a topic" reach outside the system, to a source's API and to NotebookLM respectively.](./docs/diagrams/use-cases.svg)
+
 ## Development
 
 ```bash
