@@ -579,6 +579,16 @@ impl Connector for RaindropConnector {
             self.config.page_size = v;
         }
         if let Some(v) = non_negative_i64_option(options, "overlap_seconds")? {
+            // fetch_collection later builds chrono::Duration::seconds(v),
+            // which panics past chrono's representable range (~9.2e15
+            // seconds) -- reject it here as a clean config error instead
+            // of letting a large-but-"valid" value crash the connector
+            // mid-run.
+            if chrono::TimeDelta::try_seconds(v).is_none() {
+                return Err(ConnectorError::Config(format!(
+                    "sources.<name>.overlap_seconds is too large to represent as a duration, got {v}"
+                )));
+            }
             self.config.overlap_seconds = v;
         }
         if let Some(v) = bool_option(options, "poll_trash")? {
@@ -1010,6 +1020,22 @@ mod tests {
         let options = HashMap::from([("overlap_seconds".to_string(), serde_json::json!(-1))]);
         let err = connector.configure(&options).unwrap_err();
         assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_an_overlap_seconds_too_large_for_chrono_to_represent() {
+        let mut connector = RaindropConnector::new(RaindropConfig::default());
+        // Non-negative (passes the existing bound) but past chrono's
+        // representable seconds range -- must be a clean config error, not
+        // a panic when fetch_collection later builds a Duration from it.
+        let options = HashMap::from([("overlap_seconds".to_string(), serde_json::json!(i64::MAX))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)), "{err:?}");
+        // The rejected value must never have been written into config.
+        assert_eq!(
+            connector.config.overlap_seconds,
+            RaindropConfig::default().overlap_seconds
+        );
     }
 
     #[test]
