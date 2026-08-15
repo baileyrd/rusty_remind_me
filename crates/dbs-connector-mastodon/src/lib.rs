@@ -170,10 +170,46 @@ impl MastodonConnector {
                 },
                 note: format!("{endpoint} page {page}"),
             })));
-            url = if !statuses.is_empty() { next } else { None };
+            url = if statuses.is_empty() {
+                None
+            } else {
+                match next {
+                    // get_page reattaches the bearer token to whatever
+                    // `url` becomes on the next request -- a Link header
+                    // pointing at a different origin than the configured
+                    // instance (a malicious/compromised instance, since
+                    // `instance` is itself arbitrary user-supplied input)
+                    // would otherwise exfiltrate MASTODON_TOKEN there.
+                    Some(n) if same_origin(base, &n) => Some(n),
+                    Some(n) => {
+                        out.push(Err(ConnectorError::Transient(format!(
+                            "mastodon: refusing to follow a pagination Link header \
+                             pointing at a different origin than the configured \
+                             instance: {n}"
+                        ))));
+                        return;
+                    }
+                    None => None,
+                }
+            };
             page += 1;
         }
     }
+}
+
+/// True iff `candidate` parses as a URL sharing `base`'s scheme, host,
+/// and (explicit-or-default) port — i.e. the same origin. Used to
+/// validate a Link-header-supplied pagination URL before the bearer
+/// token is reattached to it; a malformed or unparseable URL on either
+/// side is never same-origin.
+fn same_origin(base: &str, candidate: &str) -> bool {
+    let (Ok(base), Ok(candidate)) = (reqwest::Url::parse(base), reqwest::Url::parse(candidate))
+    else {
+        return false;
+    };
+    base.scheme() == candidate.scheme()
+        && base.host_str() == candidate.host_str()
+        && base.port_or_known_default() == candidate.port_or_known_default()
 }
 
 /// Extracts the `rel="next"` URL from a `Link` header value of the
@@ -655,6 +691,60 @@ mod tests {
         assert_eq!(items.len(), 2, "{evs:?}");
         assert_eq!(items[0].external_id(), "bookmark:1");
         assert_eq!(items[1].external_id(), "bookmark:2");
+    }
+
+    #[test]
+    fn pagination_refuses_a_link_header_pointing_at_a_different_origin() {
+        let mut server = mockito::Server::new();
+        // A same-host, different-port URL is enough to prove the check is
+        // real -- the attacker-controlled host doesn't need to be
+        // reachable, since the request must never be attempted at all.
+        let cross_origin_next = "http://127.0.0.1:1/api/v1/bookmarks?max_id=abc";
+        let page0 = serde_json::json!([status_json("1", "alice", "p1", "2024-06-01T00:00:00Z")]);
+
+        let _m0 = server
+            .mock("GET", "/api/v1/bookmarks")
+            .match_query(mockito::Matcher::Regex(r"limit=".to_string()))
+            .with_status(200)
+            .with_header("Link", &format!("<{cross_origin_next}>; rel=\"next\""))
+            .with_body(page0.to_string())
+            .create();
+
+        let config = MastodonConfig {
+            include_favourites: false,
+            ..config_for(&server.url())
+        };
+        let mut connector = MastodonConnector::new(config);
+        let ctx = ctx_with(no_sleep_client(), Some("tok"));
+        let evs: Vec<_> = connector.fetch(&ctx).collect();
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                Err(ConnectorError::Transient(m)) if m.contains("different origin")
+            )),
+            "{evs:?}"
+        );
+    }
+
+    #[test]
+    fn same_origin_matches_scheme_host_and_port_exactly() {
+        assert!(same_origin(
+            "https://mastodon.social",
+            "https://mastodon.social/api/v1/bookmarks?max_id=abc"
+        ));
+        assert!(!same_origin(
+            "https://mastodon.social",
+            "https://evil.example/api/v1/bookmarks?max_id=abc"
+        ));
+        assert!(!same_origin(
+            "https://mastodon.social",
+            "http://mastodon.social/api/v1/bookmarks?max_id=abc"
+        ));
+        assert!(!same_origin(
+            "http://127.0.0.1:1234",
+            "http://127.0.0.1:5678/api/v1/bookmarks?max_id=abc"
+        ));
+        assert!(!same_origin("https://mastodon.social", "not a url"));
     }
 
     #[test]
