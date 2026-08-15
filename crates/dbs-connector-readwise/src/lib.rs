@@ -195,6 +195,18 @@ impl ReadwiseConnector {
             })));
             match payload.get("next").and_then(|v| v.as_str()) {
                 Some(next) if !next.is_empty() => {
+                    // The Authorization header is reattached to whatever
+                    // `url` becomes on the next request (see get_json) --
+                    // a `next` pointing at a different origin than the
+                    // configured API host (a compromised/MITM'd response)
+                    // would otherwise exfiltrate READWISE_TOKEN there.
+                    if !same_origin(&self.base_url, next) {
+                        out.push(Err(ConnectorError::Transient(format!(
+                            "readwise: refusing to follow a pagination 'next' URL pointing \
+                             at a different origin than the configured API host: {next}"
+                        ))));
+                        return;
+                    }
                     url = next.to_string();
                     page += 1;
                 }
@@ -211,6 +223,21 @@ impl ReadwiseConnector {
             })));
         }
     }
+}
+
+/// True iff `candidate` parses as a URL sharing `base`'s scheme, host,
+/// and (explicit-or-default) port — i.e. the same origin. Used to
+/// validate a server-supplied pagination `next` URL before the
+/// Authorization header is reattached to it; a malformed or
+/// unparseable URL on either side is never same-origin.
+fn same_origin(base: &str, candidate: &str) -> bool {
+    let (Ok(base), Ok(candidate)) = (reqwest::Url::parse(base), reqwest::Url::parse(candidate))
+    else {
+        return false;
+    };
+    base.scheme() == candidate.scheme()
+        && base.host_str() == candidate.host_str()
+        && base.port_or_known_default() == candidate.port_or_known_default()
 }
 
 fn record_id(rec: &Value) -> Option<String> {
@@ -741,6 +768,62 @@ mod tests {
         assert_eq!(items.len(), 2, "{evs:?}");
         assert_eq!(items[0].external_id(), "book:1");
         assert_eq!(items[1].external_id(), "book:2");
+    }
+
+    #[test]
+    fn pagination_refuses_a_next_url_pointing_at_a_different_origin() {
+        let mut server = mockito::Server::new();
+        // A same-host, different-*origin* (different port) URL is enough
+        // to prove the check is real -- it doesn't matter whether the
+        // attacker-controlled host is even reachable, since the request
+        // must never be attempted at all.
+        let cross_origin_next = "http://127.0.0.1:1/books/?cursor=abc";
+        let page0 = page(
+            vec![book_json(1, "Book One", "2024-06-01T00:00:00Z")],
+            Some(cross_origin_next),
+        );
+        let _m0 = server
+            .mock("GET", "/books/")
+            .match_query(mockito::Matcher::Regex(r"page_size=".to_string()))
+            .with_status(200)
+            .with_body(page0.to_string())
+            .create();
+
+        let config = ReadwiseConfig {
+            include_highlights: false,
+            ..Default::default()
+        };
+        let mut connector = ReadwiseConnector::new(config).with_base_url(server.url());
+        let ctx = ctx_with("full", None, no_sleep_client(), Some("tok"));
+        let evs: Vec<_> = connector.fetch(&ctx).collect();
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                Err(ConnectorError::Transient(m)) if m.contains("different origin")
+            )),
+            "{evs:?}"
+        );
+    }
+
+    #[test]
+    fn same_origin_matches_scheme_host_and_port_exactly() {
+        assert!(same_origin(
+            "https://readwise.io/api/v2",
+            "https://readwise.io/api/v2/books/?cursor=abc"
+        ));
+        assert!(!same_origin(
+            "https://readwise.io/api/v2",
+            "https://evil.example/books/?cursor=abc"
+        ));
+        assert!(!same_origin(
+            "https://readwise.io/api/v2",
+            "http://readwise.io/books/?cursor=abc"
+        ));
+        assert!(!same_origin(
+            "http://127.0.0.1:1234/api/v2",
+            "http://127.0.0.1:5678/books/?cursor=abc"
+        ));
+        assert!(!same_origin("https://readwise.io", "not a url"));
     }
 
     #[test]
