@@ -8,6 +8,17 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-readwise`: wire `configure()` for real per-source scoping (closes #213)
+**2026-08-15**
+
+`ReadwiseConnector` had no `Connector::configure()` override — `ReadwiseConfig`'s
+`include_books`/`include_highlights`/`page_size` (all consumed in `fetch()`)
+could never be set from a real `[sources.NAME]` config block, same bug
+shape as the already-fixed #200 (skool). Added `configure()`, validating
+`page_size` as a 1-1000 integer (mirrors the reference's
+`Field(1000, ge=1, le=1000)`). 4 new tests: happy path, no-matching-keys
+no-op, and two rejection cases.
+
 ## `dbs-connector-raindrop`: wire `configure()` for real per-source scoping (closes #212)
 **2026-08-15**
 
