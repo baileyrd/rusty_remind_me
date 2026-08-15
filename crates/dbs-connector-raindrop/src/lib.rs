@@ -421,6 +421,92 @@ fn classify_http_error(e: dbs_core::HttpError) -> ConnectorError {
     }
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
+fn i64_option(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<i64>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_i64().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be an integer, got {v}"))
+    })
+}
+
+fn non_negative_i64_option(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<i64>, ConnectorError> {
+    let n = i64_option(options, key)?;
+    if let Some(n) = n {
+        if n < 0 {
+            return Err(ConnectorError::Config(format!(
+                "sources.<name>.{key} must be >= 0, got {n}"
+            )));
+        }
+    }
+    Ok(n)
+}
+
+fn ranged_u32_option(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+    min: u32,
+    max: u32,
+) -> Result<Option<u32>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a positive integer, got {v}"
+        ))
+    })?;
+    if n < min as u64 || n > max as u64 {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be between {min} and {max}, got {n}"
+        )));
+    }
+    Ok(Some(n as u32))
+}
+
+fn string_array_option(
+    options: &std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let arr = v.as_array().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be an array of strings, got {v}"
+        ))
+    })?;
+    let strings = arr
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(str::to_string).ok_or_else(|| {
+                ConnectorError::Config(format!(
+                    "sources.<name>.{key} entries must be strings, got {entry}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(strings))
+}
+
 impl Connector for RaindropConnector {
     fn type_name(&self) -> &str {
         "raindrop"
@@ -474,6 +560,31 @@ impl Connector for RaindropConnector {
             paginated: true,
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = i64_option(options, "collection_id")? {
+            self.config.collection_id = v;
+        }
+        if let Some(v) = bool_option(options, "nested")? {
+            self.config.nested = v;
+        }
+        if let Some(v) = string_array_option(options, "include_types")? {
+            self.config.include_types = v;
+        }
+        if let Some(v) = ranged_u32_option(options, "page_size", 1, 50)? {
+            self.config.page_size = v;
+        }
+        if let Some(v) = non_negative_i64_option(options, "overlap_seconds")? {
+            self.config.overlap_seconds = v;
+        }
+        if let Some(v) = bool_option(options, "poll_trash")? {
+            self.config.poll_trash = v;
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -844,5 +955,77 @@ mod tests {
         assert_eq!(connector.item_kinds().len(), 6);
         assert!(connector.capabilities().requires_auth);
         assert!(connector.capabilities().supports_native_deletes);
+    }
+
+    #[test]
+    fn configure_applies_every_field_from_options() {
+        let mut connector = RaindropConnector::new(RaindropConfig::default());
+        let options = HashMap::from([
+            ("collection_id".to_string(), serde_json::json!(42)),
+            ("nested".to_string(), serde_json::json!(false)),
+            (
+                "include_types".to_string(),
+                serde_json::json!(["link", "article"]),
+            ),
+            ("page_size".to_string(), serde_json::json!(25)),
+            ("overlap_seconds".to_string(), serde_json::json!(60)),
+            ("poll_trash".to_string(), serde_json::json!(false)),
+        ]);
+        connector.configure(&options).unwrap();
+        assert_eq!(connector.config.collection_id, 42);
+        assert!(!connector.config.nested);
+        assert_eq!(
+            connector.config.include_types,
+            vec!["link".to_string(), "article".to_string()]
+        );
+        assert_eq!(connector.config.page_size, 25);
+        assert_eq!(connector.config.overlap_seconds, 60);
+        assert!(!connector.config.poll_trash);
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = RaindropConnector::new(RaindropConfig::default());
+        let defaults = RaindropConfig::default();
+        connector.configure(&HashMap::new()).unwrap();
+        assert_eq!(connector.config.collection_id, defaults.collection_id);
+        assert_eq!(connector.config.nested, defaults.nested);
+        assert_eq!(connector.config.include_types, defaults.include_types);
+        assert_eq!(connector.config.page_size, defaults.page_size);
+        assert_eq!(connector.config.overlap_seconds, defaults.overlap_seconds);
+        assert_eq!(connector.config.poll_trash, defaults.poll_trash);
+    }
+
+    #[test]
+    fn configure_rejects_a_page_size_outside_1_to_50() {
+        let mut connector = RaindropConnector::new(RaindropConfig::default());
+        let options = HashMap::from([("page_size".to_string(), serde_json::json!(51))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_negative_overlap_seconds() {
+        let mut connector = RaindropConnector::new(RaindropConfig::default());
+        let options = HashMap::from([("overlap_seconds".to_string(), serde_json::json!(-1))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_non_array_include_types() {
+        let mut connector = RaindropConnector::new(RaindropConfig::default());
+        let options = HashMap::from([("include_types".to_string(), serde_json::json!("link"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_an_include_types_array_with_a_non_string_entry() {
+        let mut connector = RaindropConnector::new(RaindropConfig::default());
+        let options =
+            HashMap::from([("include_types".to_string(), serde_json::json!(["link", 42]))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }
