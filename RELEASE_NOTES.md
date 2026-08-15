@@ -8,6 +8,17 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-raindrop`: wire `configure()` for real per-source scoping (closes #212)
+**2026-08-15**
+
+`RaindropConnector` had no `Connector::configure()` override — `RaindropConfig`'s
+`collection_id`/`nested`/`include_types`/`page_size`/`overlap_seconds`/`poll_trash`
+(all consumed in `fetch()`) could never be set from a real `[sources.NAME]`
+config block, same bug shape as the already-fixed #200 (skool). Added
+`configure()`, validating `page_size` (1-50, mirrors the reference's
+`Field(ge=1, le=50)`) and `overlap_seconds` (>= 0). 6 new tests: happy
+path (all six fields), no-matching-keys no-op, and four rejection cases.
+
 ## `dbs-connector-vimeo`: wire `configure()` for real per-source scoping (closes #217)
 **2026-08-15**
 
