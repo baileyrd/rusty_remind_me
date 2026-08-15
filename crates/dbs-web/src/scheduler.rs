@@ -103,6 +103,7 @@ async fn tick(config: &Arc<Config>, job_manager: &Arc<JobManager>) {
                         serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
                     );
                 }
+                service.notify_results(&results);
             });
             drop(bridge);
             outcome.map_err(|e| e.to_string())

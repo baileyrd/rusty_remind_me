@@ -8,6 +8,26 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Wire `notify_url`/`notify_on` webhook notification after backup runs (closes #208)
+**2026-08-15**
+
+`Config.notify_url`/`notify_on` were parsed from `[dbs]` TOML and even
+documented in the `dbs init` scaffold template, but nothing ever read a
+configured value and acted on it — a genuinely unwired capability, not
+previously logged in `gap-analysis.md`. Added `BackupService::notify_results`
+(mirrors the reference's method of the same name): POSTs a Slack/Discord-
+compatible JSON summary (`text`/`content` plus the full per-run `results`)
+to `notify_url` when `notify_on` (`failure`/`warning`/`always`) matches the
+batch outcome. Best-effort by contract — a webhook failure is swallowed,
+never propagated, so alerting can't break a backup.
+
+Wired into every real call site that produces a `Vec<RunResult>`/`RunResult`:
+`dbs-cli`'s `backup`/`--all`, `dbs-web`'s `POST /api/backup` (both `all` and
+single-source), and `dbs serve --schedule`'s scheduler tick. Tests: 6 new
+`dbs-core` tests using `mockito` to assert the webhook fires/doesn't fire per
+`notify_on` gating, and that a non-2xx response is treated as a no-op rather
+than an error.
+
 ## Fix more stale doc-comments claiming already-landed wiring is still open, round 3 (closes #207)
 **2026-08-15**
 

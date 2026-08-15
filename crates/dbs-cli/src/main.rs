@@ -928,6 +928,7 @@ fn cmd_backup(
         return match service.backup_all(&opts) {
             Ok(results) => {
                 renderer.close();
+                service.notify_results(&results);
                 println!("Backup results:");
                 for result in &results {
                     print_run(result);
@@ -956,6 +957,7 @@ fn cmd_backup(
     match service.backup_source(&name, &opts) {
         Ok(result) => {
             renderer.close();
+            service.notify_results(std::slice::from_ref(&result));
             println!("Backup results:");
             print_run(&result);
             exit_code(std::slice::from_ref(&result))

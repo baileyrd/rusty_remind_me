@@ -53,7 +53,7 @@ use serde_json::Value;
 
 use crate::cancel::CancelToken;
 use crate::capabilities::{AuthCapture, Capabilities, ItemKind};
-use crate::config::{Config, SourceConfig, VpnGuard};
+use crate::config::{Config, NotifyOn, SourceConfig, VpnGuard};
 use crate::crypto::{
     decrypt_file, is_encrypted, resolve_passphrase, EncryptingWriter, DEFAULT_PASSPHRASE_ENV,
 };
@@ -1974,6 +1974,93 @@ impl<'a> BackupService<'a> {
         }
         profiles
     }
+
+    /// POST the batch outcome to `[dbs] notify_url` when `notify_on`
+    /// matches. Best-effort by contract: a webhook failure is swallowed,
+    /// never propagated — alerting must not break a backup run. Returns
+    /// `true` when a notification was actually sent. Mirrors the
+    /// reference's `BackupService.notify_results`.
+    ///
+    /// The JSON body carries the summary under both `text` (Slack) and
+    /// `content` (Discord) plus the full per-run results, so common
+    /// webhook receivers render it with zero configuration.
+    pub fn notify_results(&self, results: &[RunResult]) -> bool {
+        let Some(url) = self.config.notify_url.as_deref() else {
+            return false;
+        };
+        if url.is_empty() || results.is_empty() {
+            return false;
+        }
+        let bad: Vec<&RunResult> = results
+            .iter()
+            .filter(|r| matches!(r.status, RunStatus::Failed | RunStatus::Partial))
+            .collect();
+        let warned: Vec<&RunResult> = results
+            .iter()
+            .filter(|r| !r.warnings.is_empty() && !bad.iter().any(|b| std::ptr::eq(*b, *r)))
+            .collect();
+        match self.config.notify_on {
+            NotifyOn::Failure if bad.is_empty() => return false,
+            NotifyOn::Warning if bad.is_empty() && warned.is_empty() => return false,
+            _ => {}
+        }
+
+        let ok = results.len() - bad.len() - warned.len();
+        let mut lines = vec![format!(
+            "dbs backup: {ok} ok, {} failed/partial, {} with warnings",
+            bad.len(),
+            warned.len()
+        )];
+        for r in &bad {
+            lines.push(format!(
+                "\u{2022} {}: {} \u{2014} {}",
+                r.source,
+                notify_status_label(r.status),
+                r.error.as_deref().unwrap_or("no error detail")
+            ));
+        }
+        for r in &warned {
+            lines.push(format!(
+                "\u{2022} {}: success with warnings \u{2014} {}",
+                r.source,
+                r.warnings.join("; ")
+            ));
+        }
+        let text = lines.join("\n");
+        let payload = serde_json::json!({
+            "text": text,
+            "content": text,
+            "results": results,
+        });
+        let Ok(body) = serde_json::to_string(&payload) else {
+            return false;
+        };
+
+        let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        else {
+            return false;
+        };
+        matches!(
+            client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send(),
+            Ok(resp) if resp.status().is_success()
+        )
+    }
+}
+
+fn notify_status_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Success => "success",
+        RunStatus::Partial => "partial",
+        RunStatus::Failed => "failed",
+        RunStatus::Skipped => "skipped",
+        RunStatus::Interrupted => "interrupted",
+    }
 }
 
 /// An in-memory [`ExportSource`] populated eagerly from [`Storage`] by
@@ -3784,6 +3871,136 @@ mod tests {
 
         let profiles = service.export_profiles();
         assert!(!profiles["a"].enabled);
+    }
+
+    fn test_run_result(source: &str, status: RunStatus) -> RunResult {
+        let now = Utc::now();
+        RunResult {
+            source: source.to_string(),
+            status,
+            started_at: now,
+            finished_at: now,
+            mode: "incremental".to_string(),
+            run_id: None,
+            fetched: 0,
+            created: 0,
+            updated: 0,
+            unchanged: 0,
+            deleted: 0,
+            undeleted: 0,
+            revisions: 0,
+            items_failed: 0,
+            error: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn notify_results_is_a_noop_when_notify_url_is_unset() {
+        let config = test_config(HashMap::new());
+        let mut storage = FakeStorage::default();
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let results = vec![test_run_result("a", RunStatus::Failed)];
+        assert!(!service.notify_results(&results));
+    }
+
+    #[test]
+    fn notify_results_is_a_noop_when_results_is_empty() {
+        let config = Config {
+            notify_url: Some("http://127.0.0.1:1/unreachable".to_string()),
+            ..test_config(HashMap::new())
+        };
+        let mut storage = FakeStorage::default();
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        assert!(!service.notify_results(&[]));
+    }
+
+    #[test]
+    fn notify_results_skips_the_webhook_when_notify_on_failure_and_all_succeeded() {
+        let config = Config {
+            notify_url: Some("http://127.0.0.1:1/unreachable".to_string()),
+            notify_on: NotifyOn::Failure,
+            ..test_config(HashMap::new())
+        };
+        let mut storage = FakeStorage::default();
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let results = vec![test_run_result("a", RunStatus::Success)];
+        // notify_on defaults to "failure" and nothing failed, so this must
+        // return false *without* ever attempting the (unreachable) POST.
+        assert!(!service.notify_results(&results));
+    }
+
+    #[test]
+    fn notify_results_posts_a_summary_when_a_source_failed() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/hook")
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .create();
+        let config = Config {
+            notify_url: Some(format!("{}/hook", server.url())),
+            notify_on: NotifyOn::Failure,
+            ..test_config(HashMap::new())
+        };
+        let mut storage = FakeStorage::default();
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let mut failed = test_run_result("a", RunStatus::Failed);
+        failed.error = Some("boom".to_string());
+        let results = vec![failed, test_run_result("b", RunStatus::Success)];
+        assert!(service.notify_results(&results));
+        mock.assert();
+    }
+
+    #[test]
+    fn notify_results_sends_on_a_warning_when_notify_on_is_warning() {
+        let mut server = mockito::Server::new();
+        let mock = server.mock("POST", "/hook").with_status(200).create();
+        let config = Config {
+            notify_url: Some(format!("{}/hook", server.url())),
+            notify_on: NotifyOn::Warning,
+            ..test_config(HashMap::new())
+        };
+        let mut storage = FakeStorage::default();
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let mut warned = test_run_result("a", RunStatus::Success);
+        warned.warnings = vec!["retrying media".to_string()];
+        assert!(service.notify_results(&[warned]));
+        mock.assert();
+    }
+
+    #[test]
+    fn notify_results_returns_false_when_the_webhook_endpoint_errors() {
+        let mut server = mockito::Server::new();
+        let mock = server.mock("POST", "/hook").with_status(500).create();
+        let config = Config {
+            notify_url: Some(format!("{}/hook", server.url())),
+            notify_on: NotifyOn::Always,
+            ..test_config(HashMap::new())
+        };
+        let mut storage = FakeStorage::default();
+        let registry = ConnectorRegistry::from_resolved([]);
+        let runner = ScriptedRunner::success(BatchResult::default(), 0);
+        let service = BackupService::new(&mut storage, &config, &registry, &runner);
+
+        let results = vec![test_run_result("a", RunStatus::Success)];
+        assert!(!service.notify_results(&results));
+        mock.assert();
     }
 
     #[test]
