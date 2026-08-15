@@ -47,6 +47,18 @@ pub fn search_videos(
     Ok(search_videos_with_stats(queries, per_query, months)?.0)
 }
 
+/// Upper bounds on `queries`/`per_query` — both reach here unvalidated
+/// from `POST /api/research` and `dbs research youtube --query/--per-
+/// query-count`. Each query spawns one serial `yt-dlp` subprocess
+/// requesting up to `per_query` results; without a cap, a caller could
+/// force an effectively unbounded number of subprocess spawns or an
+/// enormous single search — a resource-exhaustion / long-hang DoS
+/// against the host running `dbs serve`. Generous for any real use
+/// (the CLI defaults to one auto-derived query) while still bounding
+/// the worst case to a two-digit number of subprocess spawns.
+const MAX_QUERIES: usize = 50;
+const MAX_PER_QUERY_COUNT: u32 = 50;
+
 /// Like [`search_videos`], but also returns the raw hit count across
 /// all queries before dedup/filtering — used for the pipeline's "N
 /// found across M searches, deduplicated to K" reporting.
@@ -55,6 +67,17 @@ pub fn search_videos_with_stats(
     per_query: u32,
     months: Option<u32>,
 ) -> Result<(Vec<VideoMeta>, usize), ResearchError> {
+    if queries.len() > MAX_QUERIES {
+        return Err(ResearchError::pipeline(format!(
+            "too many search queries ({}); the limit is {MAX_QUERIES}",
+            queries.len()
+        )));
+    }
+    if per_query > MAX_PER_QUERY_COUNT {
+        return Err(ResearchError::pipeline(format!(
+            "per_query_count ({per_query}) exceeds the limit of {MAX_PER_QUERY_COUNT}"
+        )));
+    }
     let Some(yt_dlp) = find_yt_dlp() else {
         return Err(ResearchError::pipeline(
             "the research pipeline needs yt-dlp on PATH; install it and try again.",
@@ -269,6 +292,23 @@ mod tests {
         assert_eq!(videos.len(), 2);
         assert_eq!(videos[0].channel.as_deref(), Some("Chan"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn search_videos_with_stats_rejects_too_many_queries_before_touching_yt_dlp() {
+        // The bound is checked before find_yt_dlp(), so this must error
+        // cleanly regardless of whether yt-dlp is actually on PATH in the
+        // test environment -- no subprocess is ever spawned.
+        let queries: Vec<String> = (0..(MAX_QUERIES + 1)).map(|i| i.to_string()).collect();
+        let err = search_videos_with_stats(&queries, 10, None).unwrap_err();
+        assert!(err.to_string().contains("too many search queries"), "{err}");
+    }
+
+    #[test]
+    fn search_videos_with_stats_rejects_a_too_large_per_query_count() {
+        let err = search_videos_with_stats(&["q".to_string()], MAX_PER_QUERY_COUNT + 1, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("per_query_count"), "{err}");
     }
 
     #[test]
