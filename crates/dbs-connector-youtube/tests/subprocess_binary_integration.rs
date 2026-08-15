@@ -156,6 +156,8 @@ fn a_real_run_against_a_fake_yt_dlp_commits_items_through_the_full_subprocess_bo
         max_media_bytes: 0,
         download_dir: None,
         config: HashMap::new(),
+        http_timeout: 30.0,
+        http_rate_limit_per_min: 0,
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();

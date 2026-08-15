@@ -132,6 +132,8 @@ fn a_real_run_with_fully_valid_input_relays_a_clean_error_through_the_subprocess
         max_media_bytes: 0,
         download_dir: Some(downloads),
         config: HashMap::new(),
+        http_timeout: 30.0,
+        http_rate_limit_per_min: 0,
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();

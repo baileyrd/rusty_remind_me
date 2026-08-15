@@ -8,6 +8,27 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Wire `http_timeout`/`http_rate_limit_per_min` into the connector's real HTTP client (closes #209)
+**2026-08-15**
+
+`[dbs] http_timeout`/`http_rate_limit_per_min` were parsed but never reached
+the HTTP client every connector subprocess actually uses — the wire protocol
+between host and connector (`WireRunContext`) had no fields to carry them,
+and `dbs-connector-support::subprocess_main` built a bare
+`reqwest::blocking::Client::new()` with no timeout and no
+`ManagedHttpClient::rate_limit_per_min`. Setting either in `dbs.toml`
+previously had zero effect.
+
+Added `http_timeout`/`http_rate_limit_per_min` to `WireRunContext`
+(`#[serde(default)]`, so an older host/wire line still deserializes),
+populated from `Config` in `SubprocessRunner::run_connector`, and applied in
+`subprocess_main::build_run_context` when building the connector's
+`ManagedHttpClient`. `0.0`/`0` (the `#[serde(default)]` fallback) leaves
+`reqwest`'s own untimed, unthrottled defaults in place, matching pre-#209
+behavior. Tests: a `dbs-core` end-to-end passthrough test (real `dbs.toml` →
+spawned fixture connector subprocess → echoed wire context), plus two
+`dbs-connector-support` unit tests covering the configured and unset cases.
+
 ## Wire `notify_url`/`notify_on` webhook notification after backup runs (closes #208)
 **2026-08-15**
 

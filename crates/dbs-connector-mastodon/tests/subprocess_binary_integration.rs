@@ -129,6 +129,8 @@ fn a_real_run_against_a_mock_instance_commits_items_through_the_full_subprocess_
         max_media_bytes: 0,
         download_dir: None,
         config: HashMap::new(),
+        http_timeout: 30.0,
+        http_rate_limit_per_min: 0,
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
@@ -208,6 +210,8 @@ fn a_real_run_gets_its_instance_from_wire_config_with_no_test_env_var_set() {
         max_media_bytes: 0,
         download_dir: None,
         config: HashMap::from([("instance".to_string(), serde_json::json!(server.url()))]),
+        http_timeout: 30.0,
+        http_rate_limit_per_min: 0,
     };
 
     let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();

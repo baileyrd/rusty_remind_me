@@ -106,9 +106,12 @@ fn read_wire_context() -> Option<WireRunContext> {
 
 fn build_run_context(connector: &dyn Connector, wire: WireRunContext) -> RunContext {
     let secrets = Secrets::new(wire.secrets, connector.secret_keys().to_vec());
-    let http = connector
-        .wants_managed_http()
-        .then(|| RefCell::new(ManagedHttpClient::new(reqwest::blocking::Client::new())));
+    let http = connector.wants_managed_http().then(|| {
+        RefCell::new(managed_http_client(
+            wire.http_timeout,
+            wire.http_rate_limit_per_min,
+        ))
+    });
     RunContext {
         source_id: wire.source_id,
         source_name: wire.source_name,
@@ -125,6 +128,28 @@ fn build_run_context(connector: &dyn Connector, wire: WireRunContext) -> RunCont
         items_failed: 0,
         cancel: None,
         http,
+    }
+}
+
+/// Applies `[dbs] http_timeout`/`http_rate_limit_per_min` (carried across
+/// the wire in [`WireRunContext`], since the host never makes this
+/// connector's own HTTP calls) to the client every connector's real run
+/// actually uses. `0.0`/`0` — an older host or a handshake-only spawn's
+/// `#[serde(default)]` fallback — leaves `reqwest`'s own defaults in
+/// place (no timeout, no rate limit), matching pre-#209 behavior.
+fn managed_http_client(http_timeout: f64, http_rate_limit_per_min: u32) -> ManagedHttpClient {
+    let mut builder = reqwest::blocking::Client::builder();
+    if http_timeout > 0.0 {
+        builder = builder.timeout(std::time::Duration::from_secs_f64(http_timeout));
+    }
+    let client = builder
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new());
+    let managed = ManagedHttpClient::new(client);
+    if http_rate_limit_per_min > 0 {
+        managed.rate_limit_per_min(http_rate_limit_per_min)
+    } else {
+        managed
     }
 }
 
@@ -219,6 +244,8 @@ mod tests {
             max_media_bytes: 0,
             download_dir: None,
             config: std::collections::HashMap::new(),
+            http_timeout: 30.0,
+            http_rate_limit_per_min: 0,
         }
     }
 
@@ -236,6 +263,48 @@ mod tests {
         assert_eq!(ctx.limit, Some(7));
         assert_eq!(ctx.source_name, "src");
         assert!(ctx.http.is_none(), "wants_managed_http is false by default");
+    }
+
+    struct HttpWantingConnector;
+    impl Connector for HttpWantingConnector {
+        fn type_name(&self) -> &str {
+            "http_wanting"
+        }
+        fn wants_managed_http(&self) -> bool {
+            true
+        }
+        fn open(&mut self, _ctx: &RunContext) -> Result<(), ConnectorError> {
+            Ok(())
+        }
+        fn fetch<'a>(
+            &'a mut self,
+            _ctx: &'a RunContext,
+        ) -> Box<dyn Iterator<Item = Result<FetchEvent, ConnectorError>> + 'a> {
+            Box::new(std::iter::empty())
+        }
+    }
+
+    #[test]
+    fn build_run_context_builds_a_managed_http_client_with_configured_timeout_and_rate_limit() {
+        let connector = HttpWantingConnector;
+        let mut wire = wire_ctx();
+        wire.http_timeout = 5.0;
+        wire.http_rate_limit_per_min = 3;
+        let ctx = build_run_context(&connector, wire);
+        assert!(ctx.http.is_some());
+    }
+
+    #[test]
+    fn build_run_context_builds_a_managed_http_client_with_unset_config() {
+        // http_timeout/http_rate_limit_per_min both 0 (the #[serde(default)]
+        // fallback for an older host) must not panic — falls back to
+        // reqwest's own untimed, unthrottled defaults.
+        let connector = HttpWantingConnector;
+        let mut wire = wire_ctx();
+        wire.http_timeout = 0.0;
+        wire.http_rate_limit_per_min = 0;
+        let ctx = build_run_context(&connector, wire);
+        assert!(ctx.http.is_some());
     }
 
     #[test]
