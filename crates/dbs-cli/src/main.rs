@@ -6,29 +6,25 @@
 //! exit codes; every real behavior lives in `dbs-core` so a future web/API
 //! layer can reuse it unchanged.
 //!
-//! **This issue (#63) is the CLI skeleton.** [`Command::Init`] is fully
-//! wired; every other subcommand is a stub (prints a "not yet
-//! implemented" notice and exits `1`) — each gets its own follow-up
-//! issue per `gap-analysis.md`'s CLI cluster (`dbs backup` #64, `dbs
-//! status`/`dbs history` #68, `dbs items`/`dbs stats` #69, `dbs
-//! export*`/`dbs decrypt` #70, `dbs sources`/`dbs connectors` #71,
-//! `dbs doctor` #72 — see the full row list for the rest). Subcommand
-//! *names* and nesting (`sources`/`connectors`/`research` sub-apps)
-//! are already wired to match the reference's surface, so those
-//! issues only need to fill in flags and behavior, not invent new
-//! dispatch.
+//! Every subcommand is fully implemented and dispatches to real
+//! `dbs-core` behavior: `backup`, `status`, `history`, `items`, `stats`,
+//! `export*`, `decrypt`, `sources`, `connectors`, `doctor`,
+//! `update-ytdlp`, `maintain`, `schedule`, `serve`, `capture`,
+//! `research`, and `version`. `dbs init` was the first one wired
+//! (#63); the rest landed across the CLI-cluster issues tracked in
+//! `gap-analysis.md` and are all closed.
 //!
 //! Exit codes, matching the reference's documented convention
 //! (cron-friendly):
 //! ```text
 //! 0  all requested work succeeded
+//! 1  a subcommand-specific failure not covered by 2-5 below
+//!    (e.g. `dbs decrypt` refusing to overwrite an existing file)
 //! 2  at least one source ended `partial`
 //! 3  at least one source `failed`
 //! 4  configuration error
 //! 5  no such source
 //! ```
-//! Stub subcommands use `1` (not one of the above) since they represent
-//! no real outcome yet, not any of the reference's actual result codes.
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -864,17 +860,14 @@ fn install_stop_handler(renderer: Arc<ProgressRenderer>, all_sources: bool) -> C
 /// needs a richer wire protocol than #157 added — only start/done are
 /// reported today).
 ///
-/// No connector-candidate discovery mechanism exists yet (scanning for
-/// installed connector subprocesses on disk — a real gap surfaced
-/// while implementing #157, not yet its own issue), so the registry
-/// this constructs is always empty: every configured source's
-/// connector type is reported "not found" until that lands. That's
-/// accurate to the current state of the port, not a bug in this
-/// command — the "connector error surfaced to CLI output" acceptance
-/// scenario is exactly this path. Separately, none of the 14 built-in
-/// `dbs-connector-*` crates are real subprocess binaries yet (another
-/// #157-surfaced gap) — even with real discovery wired in, there would
-/// be nothing on disk for it to find.
+/// `build_registry()` (below) does real connector-candidate discovery
+/// (`dbs_core::build_registry`, landed #160/#170) — it scans `PATH`
+/// and any configured `connectors_dir` for installed connector
+/// subprocess binaries, so a source's connector type is only reported
+/// "not found" when the corresponding `dbs-connector-*` binary is
+/// genuinely absent. All 14 built-in `dbs-connector-*` crates ship a
+/// real subprocess binary (landed #164), so a normal build has
+/// everything `build_registry()` needs to find.
 #[allow(clippy::too_many_arguments)]
 fn cmd_backup(
     config_path: &Path,

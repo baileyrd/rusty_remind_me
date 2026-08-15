@@ -8,6 +8,18 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## Fix more stale doc-comments claiming already-landed wiring is still open, round 3 (closes #207)
+**2026-08-15**
+
+`dbs-cli/src/main.rs`'s crate-level doc-comment still described every
+subcommand but `dbs init` as an unimplemented stub, listing #64/#68/#69/
+#70/#71/#72 as pending follow-ups — all of those are merged, and every
+`cmd_*` handler is fully implemented. `cmd_backup`'s doc-comment likewise
+still claimed connector discovery didn't exist and that none of the 14
+`dbs-connector-*` crates were real subprocess binaries — both landed
+(#160/#170, #164). Rewrote both to describe current behavior, following
+the same pattern as #196/#202.
+
 ## Add `/api/export/profiles` and wire `wiki_grouping` into `/api/export` (closes #199)
 **2026-08-14**
 
