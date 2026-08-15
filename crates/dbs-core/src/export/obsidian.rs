@@ -69,7 +69,7 @@ fn display_value(value: &Value) -> String {
 /// Replaces every run of characters outside `[A-Za-z0-9._-]` with a
 /// single `_`, strips leading/trailing `_`, and falls back to `"item"`
 /// if that leaves nothing.
-fn slug(name: &str) -> String {
+pub(crate) fn slug(name: &str) -> String {
     let mut out = String::new();
     let mut in_run = false;
     for c in name.chars() {

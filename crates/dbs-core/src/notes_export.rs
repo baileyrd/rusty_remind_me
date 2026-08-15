@@ -54,6 +54,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 use crate::errors::DbsError;
+use crate::export::obsidian::slug;
 use crate::export::ExportResult;
 use crate::service::BackupService;
 use crate::storage::ExportQuery;
@@ -149,7 +150,16 @@ fn resolve_filename(
     }
     if taken.contains(zip_basename) {
         let stem = zip_basename.strip_suffix(".md").unwrap_or(zip_basename);
-        format!("{stem}-{}.md", external_id.unwrap_or("item"))
+        // external_id is raw, connector-supplied data (e.g. Bluesky's
+        // AT-URIs, which always contain '/') -- every other
+        // filename-construction path in this codebase (obsidian.rs's own
+        // note_filename) slugifies first. Doing the same here means a
+        // colliding identity can never produce a filename with path
+        // separators, which would otherwise make `out_dir.join(&filename)`
+        // resolve to a non-existent nested path and abort the whole
+        // export_notes call.
+        let ext_id_slug = slug(external_id.unwrap_or("item"));
+        format!("{stem}-{ext_id_slug}.md")
     } else {
         zip_basename.to_string()
     }
@@ -531,6 +541,22 @@ mod tests {
         taken.insert("same.md".to_string());
         let name = resolve_filename("raindrop|e2", "same.md", Some("e2"), &filenames, &taken);
         assert_eq!(name, "same-e2.md");
+    }
+
+    #[test]
+    fn resolve_filename_slugifies_a_slash_bearing_external_id_on_collision() {
+        // Mirrors a real bluesky external_id: an AT-URI containing
+        // multiple '/'. The disambiguated filename must never contain a
+        // path separator -- out_dir.join(&filename) would otherwise try
+        // to resolve a nested, non-existent directory and fail.
+        let filenames: HashMap<String, String> = HashMap::new();
+        let mut taken = HashSet::new();
+        taken.insert("same.md".to_string());
+        let ext_id = "at://did:plc:xyz/app.bsky.feed.like/rkey123";
+        let name = resolve_filename("bluesky|e3", "same.md", Some(ext_id), &filenames, &taken);
+        assert!(!name.contains('/'), "{name}");
+        assert!(!name.contains(':'), "{name}");
+        assert_eq!(name, format!("same-{}.md", slug(ext_id)));
     }
 
     #[test]
