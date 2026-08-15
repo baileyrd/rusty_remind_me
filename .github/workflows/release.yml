@@ -77,8 +77,22 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # `macos-13` (the Intel-native runner this target originally used)
+          # was fully retired by GitHub in December 2025 -- a job requesting
+          # it queues forever with no runner ever assigned, discovered when
+          # v0.1.1's release run sat queued for over an hour. Building
+          # `x86_64-apple-darwin` on the same `macos-14` (arm64) runner as
+          # the aarch64 leg instead: Xcode's toolchain cross-links either
+          # Apple Silicon or Intel object code from an arm64 host without
+          # needing Rosetta or a second physical architecture, so this loses
+          # nothing -- it only stops depending on a second, separately
+          # deprecatable macOS runner image existing at all.
+          # `macos-14` itself starts deprecating 2026-07-06, fully
+          # unsupported 2026-11-02 -- if this queues indefinitely again after
+          # that, replace both entries below with whatever runner label is
+          # current then (`macos-15` was next in line as of this writing).
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-pc-windows-msvc
