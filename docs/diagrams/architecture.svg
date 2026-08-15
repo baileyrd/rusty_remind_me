@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 700" role="img" aria-label="dbs-cli and dbs-web both call the dbs-core BackupService, which dispatches to a SubprocessRunner. That runner spawns a dbs-connector-type subprocess across a process boundary, writing a WireRunContext to its stdin and reading a FetchEvent stream back from its stdout; the subprocess is the only thing that talks to the external source API. Events flow to the engine for classify and upsert into SqliteStorage, which in turn feeds exporters, the CLI and API browse routes, and an optional webhook.">
+  <title>rusty_dbs system architecture</title>
+  <style>
+    :root {
+      --bg: #f5f3ee;
+      --surface: #ffffff;
+      --surface-2: #edeae1;
+      --ink: #1e2129;
+      --ink-soft: #5b6370;
+      --ink-faint: #88909999;
+      --line: #cbd0d6;
+      --accent: #2f6b6f;
+      --accent-tint: #e2edec;
+      --accent-2: #b6612a;
+      --accent-2-tint: #f5e7d9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #14161b;
+        --surface: #1b1e25;
+        --surface-2: #22262f;
+        --ink: #eceef2;
+        --ink-soft: #9aa2b1;
+        --ink-faint: #6b7280;
+        --line: #333844;
+        --accent: #6bbab5;
+        --accent-tint: #1c2b2a;
+        --accent-2: #e0955a;
+        --accent-2-tint: #2c2216;
+      }
+    }
+    svg { background: var(--bg); font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif; }
+    .node-rect { fill: var(--surface-2); stroke: var(--line); stroke-width: 1.4; }
+    .node-title { fill: var(--ink); font-size: 14px; font-weight: 600; text-anchor: middle; }
+    .node-sub { fill: var(--ink-soft); font-size: 10.6px; text-anchor: middle; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+    .edge { fill: none; stroke: var(--ink-soft); stroke-width: 1.5; }
+    .edge-accent { stroke: var(--accent-2); }
+    .edge-label { fill: var(--ink-soft); font-size: 11px; }
+    .edge-label-em { fill: var(--accent-2); font-size: 10.5px; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+    .group-rect { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 3 5; opacity: 0.55; }
+    .group-rect-2 { fill: none; stroke: var(--accent-2); stroke-width: 1.2; stroke-dasharray: 3 5; opacity: 0.6; }
+    .group-label { fill: var(--accent); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+    .group-label-2 { fill: var(--accent-2); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+    .system-rect { fill: var(--accent-2-tint); stroke: var(--accent-2); stroke-width: 1.3; stroke-dasharray: 4 4; }
+    .system-title { fill: var(--accent-2); font-size: 13px; font-weight: 700; text-anchor: middle; }
+    .system-sub { fill: var(--ink-soft); font-size: 10px; text-anchor: middle; }
+  </style>
+
+  <rect width="1300" height="700" fill="var(--bg)"></rect>
+
+  <defs>
+    <marker id="arrow1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-soft)"></path>
+    </marker>
+    <marker id="arrow1accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"></path>
+    </marker>
+  </defs>
+
+  <!-- domain grouping -->
+  <rect class="group-rect" x="440" y="118" width="360" height="482" rx="12"></rect>
+  <text class="group-label" x="620" y="134" text-anchor="middle">dbs-core &#183; domain</text>
+
+  <!-- subprocess grouping -->
+  <rect class="group-rect-2" x="880" y="250" width="340" height="100" rx="12"></rect>
+  <text class="group-label-2" x="1050" y="266" text-anchor="middle">one subprocess per connector</text>
+
+  <!-- process boundary marker -->
+  <line x1="820" y1="255" x2="820" y2="345" stroke="var(--accent-2)" stroke-width="1.6" stroke-dasharray="2 5"></line>
+  <text class="edge-label-em" x="820" y="248" text-anchor="middle">process boundary</text>
+
+  <!-- entry points -->
+  <rect class="node-rect" x="60" y="30" width="220" height="50" rx="9"></rect>
+  <text class="node-title" x="170" y="52">dbs-cli</text>
+  <text class="node-sub" x="170" y="68">argv &#8594; dbs-core</text>
+
+  <rect class="node-rect" x="1020" y="30" width="220" height="50" rx="9"></rect>
+  <text class="node-title" x="1130" y="52">dbs-web</text>
+  <text class="node-sub" x="1130" y="68">axum &#183; /api &#183; SSE</text>
+
+  <!-- BackupService -->
+  <rect class="node-rect" x="480" y="150" width="280" height="60" rx="9"></rect>
+  <text class="node-title" x="620" y="176">BackupService</text>
+  <text class="node-sub" x="620" y="193">dbs-core::service</text>
+
+  <!-- SubprocessRunner -->
+  <rect class="node-rect" x="480" y="270" width="280" height="60" rx="9"></rect>
+  <text class="node-title" x="620" y="296">SubprocessRunner</text>
+  <text class="node-sub" x="620" y="313">dbs-core::run_stream</text>
+
+  <!-- engine -->
+  <rect class="node-rect" x="480" y="400" width="280" height="60" rx="9"></rect>
+  <text class="node-title" x="620" y="426">engine</text>
+  <text class="node-sub" x="620" y="443">classify &#183; upsert &#183; revisions</text>
+
+  <!-- storage -->
+  <rect class="node-rect" x="480" y="520" width="280" height="60" rx="9"></rect>
+  <text class="node-title" x="620" y="546">SqliteStorage</text>
+  <text class="node-sub" x="620" y="563">items &#183; revisions &#183; FTS5</text>
+
+  <!-- connector subprocess -->
+  <rect class="node-rect" x="900" y="270" width="300" height="60" rx="9" style="fill:var(--accent-2-tint); stroke:var(--accent-2);"></rect>
+  <text class="node-title" x="1050" y="296">dbs-connector-&lt;type&gt;</text>
+  <text class="node-sub" x="1050" y="313">&#215;14, one binary each</text>
+
+  <!-- external source -->
+  <rect class="system-rect" x="900" y="400" width="300" height="70" rx="9"></rect>
+  <text class="system-title" x="1050" y="428">source API</text>
+  <text class="system-sub" x="1050" y="446">GitHub &#183; YouTube &#183; Readwise &#183; &#8230;</text>
+
+  <!-- exporters -->
+  <rect class="node-rect" x="80" y="620" width="340" height="60" rx="9"></rect>
+  <text class="node-title" x="250" y="646">Exporters</text>
+  <text class="node-sub" x="250" y="663">JSON &#183; CSV &#183; MD &#183; Archive &#183; Obsidian &#183; Wiki</text>
+
+  <!-- cli/api browse -->
+  <rect class="node-rect" x="460" y="620" width="300" height="60" rx="9"></rect>
+  <text class="node-title" x="610" y="646">CLI / /api</text>
+  <text class="node-sub" x="610" y="663">items &#183; stats &#183; history</text>
+
+  <!-- webhook -->
+  <rect class="node-rect" x="860" y="620" width="340" height="60" rx="9"></rect>
+  <text class="node-title" x="1030" y="646">Webhook notify</text>
+  <text class="node-sub" x="1030" y="663">notify_url (optional)</text>
+
+  <!-- arrows -->
+  <polyline class="edge" points="170,80 170,115 560,115 560,150" marker-end="url(#arrow1)"></polyline>
+  <text class="edge-label" x="330" y="110" text-anchor="middle">backup &lt;source&gt;</text>
+
+  <polyline class="edge" points="1130,80 1130,115 760,115 760,150" marker-end="url(#arrow1)"></polyline>
+  <text class="edge-label" x="960" y="110" text-anchor="middle">POST /api/backup</text>
+
+  <line class="edge" x1="620" y1="210" x2="620" y2="270" marker-end="url(#arrow1)"></line>
+  <text class="edge-label" x="636" y="245">ConnectorRunner port</text>
+
+  <line class="edge edge-accent" x1="760" y1="290" x2="900" y2="290" marker-end="url(#arrow1accent)"></line>
+  <text class="edge-label-em" x="830" y="282" text-anchor="middle">spawn + WireRunContext (stdin)</text>
+
+  <line class="edge edge-accent" x1="900" y1="320" x2="760" y2="320" marker-end="url(#arrow1accent)"></line>
+  <text class="edge-label-em" x="830" y="338" text-anchor="middle">FetchEvent stream (stdout)</text>
+
+  <line class="edge" x1="620" y1="330" x2="620" y2="400" marker-end="url(#arrow1)"></line>
+  <text class="edge-label" x="636" y="368">Item / Checkpoint / Reconcile &#8594; classify</text>
+
+  <line class="edge" x1="620" y1="460" x2="620" y2="520" marker-end="url(#arrow1)"></line>
+  <text class="edge-label" x="636" y="494">upsert + revision history</text>
+
+  <line class="edge" x1="1050" y1="330" x2="1050" y2="400" marker-end="url(#arrow1)"></line>
+  <text class="edge-label" x="1066" y="368">HTTPS fetch</text>
+
+  <polyline class="edge" points="560,580 560,600 250,600 250,620" marker-end="url(#arrow1)"></polyline>
+  <text class="edge-label" x="380" y="596" text-anchor="middle">item stream</text>
+
+  <line class="edge" x1="620" y1="580" x2="610" y2="620" marker-end="url(#arrow1)"></line>
+  <text class="edge-label" x="700" y="605" text-anchor="middle">browse / query</text>
+
+  <polyline class="edge" points="700,580 700,600 1030,600 1030,620" marker-end="url(#arrow1)"></polyline>
+  <text class="edge-label" x="880" y="596" text-anchor="middle">run summary</text>
+</svg>
