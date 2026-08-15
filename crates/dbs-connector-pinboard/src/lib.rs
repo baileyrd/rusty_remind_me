@@ -100,7 +100,8 @@ impl PinboardConnector {
         let response = http
             .borrow_mut()
             .request(reqwest::Method::GET, &url, |b| b.query(&full_params))
-            .map_err(classify_http_error)?;
+            .map_err(classify_http_error)
+            .map_err(redact_auth_token)?;
         response
             .json()
             .map_err(|e| ConnectorError::Transient(format!("invalid JSON response: {e}")))
@@ -187,6 +188,38 @@ fn classify_http_error(e: dbs_core::HttpError) -> ConnectorError {
             Some(status) => ConnectorError::Transient(format!("Pinboard API error {status}")),
             None => ConnectorError::Transient(error.to_string()),
         },
+    }
+}
+
+/// Pinboard sends `auth_token` as a URL query parameter (its API has no
+/// header-based auth option) — so on a connection-level failure,
+/// `reqwest::Error`'s own `Display` embeds the full request URL,
+/// `auth_token` value included, into whatever message `classify_http_error`
+/// produced. Strips the `auth_token=...` value (up to the next `&`, closing
+/// paren, or whitespace) out of the message text before it can propagate
+/// into the connector's stdout protocol or any host-side log.
+fn redact_auth_token(err: ConnectorError) -> ConnectorError {
+    fn scrub(message: String) -> String {
+        let Some(start) = message.find("auth_token=") else {
+            return message;
+        };
+        let value_start = start + "auth_token=".len();
+        let end = message[value_start..]
+            .find(|c: char| c == '&' || c == ')' || c.is_whitespace())
+            .map(|i| value_start + i)
+            .unwrap_or(message.len());
+        format!(
+            "{}auth_token=REDACTED{}",
+            &message[..start],
+            &message[end..]
+        )
+    }
+    match err {
+        ConnectorError::Config(m) => ConnectorError::Config(scrub(m)),
+        ConnectorError::Auth(m) => ConnectorError::Auth(scrub(m)),
+        ConnectorError::Contract(m) => ConnectorError::Contract(scrub(m)),
+        ConnectorError::Transient(m) => ConnectorError::Transient(scrub(m)),
+        ConnectorError::RateLimited(m) => ConnectorError::RateLimited(scrub(m)),
     }
 }
 
@@ -646,6 +679,31 @@ mod tests {
                 .any(|r| matches!(r, Err(ConnectorError::Transient(_)))),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn a_connection_failure_does_not_leak_the_auth_token_in_its_error_message() {
+        // Nothing listens on port 1 -- forces a connection-level failure
+        // (HttpError::Exhausted), whose underlying reqwest::Error embeds
+        // the full request URL, auth_token value included.
+        let mut connector =
+            PinboardConnector::new(PinboardConfig::default()).with_base_url("http://127.0.0.1:1");
+        let ctx = ctx_with(
+            "incremental",
+            None,
+            no_sleep_client(),
+            Some("myuser:SECRETHEXTOKEN"),
+        );
+        let result: Vec<_> = connector.fetch(&ctx).collect();
+        let messages: Vec<String> = result
+            .iter()
+            .filter_map(|r| r.as_ref().err().map(|e| e.to_string()))
+            .collect();
+        assert!(!messages.is_empty(), "expected at least one error");
+        for message in &messages {
+            assert!(!message.contains("SECRETHEXTOKEN"), "{message}");
+            assert!(!message.contains("myuser"), "{message}");
+        }
     }
 
     #[test]
