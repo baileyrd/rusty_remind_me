@@ -45,7 +45,7 @@ not left as one oversized issue.
 | Engine — soft-delete sweep + safety-fraction guard | fn | spec | both | `src/dbs/core/engine.py` | — | no | M | Done (#20) — data-safety critical, the 50%-mass-delete guard |
 | Engine — crash-recovery reaper | fn | spec | both | `src/dbs/core/engine.py` | — | no | S | Done (#21) |
 | Engine — least-privilege secrets scoping | fn | spec | both | `src/dbs/core/secrets.py` | — | no | S | Done (#6) |
-| Managed HTTP client (backoff, `Retry-After`, rate limit) | fn | spec | both | `src/dbs/core/http.py` | rusty_http / rusty_request (unverified) | no | M | Done (#22) |
+| Managed HTTP client (backoff, `Retry-After`, rate limit) | fn | spec | both | `src/dbs/core/http.py` | rusty_http / rusty_request (unverified) | no | M | Done (#22) — `[dbs] http_timeout`/`http_rate_limit_per_min` reach the connector's actual client (#209), threaded through `WireRunContext` since the host never makes the connector's own HTTP calls |
 | Timeutil helpers | fn | spec | both | `src/dbs/core/timeutil.py` | — | no | S | Done (#8) |
 | `CORE_API_VERSION` gating | fn | spec | both | `src/dbs/core/versioning.py` | — | no | S | Done (#9) |
 | Cooperative cancellation (Ctrl+C → finish in-flight, no new starts) | fn | spec | both | `src/dbs/core/cancel.py` | — | no | S | Done (#10, #67) — `CancelToken` primitive landed in #10; `backup_all`/CLI wiring landed in #67 |

@@ -71,6 +71,8 @@ fn wire_ctx(source_id: i64, run_id: i64, mode: &str) -> WireRunContext {
         max_media_bytes: 0,
         download_dir: None,
         config: HashMap::new(),
+        http_timeout: 30.0,
+        http_rate_limit_per_min: 0,
     }
 }
 
@@ -198,6 +200,75 @@ instance = "https://from-toml.test"
     let detail = storage.get_item(item_id).unwrap().unwrap();
     let echoed = &detail["raw"]["_wire_ctx"];
     assert_eq!(echoed["config"]["instance"], "https://from-toml.test");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #209: `[dbs] http_timeout`/`http_rate_limit_per_min` reach the
+/// connector's wire context too — same passthrough as `options` above,
+/// just off `Config` directly rather than a per-source block.
+#[test]
+fn subprocess_runner_forwards_http_timeout_and_rate_limit_to_the_wire_context() {
+    let dir = std::env::temp_dir().join(format!(
+        "dbs-core-run-stream-http-tuning-passthrough-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("dbs.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[dbs]
+database = "dbs.sqlite3"
+export_dir = "exports"
+download_root = "downloads"
+http_timeout = 12.5
+http_rate_limit_per_min = 42
+
+[sources.fixture-source]
+type = "fixture"
+enabled = true
+"#,
+    )
+    .unwrap();
+    let cfg = load_config(&config_path).unwrap();
+    assert_eq!(cfg.http_timeout, 12.5);
+    assert_eq!(cfg.http_rate_limit_per_min, 42);
+
+    let (mut storage, source_id) = open_storage_with_source();
+    let run_id = storage
+        .begin_run(source_id, "rusty_dbs:fixture", "incremental", None)
+        .unwrap();
+    let rc = connector(&["run", "ok", "1"], Capabilities::default());
+    let runner = SubprocessRunner::new(&cfg);
+
+    let outcome = runner
+        .run_connector(
+            &mut storage,
+            &rc,
+            run_id,
+            source_id,
+            "fixture-source",
+            "incremental",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+
+    let query = dbs_core::ExportQuery {
+        sources: Some(vec!["fixture-source".to_string()]),
+        ..Default::default()
+    };
+    let (rows, _total) = storage.browse_items(&query, None, 10, 0).unwrap();
+    let item_id = rows[0]["id"].as_i64().unwrap();
+    let detail = storage.get_item(item_id).unwrap().unwrap();
+    let echoed = &detail["raw"]["_wire_ctx"];
+    assert_eq!(echoed["http_timeout"], 12.5);
+    assert_eq!(echoed["http_rate_limit_per_min"], 42);
 
     std::fs::remove_dir_all(&dir).ok();
 }

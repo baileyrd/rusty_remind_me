@@ -113,6 +113,18 @@ pub struct WireRunContext {
     /// line missing this field still deserializes.
     #[serde(default)]
     pub config: HashMap<String, serde_json::Value>,
+    /// `[dbs] http_timeout`/`http_rate_limit_per_min` — the connector
+    /// process applies these to the `ManagedHttpClient` it builds for
+    /// itself (`dbs-connector-support::subprocess_main`), since the host
+    /// never makes the connector's own HTTP calls. `#[serde(default)]`
+    /// so a handshake-only spawn or an older wire line missing these
+    /// fields still deserializes (falls back to
+    /// `reqwest::blocking::Client::new()`'s defaults: no timeout, no
+    /// rate limit).
+    #[serde(default)]
+    pub http_timeout: f64,
+    #[serde(default)]
+    pub http_rate_limit_per_min: u32,
 }
 
 /// How a connector subprocess reports the way its run ended — the
@@ -577,6 +589,8 @@ impl ConnectorRunner for SubprocessRunner<'_> {
             max_media_bytes,
             download_dir,
             config,
+            http_timeout: self.config.http_timeout,
+            http_rate_limit_per_min: self.config.http_rate_limit_per_min,
         };
 
         run_connector_subprocess(
