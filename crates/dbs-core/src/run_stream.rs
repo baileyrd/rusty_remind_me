@@ -177,17 +177,18 @@ pub enum WireLine {
     Done(WireOutcome),
 }
 
-/// Items are flushed to storage at least this often even without an
-/// explicit `Checkpoint`, bounding host-side memory — mirrors the
-/// reference's `Engine.batch_max` default.
-const BATCH_MAX: usize = 500;
-
 /// Drives one connector subprocess through ADR-0001's run/stream
 /// protocol: spawns it, writes `wire_ctx`, reads its `FetchEvent`
 /// stream, and persists it via `storage` exactly like the reference's
 /// `Engine.run_source` — see the module doc-comment for the exact
 /// parity/divergence points (trailing-flush-skipped-on-error,
 /// cancellation actually killing the child).
+///
+/// `batch_max` bounds how often items are flushed to storage even
+/// without an explicit `Checkpoint` (bounding host-side memory) — the
+/// caller's `[dbs] batch_max` (`SubprocessRunner::run_connector` passes
+/// `self.config.batch_max`), not a hardcoded constant, per #209/#210's
+/// "config knobs actually reach the code that uses them" pass.
 // `committed_any = true` inside the `flush!` macro is genuinely read by
 // the *next* `!committed_any` check at each of this function's several
 // call sites — the lint can't see across separate macro expansions, so
@@ -198,6 +199,7 @@ pub fn run_connector_subprocess(
     connector: &RegisteredConnector,
     wire_ctx: WireRunContext,
     sweep_safety_fraction: f64,
+    batch_max: usize,
     cancel: Option<&CancelToken>,
 ) -> Result<ConnectorRunOutcome, DbsError> {
     let source_id = wire_ctx.source_id;
@@ -349,7 +351,7 @@ pub fn run_connector_subprocess(
                     match prepare(&item, &capabilities, &volatile_fields, &valid_kinds) {
                         Ok(prepared) => {
                             buffer.push(prepared);
-                            if buffer.len() >= BATCH_MAX {
+                            if buffer.len() >= batch_max {
                                 flush!(last_cursor.as_ref());
                             }
                         }
@@ -598,6 +600,7 @@ impl ConnectorRunner for SubprocessRunner<'_> {
             connector,
             wire_ctx,
             self.config.sweep_safety_fraction,
+            self.config.batch_max as usize,
             cancel,
         )
     }

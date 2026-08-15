@@ -122,7 +122,7 @@ fn a_real_run_against_a_mock_api_commits_items_through_the_full_subprocess_bound
         http_rate_limit_per_min: 0,
     };
 
-    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, 500, None).unwrap();
     std::env::remove_var("DBS_RAINDROP_TEST_BASE_URL");
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);

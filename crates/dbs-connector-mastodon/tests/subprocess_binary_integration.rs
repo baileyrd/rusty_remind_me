@@ -133,7 +133,7 @@ fn a_real_run_against_a_mock_instance_commits_items_through_the_full_subprocess_
         http_rate_limit_per_min: 0,
     };
 
-    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, 500, None).unwrap();
     std::env::remove_var("DBS_MASTODON_TEST_BASE_URL");
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
@@ -214,7 +214,7 @@ fn a_real_run_gets_its_instance_from_wire_config_with_no_test_env_var_set() {
         http_rate_limit_per_min: 0,
     };
 
-    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, 500, None).unwrap();
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
     assert_eq!(outcome.items_seen, 1);

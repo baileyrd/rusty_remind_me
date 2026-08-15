@@ -136,7 +136,7 @@ fn a_real_run_with_fully_valid_input_relays_a_clean_error_through_the_subprocess
         http_rate_limit_per_min: 0,
     };
 
-    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, 500, None).unwrap();
 
     let error = outcome.error.expect("expected a relayed connector error");
     assert!(!error.is_empty(), "{error}");

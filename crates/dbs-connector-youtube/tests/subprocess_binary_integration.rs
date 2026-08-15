@@ -160,7 +160,7 @@ fn a_real_run_against_a_fake_yt_dlp_commits_items_through_the_full_subprocess_bo
         http_rate_limit_per_min: 0,
     };
 
-    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, None).unwrap();
+    let outcome = run_connector_subprocess(&mut storage, &rc, wire_ctx, 0.5, 500, None).unwrap();
     std::env::remove_var("DBS_YOUTUBE_TEST_YT_DLP_BIN");
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
