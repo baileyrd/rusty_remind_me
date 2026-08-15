@@ -373,6 +373,67 @@ fn to_item(list_label: &str, raw: &Value) -> Option<BackupItem> {
     Some(item)
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
+fn string_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<String>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_str().map(str::to_string).map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a string, got {v}"))
+    })
+}
+
+fn u64_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_u64().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a non-negative integer, got {v}"
+        ))
+    })
+}
+
+fn min_u32_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+    min: u32,
+) -> Result<Option<u32>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a positive integer, got {v}"
+        ))
+    })?;
+    if n < min as u64 {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be >= {min}, got {n}"
+        )));
+    }
+    u32::try_from(n)
+        .map(Some)
+        .map_err(|_| ConnectorError::Config(format!("sources.<name>.{key} is too large, got {n}")))
+}
+
 impl Connector for YouTubeConnector {
     fn type_name(&self) -> &str {
         "youtube"
@@ -448,6 +509,34 @@ impl Connector for YouTubeConnector {
             concurrency: "serial".to_string(), // yt-dlp extraction is resource-heavy
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = bool_option(options, "watch_later")? {
+            self.config.watch_later = v;
+        }
+        if let Some(v) = bool_option(options, "liked")? {
+            self.config.liked = v;
+        }
+        if let Some(v) = bool_option(options, "history")? {
+            self.config.history = v;
+        }
+        if let Some(v) = bool_option(options, "playlists")? {
+            self.config.playlists = v;
+        }
+        if let Some(v) = min_u32_option(options, "max_history", 1)? {
+            self.config.max_history = v;
+        }
+        if let Some(v) = u64_option(options, "extract_timeout")? {
+            self.config.extract_timeout = v;
+        }
+        if let Some(v) = string_option(options, "cookies_from_browser")? {
+            self.config.cookies_from_browser = Some(v);
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -972,5 +1061,74 @@ exit 0"#,
         let capture = connector.auth_capture().unwrap();
         assert_eq!(capture.kind, "browser_cookies");
         assert!(connector.export_profile().is_some());
+    }
+
+    #[test]
+    fn configure_applies_every_field_from_options() {
+        let mut connector = YouTubeConnector::new(YouTubeConfig::default());
+        let options = HashMap::from([
+            ("watch_later".to_string(), serde_json::json!(false)),
+            ("liked".to_string(), serde_json::json!(false)),
+            ("history".to_string(), serde_json::json!(true)),
+            ("playlists".to_string(), serde_json::json!(false)),
+            ("max_history".to_string(), serde_json::json!(100)),
+            ("extract_timeout".to_string(), serde_json::json!(30)),
+            (
+                "cookies_from_browser".to_string(),
+                serde_json::json!("firefox"),
+            ),
+        ]);
+        connector.configure(&options).unwrap();
+        assert!(!connector.config.watch_later);
+        assert!(!connector.config.liked);
+        assert!(connector.config.history);
+        assert!(!connector.config.playlists);
+        assert_eq!(connector.config.max_history, 100);
+        assert_eq!(connector.config.extract_timeout, 30);
+        assert_eq!(
+            connector.config.cookies_from_browser,
+            Some("firefox".to_string())
+        );
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = YouTubeConnector::new(YouTubeConfig::default());
+        let defaults = YouTubeConfig::default();
+        connector.configure(&HashMap::new()).unwrap();
+        assert_eq!(connector.config.watch_later, defaults.watch_later);
+        assert_eq!(connector.config.liked, defaults.liked);
+        assert_eq!(connector.config.history, defaults.history);
+        assert_eq!(connector.config.playlists, defaults.playlists);
+        assert_eq!(connector.config.max_history, defaults.max_history);
+        assert_eq!(connector.config.extract_timeout, defaults.extract_timeout);
+        assert_eq!(
+            connector.config.cookies_from_browser,
+            defaults.cookies_from_browser
+        );
+    }
+
+    #[test]
+    fn configure_rejects_a_non_bool_watch_later() {
+        let mut connector = YouTubeConnector::new(YouTubeConfig::default());
+        let options = HashMap::from([("watch_later".to_string(), serde_json::json!("yes"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_max_history_below_1() {
+        let mut connector = YouTubeConnector::new(YouTubeConfig::default());
+        let options = HashMap::from([("max_history".to_string(), serde_json::json!(0))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_negative_extract_timeout() {
+        let mut connector = YouTubeConnector::new(YouTubeConfig::default());
+        let options = HashMap::from([("extract_timeout".to_string(), serde_json::json!(-1))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }

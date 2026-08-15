@@ -8,6 +8,18 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-youtube`: wire `configure()` for real per-source scoping (closes #218)
+**2026-08-15**
+
+`YouTubeConnector` had no `Connector::configure()` override —
+`YouTubeConfig`'s `watch_later`/`liked`/`history`/`playlists`/`max_history`/
+`extract_timeout`/`cookies_from_browser` (all consumed in `fetch()`) could
+never be set from a real `[sources.NAME]` config block, same bug shape as
+the already-fixed #200 (skool). Added `configure()`, validating
+`max_history` (>= 1, mirrors the reference's `Field(ge=1)`) and rejecting
+a negative `extract_timeout`. 5 new tests: happy path (all seven fields),
+no-matching-keys no-op, and three rejection cases.
+
 ## `dbs-connector-udemy`: wire `configure()` for real per-source scoping (closes #216)
 **2026-08-15**
 
