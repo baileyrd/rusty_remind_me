@@ -523,6 +523,96 @@ fn acquire(
     result
 }
 
+fn bool_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_bool().map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a bool, got {v}"))
+    })
+}
+
+fn string_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<String>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    v.as_str().map(str::to_string).map(Some).ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a string, got {v}"))
+    })
+}
+
+fn non_negative_f64_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<f64>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_f64().ok_or_else(|| {
+        ConnectorError::Config(format!("sources.<name>.{key} must be a number, got {v}"))
+    })?;
+    if n < 0.0 {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be >= 0, got {n}"
+        )));
+    }
+    Ok(Some(n))
+}
+
+fn min_u32_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+    min: u32,
+) -> Result<Option<u32>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be a positive integer, got {v}"
+        ))
+    })?;
+    if n < min as u64 {
+        return Err(ConnectorError::Config(format!(
+            "sources.<name>.{key} must be >= {min}, got {n}"
+        )));
+    }
+    u32::try_from(n)
+        .map(Some)
+        .map_err(|_| ConnectorError::Config(format!("sources.<name>.{key} is too large, got {n}")))
+}
+
+fn string_array_option(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>, ConnectorError> {
+    let Some(v) = options.get(key) else {
+        return Ok(None);
+    };
+    let arr = v.as_array().ok_or_else(|| {
+        ConnectorError::Config(format!(
+            "sources.<name>.{key} must be an array of strings, got {v}"
+        ))
+    })?;
+    let strings = arr
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(str::to_string).ok_or_else(|| {
+                ConnectorError::Config(format!(
+                    "sources.<name>.{key} entries must be strings, got {entry}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(strings))
+}
+
 impl Connector for RedditConnector {
     fn type_name(&self) -> &str {
         "reddit"
@@ -599,6 +689,34 @@ impl Connector for RedditConnector {
             concurrency: "serial".to_string(), // drives a real browser
             ..Capabilities::default()
         }
+    }
+
+    fn configure(
+        &mut self,
+        options: &std::collections::HashMap<String, Value>,
+    ) -> Result<(), ConnectorError> {
+        if let Some(v) = string_option(options, "username")? {
+            self.config.username = Some(v);
+        }
+        if let Some(v) = string_array_option(options, "include_types")? {
+            self.config.include_types = v;
+        }
+        if let Some(v) = min_u32_option(options, "max_pages", 1)? {
+            self.config.max_pages = v;
+        }
+        if let Some(v) = non_negative_f64_option(options, "delay")? {
+            self.config.delay = v;
+        }
+        if let Some(v) = bool_option(options, "headless")? {
+            self.config.headless = v;
+        }
+        if let Some(v) = min_u32_option(options, "checkpoint_every", 1)? {
+            self.config.checkpoint_every = v;
+        }
+        if let Some(v) = bool_option(options, "archive_outbound_link")? {
+            self.config.archive_outbound_link = v;
+        }
+        Ok(())
     }
 
     fn fetch<'a>(
@@ -1202,5 +1320,76 @@ mod tests {
         assert_eq!(capture.kind, "browser_session");
         assert_eq!(capture.secret_key, "REDDIT_SESSION_DIR");
         assert!(connector.export_profile().is_some());
+    }
+
+    #[test]
+    fn configure_applies_every_field_from_options() {
+        let mut connector = RedditConnector::new(RedditConfig::default());
+        let options = HashMap::from([
+            ("username".to_string(), serde_json::json!("alice")),
+            ("include_types".to_string(), serde_json::json!(["post"])),
+            ("max_pages".to_string(), serde_json::json!(10)),
+            ("delay".to_string(), serde_json::json!(0.5)),
+            ("headless".to_string(), serde_json::json!(false)),
+            ("checkpoint_every".to_string(), serde_json::json!(50)),
+            ("archive_outbound_link".to_string(), serde_json::json!(true)),
+        ]);
+        connector.configure(&options).unwrap();
+        assert_eq!(connector.config.username, Some("alice".to_string()));
+        assert_eq!(connector.config.include_types, vec!["post".to_string()]);
+        assert_eq!(connector.config.max_pages, 10);
+        assert_eq!(connector.config.delay, 0.5);
+        assert!(!connector.config.headless);
+        assert_eq!(connector.config.checkpoint_every, 50);
+        assert!(connector.config.archive_outbound_link);
+    }
+
+    #[test]
+    fn configure_with_no_matching_keys_leaves_defaults_untouched() {
+        let mut connector = RedditConnector::new(RedditConfig::default());
+        let defaults = RedditConfig::default();
+        connector.configure(&HashMap::new()).unwrap();
+        assert_eq!(connector.config.username, defaults.username);
+        assert_eq!(connector.config.include_types, defaults.include_types);
+        assert_eq!(connector.config.max_pages, defaults.max_pages);
+        assert_eq!(connector.config.delay, defaults.delay);
+        assert_eq!(connector.config.headless, defaults.headless);
+        assert_eq!(connector.config.checkpoint_every, defaults.checkpoint_every);
+        assert_eq!(
+            connector.config.archive_outbound_link,
+            defaults.archive_outbound_link
+        );
+    }
+
+    #[test]
+    fn configure_rejects_a_max_pages_below_1() {
+        let mut connector = RedditConnector::new(RedditConfig::default());
+        let options = HashMap::from([("max_pages".to_string(), serde_json::json!(0))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_negative_delay() {
+        let mut connector = RedditConnector::new(RedditConfig::default());
+        let options = HashMap::from([("delay".to_string(), serde_json::json!(-1.0))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_checkpoint_every_below_1() {
+        let mut connector = RedditConnector::new(RedditConfig::default());
+        let options = HashMap::from([("checkpoint_every".to_string(), serde_json::json!(0))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
+    }
+
+    #[test]
+    fn configure_rejects_a_non_array_include_types() {
+        let mut connector = RedditConnector::new(RedditConfig::default());
+        let options = HashMap::from([("include_types".to_string(), serde_json::json!("post"))]);
+        let err = connector.configure(&options).unwrap_err();
+        assert!(matches!(err, ConnectorError::Config(_)));
     }
 }

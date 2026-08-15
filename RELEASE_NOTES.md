@@ -8,6 +8,21 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-reddit`: wire `configure()` for real per-source scoping (closes #219)
+**2026-08-15**
+
+`RedditConnector` had no `Connector::configure()` override — `RedditConfig`'s
+`username`/`include_types`/`max_pages`/`delay`/`headless`/`checkpoint_every`/
+`archive_outbound_link` (all consumed in `fetch()`) could never be set from
+a real `[sources.NAME]` config block, same bug shape as the already-fixed
+#200 (skool). `session_dir_env` is deliberately left unwired — like other
+connectors' `token_env`, it names the environment variable holding the
+secret and is never itself a per-source override target. Added
+`configure()`, validating `max_pages`/`checkpoint_every` (>=1, mirrors the
+reference's `Field(ge=1)`) and `delay` (>=0.0, mirrors `Field(ge=0.0)`).
+6 new tests: happy path (all seven fields), no-matching-keys no-op, and
+four rejection cases.
+
 ## `dbs-connector-youtube`: wire `configure()` for real per-source scoping (closes #218)
 **2026-08-15**
 
