@@ -8,6 +8,19 @@ PR, switch to one entry per merged PR (reverse chronological), same convention a
 
 ---
 
+## `dbs-connector-udemy`: wire `configure()` for real per-source scoping (closes #216)
+**2026-08-15**
+
+`UdemyConnector` had no `Connector::configure()` override —
+`UdemyConfig`'s `page_size`/`course_filter`/`download_videos`/`video_format`/
+`download_timeout` (all consumed in `fetch()`) could never be set from a
+real `[sources.NAME]` config block, same bug shape as the already-fixed
+#200 (skool). Notably, `download_videos` could previously never actually
+be turned on from a real config — only the connector's own hardcoded
+default (`false`) ever applied. Added `configure()`, validating `page_size`
+(1-100) and rejecting a negative `download_timeout`. 6 new tests: happy
+path (all five fields), no-matching-keys no-op, and four rejection cases.
+
 ## `dbs-connector-pocketcasts`: wire `configure()` for real per-source scoping (closes #215)
 **2026-08-15**
 
