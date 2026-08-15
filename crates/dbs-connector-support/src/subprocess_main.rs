@@ -131,6 +131,16 @@ fn build_run_context(connector: &dyn Connector, wire: WireRunContext) -> RunCont
     }
 }
 
+/// A generous backstop, not a per-format tuned limit — large enough to
+/// never affect a real connector response (even a long podcast
+/// enclosure download, the largest legitimate response any connector
+/// fetches through this client) while still bounding a malicious or
+/// misbehaving host's response to *something* short of unbounded
+/// memory growth. Only catches a response that honestly declares its
+/// size via `Content-Length`; see [`dbs_core::HttpError::TooLarge`]'s
+/// doc-comment for that caveat.
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
 /// Applies `[dbs] http_timeout`/`http_rate_limit_per_min` (carried across
 /// the wire in [`WireRunContext`], since the host never makes this
 /// connector's own HTTP calls) to the client every connector's real run
@@ -145,7 +155,7 @@ fn managed_http_client(http_timeout: f64, http_rate_limit_per_min: u32) -> Manag
     let client = builder
         .build()
         .unwrap_or_else(|_| reqwest::blocking::Client::new());
-    let managed = ManagedHttpClient::new(client);
+    let managed = ManagedHttpClient::new(client).max_response_bytes(MAX_RESPONSE_BYTES);
     if http_rate_limit_per_min > 0 {
         managed.rate_limit_per_min(http_rate_limit_per_min)
     } else {

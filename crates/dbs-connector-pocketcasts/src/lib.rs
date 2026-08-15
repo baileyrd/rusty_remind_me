@@ -269,6 +269,9 @@ fn classify_login_error(e: dbs_core::HttpError) -> ConnectorError {
             Some(status) => ConnectorError::Transient(format!("Pocket Casts login error {status}")),
             None => ConnectorError::Transient(error.to_string()),
         },
+        too_large @ dbs_core::HttpError::TooLarge { .. } => {
+            ConnectorError::Transient(too_large.to_string())
+        }
     }
 }
 
@@ -287,6 +290,9 @@ fn classify_api_error(e: dbs_core::HttpError) -> ConnectorError {
             Some(status) => ConnectorError::Transient(format!("Pocket Casts API error {status}")),
             None => ConnectorError::Transient(error.to_string()),
         },
+        too_large @ dbs_core::HttpError::TooLarge { .. } => {
+            ConnectorError::Transient(too_large.to_string())
+        }
     }
 }
 

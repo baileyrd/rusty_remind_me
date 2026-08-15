@@ -188,6 +188,9 @@ fn classify_session_error(e: dbs_core::HttpError) -> ConnectorError {
             }
             None => ConnectorError::Transient(error.to_string()),
         },
+        too_large @ dbs_core::HttpError::TooLarge { .. } => {
+            ConnectorError::Transient(too_large.to_string())
+        }
     }
 }
 
@@ -203,6 +206,9 @@ fn classify_list_error(e: dbs_core::HttpError) -> ConnectorError {
             Some(status) => ConnectorError::Transient(format!("Bluesky API error {status}")),
             None => ConnectorError::Transient(error.to_string()),
         },
+        too_large @ dbs_core::HttpError::TooLarge { .. } => {
+            ConnectorError::Transient(too_large.to_string())
+        }
     }
 }
 
