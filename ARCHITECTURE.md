@@ -59,6 +59,16 @@ without a spawned process.
   - Markdown Wiki compilation (`wiki.rs`).
   - Markdown directory import into the wiki (`wiki_import.rs`) — YAML front
     matter parsing with per-field fallbacks, idempotent upsert on `slug`.
+  - Adapters for the optional features (`pdf_import.rs`, `image_import.rs`,
+    `audio_import.rs`, `cloud_backup.rs`, `ann_index.rs`, `reranker.rs`, and
+    `embedder.rs`'s `onnx_backend`), each behind its own Cargo feature and
+    off by default. They are ~5% of the crate but force all of it to
+    recompile per enabled feature; `docs/adr/0018` records why they stay
+    here anyway, and the triggers that should change that answer.
+  - This crate is by far the largest — roughly six times the next one — and
+    everything else in the workspace depends on it. That concentration is
+    the workspace's main structural liability; `docs/adr/0018` covers what
+    was considered and rejected, including splitting it by domain.
 - **`remind_me_mcp`**: The Model Context Protocol layer handling:
   - Stdio JSON-RPC protocol loop (`initialize`, `tools/list`, `tools/call`).
   - Input payload validation & error formatting.
