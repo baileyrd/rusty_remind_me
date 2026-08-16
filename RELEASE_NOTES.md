@@ -2,6 +2,16 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — CI caches dependencies instead of the whole target directory
+
+### Changed
+- **Every toolchain job in `.github/workflows/ci.yml` swaps `actions/cache` over `target/` for `Swatinem/rust-cache`** — `check`, `combined-features`, `hub`, `windows`, and each of the eight `features` matrix legs. Measured rather than assumed: on run `31951918373`, the `combined-features` job spent **4m49s restoring and 6m59s saving** a cache in order to avoid **5m44s** of compilation — 66% of its wall clock moving a cache that cost more than it saved. `windows` spent 6m40s of 16m42s the same way, and `check`'s restore was a 5-second miss, which is what several multi-GB caches evicting each other against the repository's 10GB cache budget looks like.
+- `Swatinem/rust-cache` caches the registry and *dependency* artifacts only, pruning both the workspace's own crates (rebuilt every run regardless) and stale entries. Far smaller, so far faster, and small enough that the caches here stop fighting each other. Each job keeps a distinct key (`check`, `combined`, `hub`, `windows`, and `feature-<name>` per matrix leg); the action already keys on runner OS, so the Windows job cannot collide with the Linux ones.
+
+### Provenance
+
+One caveat stated rather than glossed: run `31951918373` was a PR that touched `Cargo.lock`, so its primary key missed and it paid restore *and* save. On a lock-untouched PR only the restore is paid — still more than the compilation it saves. One of three changes split out of the original combined PR per `ATLAS-TOOL-0033` (focused pull request scope); the other two are the build-tuning env vars and the optional-feature job matrix.
+
 ## 2026-08-16 — Version corrected to 0.2.0; 0.1.2 was misnumbered under ATLAS-EVS-0030
 
 ### Fixed

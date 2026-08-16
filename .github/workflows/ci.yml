@@ -92,15 +92,26 @@ jobs:
         # a lint the local toolchain did not have (#213).
         run: rustup toolchain install
 
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+      # Swatinem/rust-cache rather than actions/cache over `target/`, measured
+      # rather than assumed: on run 31951918373 the `combined-features` job
+      # spent 4m49s restoring and 6m59s saving a cache to avoid 5m44s of
+      # compilation -- 66% of its wall clock moving a cache that cost more
+      # than it saved. `windows` spent 6m40s of 16m42s the same way, and this
+      # job's own restore was a 5-second miss, which is what several multi-GB
+      # caches evicting each other against the repository's 10GB cache budget
+      # looks like.
+      #
+      # This action caches the registry and *dependency* artifacts only,
+      # pruning the workspace's own crates (rebuilt every run regardless) and
+      # stale entries. Far smaller, so far faster, and small enough that the
+      # caches here stop fighting each other.
+      #
+      # Must run after the toolchain install: the cache key includes the rustc
+      # version, which it reads from the installed toolchain.
+      - name: Cache cargo registry and dependency build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: check
 
       # Formatting first: it is the cheapest gate and needs no compilation.
       - name: cargo fmt --check
@@ -225,15 +236,10 @@ jobs:
       # Keyed per feature: each feature set produces different dependency
       # artifacts, and one shared cache across all eight legs would have them
       # overwriting each other's entries every run.
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+      - name: Cache cargo registry and dependency build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ matrix.feature }}-
+          key: feature-${{ matrix.feature }}
 
       - name: Install system packages this feature needs
         if: matrix.apt
@@ -290,15 +296,10 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+      - name: Cache cargo registry and dependency build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-combined-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-combined-
+          key: combined
 
       - name: cargo build --features ann,ocr,rerank,local-embed,pdf
         run: cargo build -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --locked
@@ -338,15 +339,10 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+      - name: Cache cargo registry and dependency build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-hub-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-hub-
+          key: hub
 
       - name: cargo clippy -p remind_me_hub
         run: cargo clippy -p remind_me_hub --all-targets --locked -- -D warnings
@@ -395,15 +391,12 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+      # `windows` needs no distinct key beyond this: the action already keys on
+      # the runner OS, so it cannot collide with the Linux jobs above.
+      - name: Cache cargo registry and dependency build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: windows
 
       - name: cargo build
         run: cargo build --workspace --locked
