@@ -764,13 +764,33 @@ pub fn api_export(conn: &Connection, _wiki: &Wiki, req: &Request, _params: &Para
 }
 
 // ---------------------------------------------------------------------------
-// Wiki — read-only REST surface (FT-08)
+// Wiki — read paths (FT-08); write paths added below
 // ---------------------------------------------------------------------------
 //
 // The wiki tools are LLM-curated by design (see SCHEMA.md's "you are the
-// disciplined maintainer" framing): Claude can write and browse it, but a
-// human owner has had no way to *see* it outside the MCP tools. This mirrors
-// only the read paths — there is deliberately no POST/PUT/DELETE here.
+// disciplined maintainer" framing): Claude writes and browses it, and these
+// read routes exist so a human owner can *see* it outside the MCP tools.
+//
+// The write paths that follow are a deliberate reversal of this section's
+// original "there is deliberately no POST/PUT/DELETE here", not an oversight
+// of it, and the reasoning is worth stating because the old note was right on
+// its own terms. "LLM-curated" describes who does the *synthesis*, and that has
+// not changed: `Wiki::compile` still returns a brief for a model to act on, and
+// nothing here writes a page's prose on its own. What the read-only posture
+// also did, though, was leave the owner of the vault unable to fix a typo, kill
+// a page a compile pass got wrong, or write a page by hand without opening an
+// MCP client — an editorial veto they plainly should have over their own notes.
+// So the routes below hand over the mechanical operations (write, delete,
+// advance the watermark) and leave the judgment where it was.
+//
+// Containment is structural rather than checked here: every path is
+// `wiki_root/{slug}.md` where the slug comes from `wiki_import::slugify`, which
+// keeps ASCII alphanumerics, turns everything else into `-`, and falls back to
+// `page` when nothing survives. A title cannot therefore contain a separator, a
+// `..`, a leading dot, or an extension, whatever a caller sends. Core refuses
+// the reserved `index`/`log`/`schema` slugs on top of that, since those are
+// generated and a hand-written `index.md` would put the index permanently at
+// odds with the pages it claims to list.
 
 pub fn api_wiki_pages(
     conn: &Connection,
@@ -854,6 +874,202 @@ pub fn api_wiki_page(
     match wiki.read_page(conn, slug) {
         Ok(Some(page)) => ok(page),
         Ok(None) => err(404, format!("Wiki page not found: {:?}", slug)),
+        Err(e) => internal_err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wiki — write paths
+// ---------------------------------------------------------------------------
+
+/// Longest accepted page title and body.
+///
+/// Core enforces neither: `Wiki::write_page` will write whatever it is handed.
+/// These are `remind_me_wiki_write`'s own JSON-schema bounds (`maxLength` 200
+/// and 100000), applied here so the two surfaces accept the same thing. A
+/// bound that exists only on the tool would mean the same page could be
+/// written over HTTP and then rejected as too long over MCP.
+const WIKI_TITLE_MAX: usize = 200;
+const WIKI_CONTENT_MAX: usize = 100_000;
+/// `remind_me_wiki_write`'s `log_note` bound, applied for the same reason.
+const WIKI_LOG_NOTE_MAX: usize = 500;
+
+/// `Wiki::write_page`, shared with `remind_me_wiki_write` — create a page or
+/// replace an existing one's body wholesale.
+///
+/// Title-addressed rather than slug-addressed, mirroring the tool exactly: the
+/// slug *is* `slugify(title)`, so a caller-supplied slug disagreeing with the
+/// title would name a file the index could not find. That also means retitling
+/// a page writes a new one and leaves the old behind, which is core's existing
+/// behaviour for the tool and not something this route invents a rename for.
+///
+/// 200 rather than 201 even when a page is created: the same request updates in
+/// place when the slug already exists, so the status cannot promise creation.
+/// The `created` flag in the body says which happened.
+pub fn api_wiki_write(
+    conn: &Connection,
+    wiki: &Wiki,
+    req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    let body = match json_body(req) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let title = body
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let content = body.get("content").and_then(Value::as_str).unwrap_or("");
+    if title.is_empty() {
+        return err(400, "'title' is required");
+    }
+    if content.trim().is_empty() {
+        return err(400, "'content' is required");
+    }
+    if title.chars().count() > WIKI_TITLE_MAX {
+        return err(
+            400,
+            format!("'title' exceeds the {}-character limit", WIKI_TITLE_MAX),
+        );
+    }
+    if content.chars().count() > WIKI_CONTENT_MAX {
+        return err(
+            400,
+            format!("'content' exceeds the {}-character limit", WIKI_CONTENT_MAX),
+        );
+    }
+    let log_note = body
+        .get("log_note")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    if log_note.is_some_and(|n| n.chars().count() > WIKI_LOG_NOTE_MAX) {
+        return err(
+            400,
+            format!(
+                "'log_note' exceeds the {}-character limit",
+                WIKI_LOG_NOTE_MAX
+            ),
+        );
+    }
+
+    match wiki.write_page(conn, title, content, log_note) {
+        Ok(Ok(outcome)) => ok(outcome),
+        // 403, not 400: the request is well-formed and the page is real, it is
+        // simply not the caller's to write. `index`/`log`/`schema` are
+        // regenerated from the pages themselves.
+        Ok(Err(_)) => err(
+            403,
+            format!(
+                "{:?} is a reserved system page and cannot be written directly",
+                title
+            ),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `Wiki::delete_page`, shared with `remind_me_wiki_delete` — removes the file,
+/// its index rows and its outbound links, then regenerates `index.md`.
+///
+/// A hard delete of a file on disk with no undo, which is why the dashboard
+/// puts a confirmation in front of it. Addressed by title *or* slug, since
+/// `slugify` is idempotent over a slug.
+pub fn api_wiki_delete(
+    conn: &Connection,
+    wiki: &Wiki,
+    _req: &Request,
+    params: &Params,
+) -> (u16, Body) {
+    let slug = &params["slug"];
+    match wiki.delete_page(conn, slug) {
+        Ok(core::WikiDeleteOutcome::Deleted) => ok(json!({ "deleted": slug })),
+        Ok(core::WikiDeleteOutcome::NotFound) => {
+            err(404, format!("Wiki page not found: {:?}", slug))
+        }
+        Ok(core::WikiDeleteOutcome::Reserved) => err(
+            403,
+            format!("{:?} is a reserved system page and cannot be deleted", slug),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `Wiki::compile`, shared with `remind_me_wiki_compile` — the two-phase
+/// synthesis driver.
+///
+/// Phase one (`mark_integrated` absent or false) returns a **brief**: the raw
+/// memories created since the watermark, the current page index and the
+/// maintainer schema, assembled into a prompt. It advances nothing, so it is
+/// safe to call repeatedly. Phase two (`mark_integrated: true`) moves the
+/// watermark past the batch that was surfaced.
+///
+/// Worth being plain about what this route can and cannot do: the brief is
+/// written for a model to act on, and this server has none. The dashboard
+/// therefore shows the pending sources and offers the brief for copying into a
+/// Claude session, rather than pretending a browser can synthesise the pages
+/// itself. The mechanical half — seeing what is pending, and marking a batch
+/// integrated once it has been written up — is genuinely usable from a browser,
+/// and that is the half this exposes.
+///
+/// A `POST` even for phase one, which only reads: phase two mutates, both
+/// phases take a JSON body, and splitting one tool across two methods by an
+/// argument's value would be a shape a caller has to learn rather than read.
+/// The cost is that the brief needs the API key on a server that has one set,
+/// which is the correct side to err on for something that quotes raw memory
+/// content back.
+pub fn api_wiki_compile(
+    conn: &Connection,
+    wiki: &Wiki,
+    req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    // An absent body means "brief me with the defaults", which is the common
+    // call -- so an empty body is not a 400 the way a malformed one is.
+    let body = if req.body.is_empty() {
+        json!({})
+    } else {
+        match json_body(req) {
+            Ok(b) => b,
+            Err(e) => return e,
+        }
+    };
+    let limit = match body.get("limit") {
+        None | Some(Value::Null) => 20,
+        Some(value) => match value.as_u64() {
+            Some(n) => (n as usize).clamp(1, 100),
+            None => return err(400, "'limit' must be a number between 1 and 100"),
+        },
+    };
+    let mark_integrated = match body.get("mark_integrated") {
+        None | Some(Value::Null) => false,
+        Some(value) => match value.as_bool() {
+            Some(b) => b,
+            None => return err(400, "'mark_integrated' must be a boolean"),
+        },
+    };
+
+    match wiki.compile(conn, limit, mark_integrated) {
+        Ok(outcome) => ok(outcome),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `Wiki::read_schema` — the maintainer schema the compile brief embeds.
+///
+/// Read-only, and its own route rather than a field on `/api/wiki/status`: it
+/// is the document that says how pages are supposed to be written, so an
+/// editor wants it next to the editor, not buried in a status payload.
+pub fn api_wiki_schema(
+    _conn: &Connection,
+    wiki: &Wiki,
+    _req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    match wiki.read_schema() {
+        Ok(schema) => ok(json!({ "schema": schema })),
         Err(e) => internal_err(e),
     }
 }
@@ -1277,9 +1493,35 @@ pub const ROUTES: &[Route] = &[
         handler: api_wiki_status,
     },
     Route {
+        methods: &["POST"],
+        pattern: "/api/wiki",
+        handler: api_wiki_write,
+    },
+    // Before `/api/wiki/{slug}`, per this table's stated first-match-wins
+    // convention. Both are four segments, so a page whose title slugs to
+    // `compile` or `schema` shares a path with these -- the same collision
+    // `search`, `load` and `status` have had since they were added, and
+    // resolved the same way: the literal wins for the method it declares, and
+    // `GET /api/wiki/compile` still falls through to the page lookup.
+    Route {
+        methods: &["POST"],
+        pattern: "/api/wiki/compile",
+        handler: api_wiki_compile,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/api/wiki/schema",
+        handler: api_wiki_schema,
+    },
+    Route {
         methods: &["GET"],
         pattern: "/api/wiki/{slug}",
         handler: api_wiki_page,
+    },
+    Route {
+        methods: &["DELETE"],
+        pattern: "/api/wiki/{slug}",
+        handler: api_wiki_delete,
     },
 ];
 

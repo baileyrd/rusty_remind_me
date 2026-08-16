@@ -4,7 +4,7 @@
 //! `allow_methods=["*"]`, `allow_headers=["*"]`) rather than assumed.
 
 mod common;
-use common::{call, call_full, call_with_origin, get, server};
+use common::{authed_json, authed_server, call, call_full, call_with_origin, get, server, KEY};
 
 #[test]
 fn the_dashboard_route_serves_html_embedding_the_vendored_jsx() {
@@ -42,6 +42,8 @@ fn every_command_endpoint_the_dashboard_calls_is_a_real_route() {
         "/memories",
         "/stats",
         "/vitality",
+        "/wiki",
+        "/wiki/schema",
     ] {
         assert!(
             page.contains(&format!("\"{}", path)),
@@ -67,6 +69,57 @@ fn every_command_endpoint_the_dashboard_calls_is_a_real_route() {
         404,
         "404 for the absent search, not for an absent route"
     );
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// As above, for the endpoints the dashboard only ever reaches with a write.
+///
+/// A `GET` cannot stand in for these: an unrouted `/api/*` path answers 401 on
+/// a keyed server and falls through to the page lookup on an unkeyed one, so
+/// neither status would distinguish "routed" from "not routed". Each is
+/// therefore driven with the method it actually uses, against an authenticated
+/// server, and asserted on a response only its own handler produces.
+#[test]
+fn every_wiki_write_endpoint_the_dashboard_calls_is_a_real_route() {
+    let (server, root) = authed_server("dashboard-write-endpoints");
+    let page = get(&server, "/").body;
+
+    for literal in ["\"/wiki\"", "\"/wiki/compile\"", "\"/wiki/\""] {
+        assert!(
+            page.contains(literal),
+            "the dashboard no longer references {}",
+            literal
+        );
+    }
+
+    // POST /api/wiki reaches the write handler: only that handler answers 400
+    // naming the missing field. An absent route would be 405.
+    let write = authed_json(&server, "POST", "/api/wiki", "{}");
+    assert_eq!(write.status, 400);
+    assert!(write.json()["error"].as_str().unwrap().contains("title"));
+
+    // POST /api/wiki/compile reaches the compile handler, which reports a
+    // tagged status no other route produces.
+    let compile = authed_json(&server, "POST", "/api/wiki/compile", "{}");
+    assert_eq!(compile.status, 200);
+    assert!(compile.json()["status"].is_string());
+
+    // DELETE /api/wiki/{slug} reaches the delete handler: 404 for the absent
+    // page, which is the handler's own answer rather than the router's.
+    let delete = call(
+        &server,
+        "DELETE",
+        "/api/wiki/nothing-written-here",
+        Some(&format!("Bearer {}", KEY)),
+        Some("application/json"),
+        "",
+    );
+    assert_eq!(delete.status, 404);
+    assert!(delete.json()["error"]
+        .as_str()
+        .unwrap()
+        .contains("Wiki page not found"));
 
     std::fs::remove_dir_all(&root).unwrap();
 }

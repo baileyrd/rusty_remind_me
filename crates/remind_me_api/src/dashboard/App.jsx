@@ -183,9 +183,41 @@ function useWikiStore() {
     } catch (e) { console.error("wiki search:", e); return []; }
   }, []);
 
+  // Create or replace a page. The slug is derived from the title server-side,
+  // so retitling writes a new page rather than renaming one -- core's own
+  // behaviour for remind_me_wiki_write, surfaced here rather than papered over.
+  const write = useCallback(async (title, content, logNote) => {
+    const outcome = await api("/wiki", { method: "POST", body: { title, content, log_note: logNote || undefined } });
+    if (!outcome.error) {
+      await refresh();
+      await openPage(outcome.slug);
+    }
+    return outcome;
+  }, [refresh, openPage]);
+
+  const remove = useCallback(async (slug) => {
+    const result = await api("/wiki/" + encodeURIComponent(slug), { method: "DELETE" });
+    if (!result.error) { setCurrent(null); await refresh(); }
+    return result;
+  }, [refresh]);
+
+  // Phase one with no arguments, phase two with mark_integrated -- the same
+  // two-call shape remind_me_wiki_compile has, kept rather than smoothed over,
+  // because the gap between them is where the pages actually get written.
+  const compile = useCallback(async (markIntegrated) => {
+    const outcome = await api("/wiki/compile", { method: "POST", body: markIntegrated ? { mark_integrated: true } : {} });
+    if (markIntegrated && !outcome.error) await refresh();
+    return outcome;
+  }, [refresh]);
+
+  const readSchema = useCallback(async () => {
+    const data = await api("/wiki/schema");
+    return data.error ? "" : (data.schema || "");
+  }, []);
+
   useEffect(() => { refresh(); }, [refresh]);
 
-  return { pages, status, current, setCurrent, loading, refresh, openPage, search };
+  return { pages, status, current, setCurrent, loading, refresh, openPage, search, write, remove, compile, readSchema };
 }
 
 function useEntityStore() {
@@ -699,6 +731,154 @@ function ReminderForm({memory, onSubmit, onCancel}) {
   );
 }
 
+// The dashboard's remind_me_wiki_write.
+//
+// `initial` null means a new page; otherwise the page being edited, whose
+// title is shown but left editable — retitling writes a new page and leaves
+// the old one, so the form says so rather than letting it be discovered.
+function WikiPageForm({initial, onSubmit, onLoadSchema, onCancel}) {
+  const [title, setTitle] = useState(initial?.title || "");
+  const [content, setContent] = useState(initial?.content || "");
+  const [logNote, setLogNote] = useState("");
+  const [schema, setSchema] = useState("");
+  const [showSchema, setShowSchema] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const retitled = !!initial && title.trim() !== initial.title;
+
+  const handleSubmit = async () => {
+    if (!title.trim() || !content.trim()) { setError("A title and a body are both required."); return; }
+    setBusy(true); setError(null);
+    let outcome;
+    try { outcome = await onSubmit(title.trim(), content, logNote.trim()); }
+    catch (e) { setBusy(false); setError("Request failed: " + e.message); return; }
+    setBusy(false);
+    if (outcome && outcome.error) { setError(outcome.error); return; }
+    onCancel();
+  };
+
+  // Fetched on first reveal rather than on mount: most edits never open it,
+  // and it is a file read on the server side.
+  const loadSchema = async () => {
+    if (!showSchema && !schema) setSchema(await onLoadSchema());
+    setShowSchema(!showSchema);
+  };
+
+  return React.createElement("div", {style:{display:"flex",flexDirection:"column",gap:16}},
+    React.createElement("div", null,
+      React.createElement("label",{style:labelSt},"Title"),
+      React.createElement("input",{value:title,onChange:e=>setTitle(e.target.value),maxLength:200,placeholder:"VLAN Setup",style:inputSt,
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}}),
+      React.createElement("div",{style:{fontSize:11,color:theme.textMuted,fontFamily:mono,marginTop:4}},"The title's slug is the page's identity — keep it stable so [[wikilinks]] resolve.")
+    ),
+    retitled && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.warningSubtle,border:"1px solid "+theme.warning+"40",color:theme.warning,fontSize:12,fontFamily:mono,lineHeight:1.5}},
+      "Saving under a new title writes a new page. “"+initial.title+"” will still be there, and [[links]] to it keep pointing at the old one — delete it yourself if that is what you meant."
+    ),
+    React.createElement("div", null,
+      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline"}},
+        React.createElement("label",{style:labelSt},"Body (markdown)"),
+        React.createElement("button",{onClick:loadSchema,style:{background:"none",border:"none",color:theme.accent,fontSize:11,fontFamily:mono,cursor:"pointer",padding:0,marginBottom:6}}, showSchema?"Hide schema":"Maintainer schema")
+      ),
+      showSchema && React.createElement("pre",{style:{margin:"0 0 8px",padding:"10px 12px",borderRadius:6,background:theme.bg,border:"1px solid "+theme.border,color:theme.textSecondary,fontSize:11,fontFamily:mono,whiteSpace:"pre-wrap",maxHeight:180,overflowY:"auto"}}, schema || "Loading…"),
+      React.createElement("textarea",{value:content,onChange:e=>setContent(e.target.value),rows:14,maxLength:100000,
+        placeholder:"Open with a one-sentence summary; it becomes the index entry.\n\nDistil, don't paste. Cross-link with [[Other Page]].",
+        style:{...inputSt,resize:"vertical",fontFamily:mono,fontSize:13,lineHeight:1.6},
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}}),
+      React.createElement("div",{style:{fontSize:11,color:theme.textMuted,fontFamily:mono,marginTop:4}},
+        content.length.toLocaleString()+" / 100,000 characters · a leading “# Title” is added if absent · saving replaces the whole body")
+    ),
+    React.createElement("div", null,
+      React.createElement("label",{style:labelSt},"Log note (optional)"),
+      React.createElement("input",{value:logNote,onChange:e=>setLogNote(e.target.value),maxLength:500,placeholder:"Recorded in log.md alongside the change",style:inputSt,
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}})
+    ),
+    error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono}}, error),
+    React.createElement("div", {style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}},
+      React.createElement("button",{onClick:onCancel,style:{padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}},"Cancel"),
+      React.createElement("button",{onClick:handleSubmit,disabled:busy||!title.trim()||!content.trim(),style:{padding:"8px 20px",borderRadius:6,border:"none",background:(busy||!title.trim()||!content.trim())?theme.surfaceActive:theme.accent,color:(busy||!title.trim()||!content.trim())?theme.textMuted:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:busy?"wait":"pointer",display:"flex",alignItems:"center",gap:6}},
+        busy && React.createElement(Icons.Loader),
+        initial ? "Save page" : "Create page"
+      )
+    )
+  );
+}
+
+// The dashboard's remind_me_wiki_compile, and the one place this UI is
+// deliberately a relay rather than an actor.
+//
+// Phase one returns a brief: the raw memories since the watermark, the current
+// page index and the maintainer schema, assembled into a prompt. Synthesising
+// pages from it is a judgment call and this page has no model to make one, so
+// the honest affordance is "here is what is pending, copy it to Claude" plus
+// the mechanical half — marking the batch integrated once the pages exist.
+// Pretending a Compile button could write the pages would be the lie.
+function WikiCompilePanel({onCompile, onClose}) {
+  const [outcome, setOutcome] = useState(null);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [confirmIntegrate, setConfirmIntegrate] = useState(false);
+
+  const run = useCallback(async (markIntegrated) => {
+    setBusy(true); setError(null);
+    let result;
+    try { result = await onCompile(markIntegrated); }
+    catch (e) { setBusy(false); setError("Request failed: " + e.message); return; }
+    setBusy(false);
+    if (result && result.error) { setError(result.error); return; }
+    setOutcome(result);
+    setConfirmIntegrate(false);
+  }, [onCompile]);
+
+  useEffect(() => { run(false); }, [run]);
+
+  const copy = () => {
+    navigator.clipboard.writeText(outcome.brief);
+    setCopied(true);
+    setTimeout(()=>setCopied(false), 1500);
+  };
+
+  if (busy && !outcome) {
+    return React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,color:theme.textSecondary,fontFamily:mono,fontSize:13,padding:"12px 0"}},
+      React.createElement(Icons.Loader), " Gathering pending memories…");
+  }
+
+  return React.createElement("div", {style:{display:"flex",flexDirection:"column",gap:16}},
+    error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono}}, error),
+
+    outcome && outcome.status === "noop" && React.createElement("div",{style:{fontSize:13,fontFamily:sans,color:theme.textSecondary,lineHeight:1.6}},
+      "Nothing pending — every raw memory is already integrated into the wiki."
+    ),
+
+    outcome && outcome.status === "integrated" && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.successSubtle,border:"1px solid "+theme.success+"40",color:theme.success,fontSize:13,fontFamily:mono,lineHeight:1.5}},
+      "✓ Marked "+outcome.sources_marked+" source"+(outcome.sources_marked===1?"":"s")+" integrated. The watermark moved to "+(outcome.watermark||"").slice(0,19)+"."
+    ),
+
+    outcome && outcome.status === "brief" && React.createElement(React.Fragment,null,
+      React.createElement("div",{style:{fontSize:13,fontFamily:sans,color:theme.textSecondary,lineHeight:1.6}},
+        React.createElement("b",{style:{color:theme.text}}, outcome.pending+" raw "+(outcome.pending===1?"memory":"memories")),
+        " to synthesise. The brief below is written for Claude, not for this page — copy it into a session, let it write the pages with ",
+        React.createElement("code",{style:{fontFamily:mono,fontSize:12,color:theme.text}},"remind_me_wiki_write"),
+        " (or write them here yourself), then come back and mark the batch integrated."
+      ),
+      React.createElement("pre",{style:{margin:0,padding:"12px 14px",borderRadius:6,background:theme.bg,border:"1px solid "+theme.border,color:theme.textSecondary,fontSize:11,fontFamily:mono,whiteSpace:"pre-wrap",wordBreak:"break-word",maxHeight:300,overflowY:"auto"}}, outcome.brief),
+      confirmIntegrate && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.warningSubtle,border:"1px solid "+theme.warning+"40",color:theme.warning,fontSize:12,fontFamily:mono,lineHeight:1.5}},
+        "Only if the pages are written. Marking integrated moves the watermark past these "+outcome.pending+" — they will not appear in a future brief, written up or not."
+      )
+    ),
+
+    React.createElement("div", {style:{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap",marginTop:8}},
+      React.createElement("button",{onClick:onClose,style:{padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}},"Close"),
+      outcome && outcome.status === "brief" && React.createElement("button",{onClick:copy,style:{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}},
+        copied ? React.createElement(Icons.Check) : React.createElement(Icons.Copy), copied ? "Copied" : "Copy brief"),
+      outcome && outcome.status === "brief" && React.createElement("button",{onClick:()=>confirmIntegrate?run(true):setConfirmIntegrate(true),disabled:busy,
+        style:{padding:"8px 20px",borderRadius:6,border:"none",background:busy?theme.surfaceActive:(confirmIntegrate?theme.warning:theme.accent),color:busy?theme.textMuted:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:busy?"wait":"pointer",display:"flex",alignItems:"center",gap:6}},
+        busy && React.createElement(Icons.Loader),
+        confirmIntegrate ? "Yes, mark integrated" : "Mark integrated")
+    )
+  );
+}
+
 // The dashboard's remind_me_save_search. Prefilled from whatever the Browse
 // view is currently filtered to, since "save this search" means the one on
 // screen — retyping the query that is already in the box would be the whole
@@ -929,6 +1109,10 @@ function App() {
   const [savedSearchRun, setSavedSearchRun] = useState(null); // {name, query, count, results}
   const [runningSearch, setRunningSearch] = useState("");
   const [digestDays, setDigestDays] = useState(7);
+  // null when closed; {page: null} for a new page, {page: <the page>} to edit.
+  const [wikiEdit, setWikiEdit] = useState(null);
+  const [wikiDeleteConfirm, setWikiDeleteConfirm] = useState(null);
+  const [showCompile, setShowCompile] = useState(false);
   const searchRef = useRef(null);
   const debounceRef = useRef(null);
   const wikiDebounceRef = useRef(null);
@@ -979,6 +1163,11 @@ function App() {
     const outcome = await reminderStore.set(remindMemory.id, remindAt);
     if (outcome.outcome === "set" || outcome.outcome === "cleared") store.refresh();
     return outcome;
+  };
+  const handleWikiWrite = async (title, content, logNote) => wikiStore.write(title, content, logNote);
+  const handleWikiDelete = async slug => {
+    await wikiStore.remove(slug);
+    setWikiDeleteConfirm(null);
   };
   const handleSaveSearch = async input => savedSearchStore.save(input);
   const handleRunSavedSearch = async name => {
@@ -1079,8 +1268,18 @@ function App() {
           React.createElement("div",{style:{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:theme.textMuted}}, React.createElement(Icons.Search)),
           React.createElement("input",{value:wikiQuery,onChange:e=>setWikiQuery(e.target.value),placeholder:"Search wiki…",style:{...inputSt,paddingLeft:32,fontSize:13,padding:"7px 10px 7px 32px"}})
         ),
-        wikiStore.status.pending_compile>0 && React.createElement("div",{style:{padding:"6px 10px",borderRadius:5,background:theme.warningSubtle,color:theme.warning,fontSize:11,fontFamily:mono,marginBottom:14}},
-          wikiStore.status.pending_compile+" raw "+(wikiStore.status.pending_compile===1?"memory":"memories")+" not yet compiled"
+        React.createElement("button",{onClick:()=>setWikiEdit({page:null}),
+          style:{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",padding:"8px 12px",minHeight:40,borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:12,fontFamily:mono,cursor:"pointer",marginBottom:12},
+          onMouseEnter:e=>{e.currentTarget.style.borderColor=theme.accent;e.currentTarget.style.color=theme.text},
+          onMouseLeave:e=>{e.currentTarget.style.borderColor=theme.border;e.currentTarget.style.color=theme.textSecondary}},
+          React.createElement(Icons.Plus), " New page"),
+        // The badge became a button: it was already the only place the count
+        // appeared, and "N memories not yet compiled" with nothing to press
+        // was a notification about a job you had to leave the page to start.
+        wikiStore.status.pending_compile>0 && React.createElement("button",{onClick:()=>setShowCompile(true),
+          style:{display:"block",width:"100%",textAlign:"left",padding:"8px 10px",borderRadius:5,border:"1px solid "+theme.warning+"40",background:theme.warningSubtle,color:theme.warning,fontSize:11,fontFamily:mono,cursor:"pointer",marginBottom:14,lineHeight:1.5}},
+          wikiStore.status.pending_compile+" raw "+(wikiStore.status.pending_compile===1?"memory":"memories")+" not yet compiled",
+          React.createElement("span",{style:{display:"block",opacity:0.75,marginTop:2}},"Compile →")
         ),
         React.createElement("div",{style:{...labelSt,marginBottom:10}}, (wikiSearchResults?wikiSearchResults.length:wikiStore.pages.length)+" page(s)"),
         React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:2}},
@@ -1149,9 +1348,13 @@ function App() {
         view==="wiki" ?
         // Wiki view
         (wikiStore.current ? React.createElement("div",null,
-          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}},
+          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}},
             React.createElement("span",{style:{fontSize:11,color:theme.textMuted,fontFamily:mono}}, "Updated "+(wikiStore.current.updated_at||"").replace("T"," ").slice(0,16)),
-            React.createElement("button",{onClick:()=>wikiStore.setCurrent(null),style:{background:"none",border:"none",color:theme.textSecondary,fontSize:12,fontFamily:mono,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}, React.createElement(Icons.X), " Close")
+            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:4}},
+              React.createElement("button",{onClick:()=>setWikiEdit({page:wikiStore.current}),title:"Edit page",style:iconBtn}, React.createElement(Icons.Edit)),
+              React.createElement("button",{onClick:()=>setWikiDeleteConfirm(wikiStore.current),title:"Delete page",style:{...iconBtn,color:theme.danger}}, React.createElement(Icons.Trash)),
+              React.createElement("button",{onClick:()=>wikiStore.setCurrent(null),style:{background:"none",border:"none",color:theme.textSecondary,fontSize:12,fontFamily:mono,cursor:"pointer",display:"flex",alignItems:"center",gap:4,padding:"0 6px"}}, React.createElement(Icons.X), " Close")
+            )
           ),
           React.createElement("div",{style:{background:theme.surface,border:"1px solid "+theme.border,borderRadius:8,padding:"20px 24px"}},
             React.createElement(WikiPageBody,{content:wikiStore.current.content, onNavigate:handleWikiNavigate}),
@@ -1161,7 +1364,11 @@ function App() {
         ) : React.createElement("div",{style:{textAlign:"center",padding:"80px 20px",color:theme.textMuted}},
           React.createElement("div",{style:{color:theme.textMuted,marginBottom:12,display:"flex",justifyContent:"center"}}, React.createElement(Icons.Book)),
           React.createElement("div",{style:{fontSize:15,marginBottom:6}}, wikiStore.pages.length===0 ? "The wiki is empty" : "Select a page"),
-          React.createElement("div",{style:{fontSize:13}}, wikiStore.pages.length===0 ? "Ask Claude to run remind_me_wiki_compile to synthesise one from your memories." : "Pick a page from the list on the left.")
+          React.createElement("div",{style:{fontSize:13,marginBottom:16}}, wikiStore.pages.length===0 ? "Compile one from your memories, or write the first page by hand." : "Pick a page from the list on the left."),
+          wikiStore.pages.length===0 && React.createElement("div",{style:{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}},
+            React.createElement("button",{onClick:()=>setShowCompile(true),style:{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",minHeight:40,borderRadius:6,border:"none",background:theme.accent,color:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:"pointer"}}, React.createElement(Icons.Play), " Compile"),
+            React.createElement("button",{onClick:()=>setWikiEdit({page:null}),style:{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",minHeight:40,borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}}, React.createElement(Icons.Plus), " New page")
+          )
         )) :
         view==="entities" ?
         // Entity detail view
@@ -1413,6 +1620,23 @@ function App() {
     ),
     React.createElement(Modal,{open:!!editMemory,onClose:()=>setEditMemory(null),title:"Edit Memory",width:520},
       editMemory && React.createElement(MemoryForm,{initial:editMemory,onSubmit:handleEdit,onCancel:()=>setEditMemory(null)})
+    ),
+    React.createElement(Modal,{open:!!wikiEdit,onClose:()=>setWikiEdit(null),title:wikiEdit&&wikiEdit.page?"Edit Wiki Page":"New Wiki Page",width:720},
+      wikiEdit && React.createElement(WikiPageForm,{initial:wikiEdit.page,onSubmit:handleWikiWrite,onLoadSchema:wikiStore.readSchema,onCancel:()=>setWikiEdit(null)})
+    ),
+    React.createElement(Modal,{open:showCompile,onClose:()=>setShowCompile(false),title:"Compile the Wiki",width:720},
+      showCompile && React.createElement(WikiCompilePanel,{onCompile:wikiStore.compile,onClose:()=>setShowCompile(false)})
+    ),
+    React.createElement(Modal,{open:!!wikiDeleteConfirm,onClose:()=>setWikiDeleteConfirm(null),title:"Delete Wiki Page",width:420},
+      wikiDeleteConfirm && React.createElement(React.Fragment,null,
+        React.createElement("p",{style:{color:theme.textSecondary,fontFamily:sans,fontSize:14,lineHeight:1.6}},
+          "Permanently delete ", React.createElement("b",{style:{color:theme.text}}, wikiDeleteConfirm.title),
+          "? The markdown file is removed from disk and the index regenerated. Memories are untouched, but [[links]] to this page will dangle. This cannot be undone."),
+        React.createElement("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:20}},
+          React.createElement("button",{onClick:()=>setWikiDeleteConfirm(null),style:{padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}},"Cancel"),
+          React.createElement("button",{onClick:()=>handleWikiDelete(wikiDeleteConfirm.slug),style:{padding:"8px 20px",borderRadius:6,border:"none",background:theme.danger,color:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:"pointer"}},"Delete")
+        )
+      )
     ),
     React.createElement(Modal,{open:!!remindMemory,onClose:()=>setRemindMemory(null),title:remindMemory&&remindMemory.remind_at?"Change Reminder":"Set Reminder",width:480},
       remindMemory && React.createElement(ReminderForm,{memory:remindMemory,onSubmit:handleSetReminder,onCancel:()=>setRemindMemory(null)})
