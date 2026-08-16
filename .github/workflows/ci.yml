@@ -84,23 +84,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ~10 sequential feature-gated build/test/clippy invocations below
-      # (cloud-backup's AWS SDK, ann's usearch C++ build, rerank/local-embed's
-      # rten+tokenizers, ...) plus this job's own restored cargo cache now
-      # exceed the runner's disk partway through -- observed as both a plain
-      # ENOSPC during the `ann` step's linking and, further down, a SIGBUS on
-      # an unrelated test binary's link (see the `local-embed` step's comment
-      # for that one; it already dodges the linker rather than the disk).
-      # `ubuntu-latest` ships tens of GB of preinstalled tooling this
-      # workspace never touches -- removing it up front buys headroom without
-      # dropping test coverage or restructuring the cache, unlike that
-      # `local-embed` workaround.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          df -h /
-
       - name: Install the pinned Rust toolchain
         # rust-toolchain.toml is the source of truth for the compiler and its
         # components, so CI and a developer's machine lint identically. Before
@@ -133,124 +116,138 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # Optional features are off by default, so the steps above never compile
-      # them. Without this, a feature could rot untested and only break for
-      # whoever actually enabled it.
-      - name: cargo test --features pdf
-        run: cargo test -p remind_me_core --features pdf --locked
+  # Optional features are off by default, so `check` above never compiles
+  # them. Without this, a feature could rot untested and only break for
+  # whoever actually enabled it.
+  #
+  # One runner per feature, in parallel, rather than the ~10 sequential steps
+  # this used to be inside `check`. The work is identical; only the wall clock
+  # changes -- from the sum of every feature's build to the slowest single one
+  # (`ann`, whose usearch C++ build dominates).
+  #
+  # This is also what removed `check`'s "Free disk space" step and its three
+  # `cargo clean` steps. All four existed because consecutive feature steps
+  # relinked every integration test binary in remind_me_core/remind_me_hub
+  # against a new feature set, and the accumulated dead binaries exhausted the
+  # runner's disk mid-link -- an ENOSPC during `ann`'s link, and an `ld` SIGBUS
+  # during `local-embed`'s. One feature per runner means nothing accumulates,
+  # so there is nothing to reclaim. If `check` ever hits ENOSPC again,
+  # restoring a disk-freeing step there is the fix: it was dropped because its
+  # cause moved, not because runners grew.
+  #
+  # `test` and `clippy` are per-feature flags rather than both running
+  # everywhere, preserving exactly what each feature was verified with before.
+  # That mapping is deliberate and load-bearing:
+  #
+  #   - `ocr`/`audio` are clippy-only because neither can do its actual job
+  #     without a model, and downloading one in CI is precisely the implicit
+  #     fetch these features are required never to perform. Everything that
+  #     *is* checkable without a model -- the feature-off refusals, the
+  #     model-configuration errors, the audio decode/resample arithmetic --
+  #     runs unconditionally in `check`.
+  #   - `ann` runs its tests because the equivalence check (that narrowing
+  #     never drops a row brute force would rank) is the whole reason the
+  #     feature is safe to enable, and it has to actually run somewhere.
+  #   - `rerank` runs its tests because they assert something a build check
+  #     cannot: that compiling the reranker in does *not* turn a search into a
+  #     model download, and that a configured-but-unloadable model still
+  #     degrades to RRF order.
+  #   - `stack-dumps` runs its tests because the feature's entire claim is that
+  #     a thread wedged in CPU-bound code still gets dumped. Only running it can
+  #     show that; a compile check would pass against a build that dumps
+  #     nothing.
+  #   - `local-embed` is clippy-only for a reason that no longer applies: per
+  #     the step comment this replaces, it was *not* because it needs a model
+  #     (it does not -- onnx_embedder_test.rs covers the graceful-degradation
+  #     paths with synthetic files) but because `cargo test` relinking every
+  #     integration test binary against rten/tokenizers exhausted the shared
+  #     runner's disk mid-link. A dedicated runner removes that constraint, so
+  #     this could become `test: true` and gain real coverage. Left as-is on
+  #     purpose: this change is about how long CI takes, and quietly widening
+  #     what is verified inside it would make a speed change and a coverage
+  #     change indistinguishable in the history.
+  features:
+    name: feature ${{ matrix.feature }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One feature failing should not cancel the others: which *set* of
+      # features broke is the useful signal, and fail-fast reports one.
+      fail-fast: false
+      matrix:
+        include:
+          - feature: pdf
+            test: true
+            clippy: true
+          - feature: cloud-backup
+            # The AWS SDK is a large tree, but `put_object`'s
+            # request-construction logic (bucket/key, the custom-endpoint
+            # override, region, and the SDK-error-to-string mapping) is
+            # exercised here too, not just by clippy: none of it needs a
+            # network call or a live S3-compatible server, only a client-side
+            # `SdkError` and the pure `plan_put_object` helper.
+            test: true
+            clippy: true
+          - feature: ann
+            test: true
+            clippy: false
+          - feature: ocr
+            test: false
+            clippy: true
+          - feature: audio
+            test: false
+            clippy: true
+          - feature: rerank
+            test: true
+            clippy: false
+          - feature: local-embed
+            test: false
+            clippy: true
+          - feature: stack-dumps
+            test: true
+            clippy: true
+            # The cost this feature carries and no other one here does:
+            # `rstack-self` links libunwind's ptrace API, a *system* library.
+            #
+            # liblzma-dev is not optional, and its absence is not obvious.
+            # libunwind-ptrace.so carries undefined lzma_* references; whether
+            # they resolve depends on whether the local libunwind.so happens to
+            # declare DT_NEEDED on liblzma, which differs between builds.
+            # remind_me_core's build.rs asks for -llzma explicitly so it never
+            # depends on that accident -- which means the dev package has to be
+            # here. See docs/adr/0014.
+            apt: libunwind-dev liblzma-dev
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: cargo clippy --features pdf
-        run: cargo clippy -p remind_me_core --features pdf --all-targets --locked -- -D warnings
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
-      # The AWS SDK is a large tree, but `put_object`'s request-construction
-      # logic (bucket/key, the custom-endpoint override, region, and the
-      # SDK-error-to-string mapping) is exercised here too, not just by
-      # clippy: none of it needs a network call or a live S3-compatible
-      # server, only a client-side `SdkError` and the pure `plan_put_object`
-      # helper. The plaintext gate that actually matters most is a pure
-      # function of the environment and is covered unconditionally by the
-      # default-feature test run above regardless of this feature.
-      - name: cargo test --features cloud-backup
-        run: cargo test -p remind_me_core --features cloud-backup --locked
+      # Keyed per feature: each feature set produces different dependency
+      # artifacts, and one shared cache across all eight legs would have them
+      # overwriting each other's entries every run.
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.feature }}-
 
-      - name: cargo clippy --features cloud-backup
-        run: cargo clippy -p remind_me_core --features cloud-backup --all-targets --locked -- -D warnings
+      - name: Install system packages this feature needs
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
 
-      # Each `cargo test` step above relinks every integration test binary in
-      # remind_me_core/remind_me_hub against that step's own feature set, and
-      # none of those binaries are reused by a later step -- they just sit in
-      # target/debug/deps taking up space. Freeing the runner's preinstalled
-      # tooling (above) wasn't enough headroom on its own to reach the end of
-      # this job; reclaiming the previous steps' now-dead test binaries here
-      # is what actually buys the room the next `cargo test` step needs.
-      # `cargo clean -p` drops incremental state too, so the next build from
-      # here recompiles from scratch -- slower, but correctness over speed.
-      - name: Reclaim disk before the next full test-and-link step
-        run: cargo clean -p remind_me_core -p remind_me_hub
+      - name: cargo test --features ${{ matrix.feature }}
+        if: matrix.test
+        run: cargo test -p remind_me_core --features ${{ matrix.feature }} --locked
 
-      # usearch builds a C++ library from source (~5 min), so this runs the
-      # tests rather than only clippy: the equivalence check — that narrowing
-      # never drops a row brute force would rank — is the whole reason the
-      # feature is safe to enable, and it has to actually run somewhere.
-      - name: cargo test --features ann
-        run: cargo test -p remind_me_core --features ann --locked
+      - name: cargo clippy --features ${{ matrix.feature }}
+        if: matrix.clippy
+        run: cargo clippy -p remind_me_core --features ${{ matrix.feature }} --all-targets --locked -- -D warnings
 
-      # OCR and transcription are build+clippy checks rather than test runs:
-      # neither can do its actual job without a model, and downloading one in
-      # CI is precisely the implicit fetch these features are required never
-      # to perform. Everything that *is* checkable without a model — the
-      # feature-off refusals, the model-configuration errors, and the audio
-      # decode/resample arithmetic — runs unconditionally in the default test
-      # run above, so this step is only proving the feature-on code compiles.
-      - name: cargo clippy --features ocr
-        run: cargo clippy -p remind_me_core --features ocr --all-targets --locked -- -D warnings
-
-      - name: cargo clippy --features audio
-        run: cargo clippy -p remind_me_core --features audio --all-targets --locked -- -D warnings
-
-      # Same reclaim as before the `ann` step, and for the same reason: this
-      # is the next full `cargo test` (as opposed to clippy-only) step, and
-      # relinking against `rten`/`tokenizers` on top of `ann`'s leftover
-      # `usearch`-linked binaries is what pushed this job over the runner's
-      # disk (`ld` SIGBUS on an unrelated test binary, not a real code fault).
-      - name: Reclaim disk before the next full test-and-link step
-        run: cargo clean -p remind_me_core -p remind_me_hub
-
-      # This one runs the tests rather than only clippy, unlike ocr/audio
-      # above. The difference is that its feature-on tests assert something a
-      # build check cannot: that compiling the reranker in does *not* turn a
-      # search into a model download, and that a configured-but-unloadable
-      # model still degrades to RRF order. Both are cheap — rten and
-      # tokenizers are pure Rust and the tests need no model.
-      - name: cargo test --features rerank
-        run: cargo test -p remind_me_core --features rerank --locked
-
-      # Unlike `rerank`, this is a build+clippy check rather than a test
-      # run, like `ocr`/`audio` above — not because it needs a model (it
-      # does not; `onnx_embedder_test.rs` covers the graceful-degradation
-      # paths with synthetic files, the same way `reranker_test.rs` does),
-      # but because `cargo test` relinks every integration test binary in
-      # the crate against `rten`/`tokenizers`, and by this point in the job
-      # that exhausted the runner's disk mid-link (`ld` SIGBUS on an
-      # unrelated test binary, not a real code fault — see the fix commit
-      # for a run that failed this way). Clippy's analysis pass never
-      # invokes the linker, so it is unaffected.
-      - name: cargo clippy --features local-embed
-        run: cargo clippy -p remind_me_core --features local-embed --all-targets --locked -- -D warnings
-
-      # Same reclaim as before `ann`/`rerank`. `local-embed` just above is
-      # clippy-only (no linking), but `ocr`/`audio` before it still compiled
-      # `rten`/`tokenizers`/`whisper-rs` object files that never got linked
-      # into a binary and are otherwise still sitting in target/debug.
-      - name: Reclaim disk before the next full test-and-link step
-        run: cargo clean -p remind_me_core -p remind_me_hub
-
-      # Like `rerank` above, this runs the tests rather than only clippy, and
-      # for a stronger reason: the feature's entire claim is that a thread
-      # wedged in CPU-bound code still gets dumped. Only running it can show
-      # that. A compile check would pass against a build that dumps nothing.
-      #
-      # The `apt-get` is the cost this feature carries and no other one here
-      # does -- `rstack-self` links libunwind's ptrace API, a *system* library.
-      # It is installed in this step rather than a global one so the expense
-      # lands on the job that actually needs it, and so its absence keeps
-      # breaking any future step that forgets it.
-      # liblzma-dev is not optional here, and its absence is not obvious.
-      # libunwind-ptrace.so carries undefined lzma_* references; whether they
-      # resolve depends on whether the local libunwind.so happens to declare
-      # DT_NEEDED on liblzma, which differs between builds. remind_me_core's
-      # build.rs asks for -llzma explicitly so it never depends on that
-      # accident -- which means the dev package has to be here.
-      - name: Install libunwind and liblzma (stack-dumps needs both)
-        run: sudo apt-get update && sudo apt-get install -y libunwind-dev liblzma-dev
-
-      - name: cargo test --features stack-dumps
-        run: cargo test -p remind_me_core --features stack-dumps --locked
-
-      - name: cargo clippy --features stack-dumps
-        run: cargo clippy -p remind_me_core --features stack-dumps --all-targets --locked -- -D warnings
-
-  # Every step above enables exactly one optional feature at a time, so a
+  # Every leg above enables exactly one optional feature at a time, so a
   # regression that only shows up when several are compiled *together* has
   # nothing here to catch it (#279). That gap matters most for `ocr`,
   # `rerank`, and `local-embed`: per their comments in
