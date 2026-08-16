@@ -2,6 +2,23 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — Two decisions taken during this release are written down as ADRs
+
+### Added
+- **`docs/adr/0018`: the optional features stay inside `remind_me_core`, for now.** The CI work raised a question its fix did not answer — whether the crate layout was itself part of why CI was slow — and the analysis was done and then never recorded, which is a decision taken by omission. The answer is to leave them, because the 30m20s turned out to be cache-action overhead, incremental-compilation artifacts nothing read, and full debug info, all now fixed with the longest pole at ~10m30s. Filed with four expiry triggers rather than as a permanent excuse.
+- **`docs/adr/0019`: the wiki became writable over HTTP.** Retroactive, and says so. #328 added `POST /api/wiki`, `DELETE /api/wiki/{slug}` and `POST /api/wiki/compile`, reversing a `routes.rs` note that said "there is deliberately no POST/PUT/DELETE here". The reasoning went into the module docs and this file but never into an ADR, so the decision lived only inside the change that made it. The distinction it records: "LLM-curated" describes who does the *synthesis*, which has not changed, and the read-only posture was incidentally withholding an editorial veto the vault's owner should have over their own notes.
+
+### Changed
+- **`ARCHITECTURE.md`'s route inventory is no longer a stale path list.** It enumerated routes predating #327 and #328, so it omitted reminders, the digest, subsystem status, saved searches and every wiki write route. Replaced with a list of families: the paragraph already declared `routes.rs`'s `ROUTES` table authoritative and said it would not duplicate it, then duplicated it anyway, which is how the two drifted apart. A family list conveys the same breadth and survives a route joining an existing group.
+- **`ARCHITECTURE.md` gains the optional-adapter list** and names the concentration in `remind_me_core` — 6.3× the next-largest crate — as the workspace's main structural liability, both pointing at `0018`.
+
+### A figure corrected rather than quietly improved
+An earlier pass put the feature-gated share of `remind_me_core` at 7.5%. It is **5.4%** (1,919 of 35,415 lines); the old number counted all 941 lines of `embedder.rs` as optional when only the 148-line `onnx_backend` module is gated. The correction makes the imbalance sharper, not softer — that 5.4% forces the other 94.6% to recompile on each of the eight feature legs.
+
+### Provenance
+
+Every figure in `0018` was re-derived against the tree rather than carried over: `wc -l` per crate `src`, the seven gated module spans, and `grep -E "^use (crate|super)"` per module for the coupling claim — which is what established that five of the six standalone modules have no intra-crate imports at all. `0019`'s claims were read out of `slugify`, `RESERVED_SLUGS`, the `WIKI_*_MAX` constants and `remind_me_api`'s auth dispatch rather than recalled. The route families were checked exhaustively against all 33 distinct paths in the `ROUTES` table. Documentation only — no code, tests or CI touched.
+
 ## 2026-08-16 — The dashboard's single 1,664-line file is split into seven
 
 ### Changed

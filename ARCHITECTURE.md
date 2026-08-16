@@ -59,6 +59,16 @@ without a spawned process.
   - Markdown Wiki compilation (`wiki.rs`).
   - Markdown directory import into the wiki (`wiki_import.rs`) — YAML front
     matter parsing with per-field fallbacks, idempotent upsert on `slug`.
+  - Adapters for the optional features (`pdf_import.rs`, `image_import.rs`,
+    `audio_import.rs`, `cloud_backup.rs`, `ann_index.rs`, `reranker.rs`, and
+    `embedder.rs`'s `onnx_backend`), each behind its own Cargo feature and
+    off by default. They are ~5% of the crate but force all of it to
+    recompile per enabled feature; `docs/adr/0018` records why they stay
+    here anyway, and the triggers that should change that answer.
+  - This crate is by far the largest — roughly six times the next one — and
+    everything else in the workspace depends on it. That concentration is
+    the workspace's main structural liability; `docs/adr/0018` covers what
+    was considered and rejected, including splitting it by domain.
 - **`remind_me_mcp`**: The Model Context Protocol layer handling:
   - Stdio JSON-RPC protocol loop (`initialize`, `tools/list`, `tools/call`).
   - Input payload validation & error formatting.
@@ -67,13 +77,23 @@ without a spawned process.
     framework, not even `tokio` (matches this workspace's tenet 2: the
     project's aspirational `rusty_http` dependency was never real; see
     above).
-  - Routes span far beyond `/health`; `crates/remind_me_api/src/routes.rs`'s
-    `ROUTES` table (`/api/memories`, `/api/memories/search`,
-    `/api/memories/bulk/*`, `/api/entity*`, `/api/wiki*`, `/api/import`,
-    `/api/export`, `/api/stats`, `/api/vitality`, `/api/versions`,
-    `/api/analytics/trend`, `/metrics`, `/manifest.json`, `/`) is the
-    current, authoritative route inventory — this document does not
-    duplicate it for the same reason §5 stopped duplicating the schema DDL.
+  - Routes span far beyond `/health`. `crates/remind_me_api/src/routes.rs`'s
+    `ROUTES` table is the current, authoritative route inventory — this
+    document does not duplicate it for the same reason §5 stopped duplicating
+    the schema DDL. What the table covers, by family rather than by route:
+    memories (CRUD, search, bulk operations), entities and graph traversal,
+    the wiki (read, search, load, write, delete, compile, schema, status),
+    reminders, saved searches, the daily digest, subsystem status, memory
+    version history, stats/vitality/analytics-trend reporting, import/export,
+    and the health/metrics/manifest/dashboard endpoints.
+  - The write surface is wider than memories, which is why the families are
+    worth naming here at all: the wiki, reminders and saved searches are all
+    mutable over HTTP. Every mutating method (`POST`/`PUT`/`PATCH`/`DELETE`)
+    is refused with 401 while `REMIND_ME_API_KEY` is unset, so growing that
+    surface never defaults open. `crates/remind_me_api/src/lib.rs`'s module
+    doc is the authoritative statement of the auth posture — including what
+    happens once a key *is* set, the `/health` carve-out, and read-scoped
+    keys — and is not restated here.
 - **`remind_me_cli`**: The unified CLI binary executable (`rusty-remind-me`) handling command line flags and subcommand dispatch (`server`, `api`, `remote`, `configure`, `add`, `search`, `get`, `entity`, `wiki-write`, `wiki-read`, `wiki-import`, `stats`).
 - **`remind_me_remote`**: The Streamable HTTP MCP connector, on `tokio` + `axum` + `rmcp` (the one place this workspace takes on that async stack — every other crate stays synchronous, a deliberate boundary; see `crates/remind_me_remote/src/lib.rs`'s module doc):
   - Secret-path/bearer auth (FT-05) and, when an issuer is configured, a hand-rolled OAuth 2.1 authorization server (FT-07, `docs/adr/0011`).
