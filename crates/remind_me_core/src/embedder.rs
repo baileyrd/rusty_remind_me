@@ -664,6 +664,10 @@ const AVAILABILITY_SUCCESS_TTL: Duration = Duration::from_secs(60);
 const AVAILABILITY_FAILURE_TTL: Duration = Duration::from_secs(30);
 
 struct AvailabilityCache {
+    /// Which configuration this verdict was reached about — see
+    /// [`config_fingerprint`]. A cached verdict only applies while the
+    /// configuration it was probed under is still the configuration in force.
+    fingerprint: String,
     available: bool,
     expires_at: Instant,
 }
@@ -672,6 +676,40 @@ static AVAILABILITY: OnceLock<Mutex<Option<AvailabilityCache>>> = OnceLock::new(
 
 fn availability_cell() -> &'static Mutex<Option<AvailabilityCache>> {
     AVAILABILITY.get_or_init(|| Mutex::new(None))
+}
+
+/// Every environment variable [`resolve_embedder`] reads, joined into one
+/// value that changes whenever the resolved embedder would.
+///
+/// This exists because [`available_embedder`]'s cache is keyed on it, and
+/// that is what keeps `resolve_embedder`'s documented promise — "a
+/// configuration change takes effect on the next search rather than requiring
+/// a restart" — true of the *availability-gated* resolver too. Without it a
+/// verdict reached about one backend answered for a different one: point the
+/// URL at a daemon that is actually up, and `remind_me_server_status` would
+/// keep reporting "configured but not answering" for the rest of
+/// [`AVAILABILITY_FAILURE_TTL`], because nothing invalidated the failure the
+/// old address earned.
+///
+/// The list must stay in step with `resolve_embedder`. A variable it reads
+/// but this omits is a variable you can change without the cache noticing —
+/// which is the bug this function exists to close, reintroduced quietly.
+fn config_fingerprint() -> String {
+    [
+        EMBEDDING_BACKEND_ENV,
+        EMBEDDING_DIM_ENV,
+        OLLAMA_URL_ENV,
+        OLLAMA_MODEL_ENV,
+        ONNX_MODEL_PATH_ENV,
+        ONNX_TOKENIZER_PATH_ENV,
+    ]
+    .iter()
+    // A unit separator rather than a comma or a space: it cannot occur in a
+    // URL or a filesystem path, so no two distinct configurations can join
+    // into the same string.
+    .map(|key| std::env::var(key).unwrap_or_default())
+    .collect::<Vec<_>>()
+    .join("\u{1f}")
 }
 
 /// Build the configured embedder, or `None` when nothing is configured.
@@ -715,14 +753,22 @@ pub fn resolve_embedder() -> Option<Box<dyn Embedder>> {
 /// A failed probe is cached for [`AVAILABILITY_FAILURE_TTL`] and a
 /// successful one for [`AVAILABILITY_SUCCESS_TTL`], so neither an
 /// unreachable daemon nor a reachable one is re-probed on every search.
+///
+/// The cache is keyed on [`config_fingerprint`], so a verdict expires either
+/// when its TTL runs out **or** when the configuration it was reached about
+/// changes — whichever happens first. Time alone was not enough: a verdict
+/// about one daemon has nothing to say about a different one, and treating it
+/// as though it did made a corrected configuration look broken for up to
+/// thirty seconds after it started working.
 pub fn available_embedder() -> Option<Box<dyn Embedder>> {
     let embedder = resolve_embedder()?;
+    let fingerprint = config_fingerprint();
 
     let cache = availability_cell();
     {
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = guard.as_ref() {
-            if Instant::now() < entry.expires_at {
+            if entry.fingerprint == fingerprint && Instant::now() < entry.expires_at {
                 return entry.available.then_some(embedder);
             }
         }
@@ -733,6 +779,7 @@ pub fn available_embedder() -> Option<Box<dyn Embedder>> {
         .is_ok();
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(AvailabilityCache {
+        fingerprint,
         available: ok,
         expires_at: Instant::now()
             + if ok {
