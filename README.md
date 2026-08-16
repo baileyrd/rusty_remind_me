@@ -634,7 +634,23 @@ surfaces):
 | `GET` | `/api/export` | Export memories |
 | `GET` | `/api/entity`, `/api/entities`, `/api/entity/traverse` | Knowledge-graph entity endpoints |
 | `GET` | `/api/wiki`, `/api/wiki/search`, `/api/wiki/load`, `/api/wiki/status`, `/api/wiki/{slug}` | Markdown wiki endpoints |
+| `GET` | `/api/reminders?when=upcoming\|overdue\|all&limit=...` | Memories with a reminder set, soonest first (`remind_me_list_reminders`) |
+| `POST` | `/api/reminders` | Set or clear a reminder — `{"memory_id": ..., "remind_at": ISO-8601 or null}` (`remind_me_set_reminder`) |
+| `GET` | `/api/digest?since_days=...` | Recent memories, vitality, reminders and sync state (`remind_me_digest`) |
+| `GET` | `/api/status` | Build, database, schema currency, backups and subsystem state (`remind_me_server_status`) |
+| `GET` | `/api/saved-searches` | List saved searches (`remind_me_list_saved_searches`) |
+| `POST` | `/api/saved-searches` | Create or update one by name (`remind_me_save_search`) |
+| `GET` | `/api/saved-searches/{name}/run` | Re-run a saved search's stored query and filters (`remind_me_run_saved_search`) |
+| `DELETE` | `/api/saved-searches/{name}` | Delete one, with its watch-tracking rows (`remind_me_delete_saved_search`) |
 | `GET` | `/metrics`, `/manifest.json`, `/` | Metrics, PWA manifest, and the dashboard itself |
+
+Each of the reminder, digest, status and saved-search routes calls the same
+`remind_me_core` function its MCP tool does, so a reminder set from the
+dashboard and one set by Claude are the same row, validated the same way. The
+dashboard drives all of them: a clock button on every memory card, a
+**Reminders** view with the upcoming/overdue/all windows, a **Searches** view
+that runs and deletes saved searches, and a digest/server-status panel at the
+bottom of **Stats**.
 
 ---
 

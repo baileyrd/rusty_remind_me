@@ -224,6 +224,109 @@ function useEntityStore() {
   return { entities, total, current, setCurrent, related, loading, refresh, openEntity };
 }
 
+// Reminders — the dashboard half of remind_me_set_reminder /
+// remind_me_list_reminders. Both go through GET/POST /api/reminders, which
+// call the same core functions the MCP tools do, so a reminder set here and
+// one set by Claude are the same row validated the same way.
+//
+// `when` lives in the store rather than in the view because the badge in the
+// header needs the overdue count no matter which window is on screen: an
+// overdue reminder is one nothing was running to deliver, and it should be
+// visible from any view rather than only from the one filtered to it.
+function useReminderStore() {
+  const [reminders, setReminders] = useState([]);
+  const [when, setWhen] = useState("upcoming");
+  const [overdueCount, setOverdueCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async (window_) => {
+    setLoading(true);
+    try {
+      const data = await api("/reminders?when=" + encodeURIComponent(window_) + "&limit=100");
+      if (data.error) { setError(data.error); } else { setError(null); setReminders(data.memories || []); }
+    } catch (e) { setError("Could not load reminders: " + e.message); }
+    try {
+      const overdue = await api("/reminders?when=overdue&limit=100");
+      setOverdueCount((overdue.memories || []).length);
+    } catch (e) { /* the badge is not worth an error banner of its own */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { refresh(when); }, [when, refresh]);
+
+  // Returns the raw SetReminderOutcome so a caller can tell "rejected because
+  // the timestamp is in the past" from "no such memory" — the reason is the
+  // useful part, and collapsing both to a boolean would throw it away.
+  const set = useCallback(async (memoryId, remindAt) => {
+    const outcome = await api("/reminders", { method: "POST", body: { memory_id: memoryId, remind_at: remindAt || null } });
+    if (outcome.outcome === "set" || outcome.outcome === "cleared") await refresh(when);
+    return outcome;
+  }, [refresh, when]);
+
+  return { reminders, when, setWhen, overdueCount, loading, error, refresh, set };
+}
+
+// Saved searches — remind_me_save_search / list / run / delete over
+// GET/POST /api/saved-searches and /api/saved-searches/{name}[/run].
+function useSavedSearchStore() {
+  const [searches, setSearches] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api("/saved-searches");
+      if (data.error) { setError(data.error); } else { setError(null); setSearches(data.saved_searches || []); }
+    } catch (e) { setError("Could not load saved searches: " + e.message); }
+    setLoading(false);
+  }, []);
+
+  const save = useCallback(async (input) => {
+    const saved = await api("/saved-searches", { method: "POST", body: input });
+    if (!saved.error) await refresh();
+    return saved;
+  }, [refresh]);
+
+  const run = useCallback(async (name) => api("/saved-searches/" + encodeURIComponent(name) + "/run"), []);
+
+  const remove = useCallback(async (name) => {
+    const result = await api("/saved-searches/" + encodeURIComponent(name), { method: "DELETE" });
+    if (!result.error) await refresh();
+    return result;
+  }, [refresh]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return { searches, loading, error, refresh, save, run, remove };
+}
+
+// remind_me_digest and remind_me_server_status. Unlike every other store
+// here, this one does *not* load on mount: a digest builds a vitality report
+// and a sync status on every call, and paying for that on a page load nobody
+// asked it of is the wrong default for a panel most visits never open. It
+// runs when the Stats view asks it to.
+function useOpsStore() {
+  const [digest, setDigest] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState(null);
+
+  const run = useCallback(async (sinceDays) => {
+    setRunning(true); setError(null);
+    try {
+      const d = await api("/digest?since_days=" + sinceDays);
+      if (d.error) setError(d.error); else setDigest(d);
+      const s = await api("/status");
+      if (!s.error) setStatus(s);
+    } catch (e) { setError("Could not run the digest: " + e.message); }
+    setRunning(false);
+  }, []);
+
+  return { digest, status, running, error, run };
+}
+
 // --- Icons ---
 const Icons = {
   Search: () => React.createElement("svg", {width:16,height:16,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round"}, React.createElement("circle",{cx:11,cy:11,r:8}), React.createElement("path",{d:"m21 21-4.35-4.35"})),
@@ -241,6 +344,9 @@ const Icons = {
   Book: () => React.createElement("svg", {width:16,height:16,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round"}, React.createElement("path",{d:"M4 19.5A2.5 2.5 0 0 1 6.5 17H20"}), React.createElement("path",{d:"M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"})),
   Link: () => React.createElement("svg", {width:12,height:12,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round"}, React.createElement("path",{d:"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"}), React.createElement("path",{d:"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"})),
   Loader: () => React.createElement("svg", {width:16,height:16,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round",style:{animation:"spin 1s linear infinite"}}, React.createElement("path",{d:"M21 12a9 9 0 1 1-6.219-8.56"})),
+  Clock: () => React.createElement("svg", {width:14,height:14,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round"}, React.createElement("circle",{cx:12,cy:12,r:9}), React.createElement("path",{d:"M12 7v5l3 2"})),
+  Bookmark: () => React.createElement("svg", {width:16,height:16,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinecap:"round"}, React.createElement("path",{d:"M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"})),
+  Play: () => React.createElement("svg", {width:14,height:14,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2,strokeLinejoin:"round"}, React.createElement("path",{d:"M6 4l14 8-14 8z"})),
 };
 
 // minWidth/minHeight (rather than just padding) give icon-only buttons a
@@ -264,7 +370,36 @@ function TagPill({tag, onClick, removable, onRemove}) {
   );
 }
 
-function MemoryCard({memory:m, onEdit, onDelete, onTagClick, expanded, onToggle}) {
+// --- Reminder timestamp helpers ---
+// The API speaks RFC 3339 in UTC throughout; a human reads local time. These
+// three are the only places that conversion happens, so a reminder shown as
+// "3pm" is the same instant the one typed as "3pm" was stored as.
+
+/// Whether an RFC 3339 timestamp has already passed. An unparseable value is
+/// treated as not past, so a bad string renders as a plain reminder rather
+/// than as a false alarm.
+function isPast(iso) {
+  const t = Date.parse(iso);
+  return !isNaN(t) && t <= Date.now();
+}
+
+function formatWhen(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+}
+
+/// An RFC 3339 timestamp as `<input type="datetime-local">` wants it:
+/// `YYYY-MM-DDTHH:MM`, in the browser's own zone and with no suffix.
+function toLocalInputValue(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = n => String(n).padStart(2, "0");
+  return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes());
+}
+
+function MemoryCard({memory:m, onEdit, onDelete, onTagClick, onRemind, expanded, onToggle}) {
   const [copied, setCopied] = useState(false);
   const handleCopy = () => { navigator.clipboard.writeText(m.content); setCopied(true); setTimeout(()=>setCopied(false),1500); };
   const isLong = m.content.length > 200;
@@ -283,6 +418,7 @@ function MemoryCard({memory:m, onEdit, onDelete, onTagClick, expanded, onToggle}
       ),
       React.createElement("div", {style:{display:"flex",gap:4}},
         React.createElement("button", {onClick:handleCopy,title:"Copy",style:iconBtn}, copied ? React.createElement(Icons.Check) : React.createElement(Icons.Copy)),
+        onRemind && React.createElement("button", {onClick:()=>onRemind(m),title:m.remind_at?"Change reminder":"Set reminder",style:{...iconBtn,color:m.remind_at?theme.warning:theme.textSecondary}}, React.createElement(Icons.Clock)),
         React.createElement("button", {onClick:()=>onEdit(m),title:"Edit",style:iconBtn}, React.createElement(Icons.Edit)),
         React.createElement("button", {onClick:()=>onDelete(m.id),title:"Delete",style:{...iconBtn,color:theme.danger}}, React.createElement(Icons.Trash))
       )
@@ -295,6 +431,17 @@ function MemoryCard({memory:m, onEdit, onDelete, onTagClick, expanded, onToggle}
       (m.tags||[]).map(t => React.createElement(TagPill, {key:t, tag:t, onClick:()=>onTagClick(t)}))
     ),
     meta.length > 0 && React.createElement("div",{style:{marginTop:6,fontSize:11,color:theme.textMuted,fontFamily:mono}}, meta.map(([k,v])=>k+": "+v).join(" \u00b7 ")),
+    // A set reminder is stated on the card rather than only in the Reminders
+    // view: "this memory will resurface" is a property of the memory, and a
+    // card that hid it would make an already-scheduled reminder look unset.
+    //
+    // "Due" rather than "Overdue" for a past timestamp: whether a due reminder
+    // was actually delivered is recorded server-side, and only the `overdue`
+    // window can answer it. A card holding one memory row cannot, so it says
+    // what it knows.
+    m.remind_at && React.createElement("div",{style:{marginTop:8,display:"inline-flex",alignItems:"center",gap:5,padding:"2px 8px",borderRadius:4,fontSize:11,fontFamily:mono,background:isPast(m.remind_at)?theme.dangerSubtle:theme.warningSubtle,color:isPast(m.remind_at)?theme.danger:theme.warning}},
+      React.createElement(Icons.Clock), (isPast(m.remind_at)?"Due ":"Reminder ")+formatWhen(m.remind_at)
+    ),
     React.createElement("div", {style:{marginTop:8,fontSize:11,color:theme.textMuted,fontFamily:mono}},
       new Date(m.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}),
       m.updated_at !== m.created_at ? " \u00b7 edited "+new Date(m.updated_at).toLocaleDateString("en-US",{month:"short",day:"numeric"}) : ""
@@ -494,6 +641,145 @@ function MemoryForm({initial, onSubmit, onCancel}) {
   );
 }
 
+// The dashboard's remind_me_set_reminder. Submits a UTC RFC 3339 instant
+// converted from whatever the browser's date picker collected locally, and
+// renders the server's own rejection reason rather than a generic failure:
+// "must be in the future" and "no such memory" want different fixes.
+function ReminderForm({memory, onSubmit, onCancel}) {
+  const [value, setValue] = useState(toLocalInputValue(memory.remind_at));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async (remindAt) => {
+    setBusy(true); setError(null);
+    let outcome;
+    try { outcome = await onSubmit(remindAt); }
+    catch (e) { setBusy(false); setError("Request failed: " + e.message); return; }
+    setBusy(false);
+    if (!outcome) { setError("No response from the server."); return; }
+    if (outcome.outcome === "rejected") { setError(outcome.reason || "The server refused that timestamp."); return; }
+    if (outcome.outcome === "not_found") { setError("That memory no longer exists."); return; }
+    if (outcome.error) { setError(outcome.error); return; }
+    onCancel();
+  };
+
+  const handleSet = () => {
+    if (!value) { setError("Pick a date and time first."); return; }
+    const at = new Date(value);
+    if (isNaN(at.getTime())) { setError("That is not a valid date and time."); return; }
+    submit(at.toISOString());
+  };
+
+  const preview = memory.content.length > 140 ? memory.content.slice(0,140) + "…" : memory.content;
+
+  return React.createElement("div", {style:{display:"flex",flexDirection:"column",gap:16}},
+    React.createElement("div",{style:{fontFamily:sans,fontSize:13,lineHeight:1.6,color:theme.textSecondary,padding:"10px 12px",background:theme.bg,border:"1px solid "+theme.border,borderRadius:6}}, preview),
+    memory.remind_at && React.createElement("div",{style:{fontSize:12,fontFamily:mono,color:isPast(memory.remind_at)?theme.danger:theme.warning}},
+      (isPast(memory.remind_at)?"Currently due ":"Currently set for ")+formatWhen(memory.remind_at)
+    ),
+    React.createElement("div", null,
+      React.createElement("label",{style:labelSt},"Remind me at"),
+      React.createElement("input",{type:"datetime-local",value:value,onChange:e=>setValue(e.target.value),
+        // The server refuses a past timestamp outright, so the picker steers
+        // away from one rather than letting the round trip do the teaching.
+        min:toLocalInputValue(new Date().toISOString()),
+        style:{...inputSt,fontFamily:mono},
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}}),
+      React.createElement("div",{style:{fontSize:11,color:theme.textMuted,fontFamily:mono,marginTop:4}},"Your local time; stored as UTC.")
+    ),
+    error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono}}, error),
+    React.createElement("div", {style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8,flexWrap:"wrap"}},
+      React.createElement("button",{onClick:onCancel,style:{padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}},"Cancel"),
+      memory.remind_at && React.createElement("button",{onClick:()=>submit(null),disabled:busy,style:{padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.danger+"40",background:"transparent",color:theme.danger,fontSize:13,fontFamily:mono,cursor:busy?"wait":"pointer"}},"Clear reminder"),
+      React.createElement("button",{onClick:handleSet,disabled:busy,style:{padding:"8px 20px",borderRadius:6,border:"none",background:busy?theme.surfaceActive:theme.accent,color:busy?theme.textMuted:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:busy?"wait":"pointer",display:"flex",alignItems:"center",gap:6}},
+        busy && React.createElement(Icons.Loader),
+        memory.remind_at ? "Update" : "Set reminder"
+      )
+    )
+  );
+}
+
+// The dashboard's remind_me_save_search. Prefilled from whatever the Browse
+// view is currently filtered to, since "save this search" means the one on
+// screen — retyping the query that is already in the box would be the whole
+// feature undone.
+function SaveSearchForm({initial, onSubmit, onCancel}) {
+  const [name, setName] = useState("");
+  const [query, setQuery] = useState(initial?.query || "");
+  const [category, setCategory] = useState(initial?.category || "");
+  const [tags, setTags] = useState(initial?.tags || []);
+  const [tagInput, setTagInput] = useState("");
+  const [watch, setWatch] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleTagKey = e => {
+    if ((e.key==="Enter"||e.key===",") && tagInput.trim()) {
+      e.preventDefault();
+      const t = tagInput.trim().toLowerCase().replace(/,/g,"");
+      if (t && !tags.includes(t)) setTags([...tags, t]);
+      setTagInput("");
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!name.trim() || !query.trim()) { setError("A name and a query are both required."); return; }
+    setBusy(true); setError(null);
+    let saved;
+    try {
+      saved = await onSubmit({
+        name: name.trim(),
+        query: query.trim(),
+        category: category.trim() || null,
+        tags: tags.length ? tags : null,
+        watch,
+      });
+    } catch (e) { setBusy(false); setError("Request failed: " + e.message); return; }
+    setBusy(false);
+    if (saved && saved.error) { setError(saved.error); return; }
+    onCancel();
+  };
+
+  return React.createElement("div", {style:{display:"flex",flexDirection:"column",gap:16}},
+    React.createElement("div", null,
+      React.createElement("label",{style:labelSt},"Name"),
+      React.createElement("input",{value:name,onChange:e=>setName(e.target.value),placeholder:"open questions",style:inputSt,
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}}),
+      React.createElement("div",{style:{fontSize:11,color:theme.textMuted,fontFamily:mono,marginTop:4}},"Saving under a name that already exists replaces it.")
+    ),
+    React.createElement("div", null,
+      React.createElement("label",{style:labelSt},"Query"),
+      React.createElement("input",{value:query,onChange:e=>setQuery(e.target.value),style:inputSt,
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}})
+    ),
+    React.createElement("div", null,
+      React.createElement("label",{style:labelSt},"Category filter (optional)"),
+      React.createElement("input",{value:category,onChange:e=>setCategory(e.target.value),placeholder:"any",style:inputSt,
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}})
+    ),
+    React.createElement("div", null,
+      React.createElement("label",{style:labelSt},"Tag filter (a match must have all of them)"),
+      tags.length>0 && React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8}},
+        tags.map(t => React.createElement(TagPill,{key:t,tag:t,removable:true,onRemove:()=>setTags(tags.filter(x=>x!==t))}))
+      ),
+      React.createElement("input",{value:tagInput,onChange:e=>setTagInput(e.target.value),onKeyDown:handleTagKey,placeholder:"Type a tag and press Enter…",style:inputSt,
+        onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}})
+    ),
+    React.createElement("label", {style:{display:"flex",alignItems:"center",gap:8,fontSize:13,fontFamily:sans,color:theme.textSecondary,cursor:"pointer"}},
+      React.createElement("input",{type:"checkbox",checked:watch,onChange:e=>setWatch(e.target.checked)}),
+      "Watch — report matches that have not been seen before. Does not narrow what running it returns."
+    ),
+    error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono}}, error),
+    React.createElement("div", {style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}},
+      React.createElement("button",{onClick:onCancel,style:{padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}},"Cancel"),
+      React.createElement("button",{onClick:handleSubmit,disabled:busy||!name.trim()||!query.trim(),style:{padding:"8px 20px",borderRadius:6,border:"none",background:(busy||!name.trim()||!query.trim())?theme.surfaceActive:theme.accent,color:(busy||!name.trim()||!query.trim())?theme.textMuted:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:busy?"wait":"pointer",display:"flex",alignItems:"center",gap:6}},
+        busy && React.createElement(Icons.Loader),
+        "Save search"
+      )
+    )
+  );
+}
+
 function ImportForm({onComplete, onCancel}) {
   const [filePath, setFilePath] = useState("");
   const [directory, setDirectory] = useState("");
@@ -619,6 +905,9 @@ function App() {
   const { version: serverVersion, hubVersion } = useServerVersion();
   const wikiStore = useWikiStore();
   const entityStore = useEntityStore();
+  const reminderStore = useReminderStore();
+  const savedSearchStore = useSavedSearchStore();
+  const ops = useOpsStore();
   const [view, setView] = useState("browse");
   const [searchQuery, setSearchQuery] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
@@ -631,6 +920,15 @@ function App() {
   const [wikiQuery, setWikiQuery] = useState("");
   const [wikiSearchResults, setWikiSearchResults] = useState(null);
   const [entityQuery, setEntityQuery] = useState("");
+  const [remindMemory, setRemindMemory] = useState(null);
+  // null when closed; otherwise the {query, category, tags} the form opens
+  // prefilled with -- Browse passes what is on screen, the Searches view
+  // passes a blank set.
+  const [showSaveSearch, setShowSaveSearch] = useState(null);
+  const [deleteSearchConfirm, setDeleteSearchConfirm] = useState(null);
+  const [savedSearchRun, setSavedSearchRun] = useState(null); // {name, query, count, results}
+  const [runningSearch, setRunningSearch] = useState("");
+  const [digestDays, setDigestDays] = useState(7);
   const searchRef = useRef(null);
   const debounceRef = useRef(null);
   const wikiDebounceRef = useRef(null);
@@ -673,6 +971,27 @@ function App() {
   const handleTagClick = tag => { if (!filterTags.includes(tag)) setFilterTags([...filterTags, tag]); };
   const handleWikiNavigate = slug => { wikiStore.openPage(slug); setWikiQuery(""); setWikiSearchResults(null); };
   const handleEntityNavigate = name => { entityStore.openEntity(name); setEntityQuery(""); };
+
+  // Setting a reminder changes the memory's own row, so the browse list is
+  // refreshed alongside the reminder list -- otherwise a card would keep
+  // showing the old badge until something else happened to reload it.
+  const handleSetReminder = async (remindAt) => {
+    const outcome = await reminderStore.set(remindMemory.id, remindAt);
+    if (outcome.outcome === "set" || outcome.outcome === "cleared") store.refresh();
+    return outcome;
+  };
+  const handleSaveSearch = async input => savedSearchStore.save(input);
+  const handleRunSavedSearch = async name => {
+    setRunningSearch(name);
+    const result = await savedSearchStore.run(name);
+    setRunningSearch("");
+    setSavedSearchRun(result && result.error ? { name, error: result.error } : result);
+  };
+  const handleDeleteSavedSearch = async name => {
+    await savedSearchStore.remove(name);
+    setDeleteSearchConfirm(null);
+    if (savedSearchRun && savedSearchRun.name === name) setSavedSearchRun(null);
+  };
 
   const stats = store.stats;
   const vitality = store.vitality;
@@ -723,8 +1042,13 @@ function App() {
       React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}},
         store.loading && React.createElement("span",{style:{color:theme.textMuted}}, React.createElement(Icons.Loader)),
         React.createElement("div",{style:{display:"flex",background:theme.surface,borderRadius:6,border:"1px solid "+theme.border,overflow:"hidden"}},
-          [["browse","Browse"],["stats","Stats"],["wiki","Wiki"],["entities","Entities"]].map(([v,l])=>React.createElement("button",{key:v,onClick:()=>setView(v),style:{padding:"10px 14px",minHeight:40,border:"none",fontSize:12,fontFamily:mono,fontWeight:500,cursor:"pointer",background:view===v?theme.accent:"transparent",color:view===v?"#fff":theme.textSecondary,transition:"all 0.15s"}},
-            l, v==="wiki" && wikiStore.status.pending_compile>0 && React.createElement("span",{style:{marginLeft:6,padding:"1px 6px",borderRadius:8,background:view===v?"rgba(255,255,255,0.25)":theme.warningSubtle,color:view===v?"#fff":theme.warning,fontSize:10,fontWeight:700}}, wikiStore.status.pending_compile)
+          [["browse","Browse"],["stats","Stats"],["wiki","Wiki"],["entities","Entities"],["reminders","Reminders"],["searches","Searches"]].map(([v,l])=>React.createElement("button",{key:v,onClick:()=>setView(v),style:{padding:"10px 14px",minHeight:40,border:"none",fontSize:12,fontFamily:mono,fontWeight:500,cursor:"pointer",background:view===v?theme.accent:"transparent",color:view===v?"#fff":theme.textSecondary,transition:"all 0.15s"}},
+            l,
+            v==="wiki" && wikiStore.status.pending_compile>0 && React.createElement("span",{style:{marginLeft:6,padding:"1px 6px",borderRadius:8,background:view===v?"rgba(255,255,255,0.25)":theme.warningSubtle,color:view===v?"#fff":theme.warning,fontSize:10,fontWeight:700}}, wikiStore.status.pending_compile),
+            // Overdue means a reminder came due with nothing running to
+            // deliver it, so it is worth surfacing from every view rather
+            // than only from the one already filtered to it.
+            v==="reminders" && reminderStore.overdueCount>0 && React.createElement("span",{style:{marginLeft:6,padding:"1px 6px",borderRadius:8,background:view===v?"rgba(255,255,255,0.25)":theme.dangerSubtle,color:view===v?"#fff":theme.danger,fontSize:10,fontWeight:700}}, reminderStore.overdueCount)
           ))
         ),
         React.createElement("button",{onClick:()=>setShowImportModal(true),style:{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",minHeight:40,borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontWeight:500,fontFamily:mono,cursor:"pointer",transition:"all 0.15s"},onMouseEnter:e=>{e.currentTarget.style.borderColor=theme.accent;e.currentTarget.style.color=theme.text},onMouseLeave:e=>{e.currentTarget.style.borderColor=theme.border;e.currentTarget.style.color=theme.textSecondary}}, React.createElement(Icons.Upload), " Import"),
@@ -793,9 +1117,17 @@ function App() {
       React.createElement("main",{style:{flex:1,padding:"20px 24px",minWidth:0}},
         view==="browse" ? React.createElement(React.Fragment,null,
           // Search
-          React.createElement("div",{style:{position:"relative",marginBottom:16}},
-            React.createElement("div",{style:{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:theme.textMuted}}, React.createElement(Icons.Search)),
-            React.createElement("input",{ref:searchRef,value:searchQuery,onChange:e=>setSearchQuery(e.target.value),placeholder:"Search memories\u2026 (\u2318K)",style:{...inputSt,paddingLeft:36,background:theme.surface,fontSize:15},onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}})
+          React.createElement("div",{style:{display:"flex",gap:8,alignItems:"stretch",marginBottom:16,flexWrap:"wrap"}},
+            React.createElement("div",{style:{position:"relative",flex:"1 1 240px",minWidth:0}},
+              React.createElement("div",{style:{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:theme.textMuted}}, React.createElement(Icons.Search)),
+              React.createElement("input",{ref:searchRef,value:searchQuery,onChange:e=>setSearchQuery(e.target.value),placeholder:"Search memories\u2026 (\u2318K)",style:{...inputSt,paddingLeft:36,background:theme.surface,fontSize:15},onFocus:e=>{e.target.style.borderColor=theme.borderFocus},onBlur:e=>{e.target.style.borderColor=theme.border}})
+            ),
+            // Disabled with an empty box rather than hidden: a control that
+            // vanishes is one a reader has to rediscover, and there is
+            // nothing to save until something has been typed.
+            React.createElement("button",{onClick:()=>setShowSaveSearch({query:searchQuery,category:filterCategory,tags:filterTags}),disabled:!searchQuery.trim(),title:searchQuery.trim()?"Save this query and its filters":"Type a query first",
+              style:{display:"flex",alignItems:"center",gap:6,padding:"0 14px",minHeight:44,borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:searchQuery.trim()?theme.textSecondary:theme.textMuted,fontSize:13,fontFamily:mono,cursor:searchQuery.trim()?"pointer":"not-allowed",flexShrink:0}},
+              React.createElement(Icons.Bookmark), " Save search")
           ),
           // Active tag filters
           filterTags.length>0 && React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:12,flexWrap:"wrap"}},
@@ -806,7 +1138,7 @@ function App() {
           React.createElement("div",{style:{fontSize:12,color:theme.textMuted,fontFamily:mono,marginBottom:12}}, store.memories.length+" "+(store.memories.length===1?"memory":"memories")+(searchQuery||filterCategory||filterTags.length?" matching filters":"")),
           // Cards
           React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10}},
-            store.memories.map(m=>React.createElement(MemoryCard,{key:m.id,memory:m,onEdit:setEditMemory,onDelete:setDeleteConfirm,onTagClick:handleTagClick,expanded:expandedIds.has(m.id),onToggle:()=>toggleExpand(m.id)})),
+            store.memories.map(m=>React.createElement(MemoryCard,{key:m.id,memory:m,onEdit:setEditMemory,onDelete:setDeleteConfirm,onTagClick:handleTagClick,onRemind:setRemindMemory,expanded:expandedIds.has(m.id),onToggle:()=>toggleExpand(m.id)})),
             store.memories.length===0 && !store.loading && React.createElement("div",{style:{textAlign:"center",padding:"60px 20px",color:theme.textMuted}},
               React.createElement("div",{style:{fontSize:40,marginBottom:12}},"\u2205"),
               React.createElement("div",{style:{fontSize:15,marginBottom:6}},"No memories found"),
@@ -871,6 +1203,86 @@ function App() {
           React.createElement("div",{style:{fontSize:15,marginBottom:6}}, entityStore.entities.length===0 ? "No entities yet" : "Select an entity"),
           React.createElement("div",{style:{fontSize:13}}, entityStore.entities.length===0 ? "Entities are created automatically when Claude extracts facts via remind_me_decompose or remind_me_annotate." : "Pick an entity from the list on the left.")
         )) :
+        view==="reminders" ?
+        // Reminders view — remind_me_list_reminders, with the set/clear half
+        // reachable from every card's clock button.
+        React.createElement("div",null,
+          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}},
+            React.createElement("h2",{style:{fontFamily:sans,fontWeight:700,fontSize:22,margin:0,letterSpacing:"-0.02em"}},"Reminders"),
+            React.createElement("div",{style:{display:"flex",background:theme.surface,borderRadius:6,border:"1px solid "+theme.border,overflow:"hidden"}},
+              [["upcoming","Upcoming"],["overdue","Overdue"],["all","All"]].map(([w,l])=>React.createElement("button",{key:w,onClick:()=>reminderStore.setWhen(w),
+                style:{padding:"8px 14px",minHeight:40,border:"none",fontSize:12,fontFamily:mono,fontWeight:500,cursor:"pointer",background:reminderStore.when===w?theme.accent:"transparent",color:reminderStore.when===w?"#fff":theme.textSecondary}}, l))
+            )
+          ),
+          React.createElement("div",{style:{fontSize:12,color:theme.textMuted,fontFamily:mono,marginBottom:12,lineHeight:1.6}},
+            reminderStore.when==="upcoming" ? "Set and still in the future."
+              : reminderStore.when==="overdue" ? "Came due and was never delivered — typically because nothing was running when it fired."
+              : "Upcoming and overdue together. A delivered reminder drops out of every window."
+          ),
+          reminderStore.error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono,marginBottom:12}}, reminderStore.error),
+          React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10}},
+            reminderStore.reminders.map(m=>React.createElement(MemoryCard,{key:m.id,memory:m,onEdit:setEditMemory,onDelete:setDeleteConfirm,onTagClick:t=>{setFilterTags([t]);setView("browse")},onRemind:setRemindMemory,expanded:expandedIds.has(m.id),onToggle:()=>toggleExpand(m.id)})),
+            reminderStore.reminders.length===0 && !reminderStore.loading && React.createElement("div",{style:{textAlign:"center",padding:"60px 20px",color:theme.textMuted}},
+              React.createElement("div",{style:{color:theme.textMuted,marginBottom:12,display:"flex",justifyContent:"center"}}, React.createElement(Icons.Clock)),
+              React.createElement("div",{style:{fontSize:15,marginBottom:6}}, reminderStore.when==="overdue" ? "Nothing overdue" : "No reminders set"),
+              React.createElement("div",{style:{fontSize:13}},"Open any memory's clock button in Browse to schedule one.")
+            )
+          )
+        ) :
+        view==="searches" ?
+        // Saved searches view — remind_me_save_search / list / run / delete.
+        React.createElement("div",null,
+          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}},
+            React.createElement("h2",{style:{fontFamily:sans,fontWeight:700,fontSize:22,margin:0,letterSpacing:"-0.02em"}},"Saved Searches"),
+            React.createElement("button",{onClick:()=>setShowSaveSearch({query:"",category:"",tags:[]}),
+              style:{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",minHeight:40,borderRadius:6,border:"none",background:theme.accent,color:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:"pointer"}},
+              React.createElement(Icons.Plus), " New")
+          ),
+          savedSearchStore.error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono,marginBottom:12}}, savedSearchStore.error),
+          React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10}},
+            savedSearchStore.searches.map(s=>React.createElement("div",{key:s.id,style:{background:theme.surface,border:"1px solid "+((savedSearchRun&&savedSearchRun.name===s.name)?theme.accent+"60":theme.border),borderRadius:8,padding:"14px 16px"}},
+              React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,flexWrap:"wrap"}},
+                React.createElement("div",{style:{minWidth:0}},
+                  React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}},
+                    React.createElement("span",{style:{fontFamily:sans,fontSize:15,fontWeight:600,color:theme.text}}, s.name),
+                    s.watch && React.createElement("span",{style:{padding:"1px 7px",borderRadius:3,fontSize:10,fontWeight:700,fontFamily:mono,background:theme.successSubtle,color:theme.success,textTransform:"uppercase",letterSpacing:"0.06em"}},"watch")
+                  ),
+                  React.createElement("code",{style:{display:"block",fontFamily:mono,fontSize:12,color:theme.textSecondary,marginTop:4,wordBreak:"break-word"}}, s.query),
+                  React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:4,marginTop:6,alignItems:"center"}},
+                    s.filters && s.filters.category && React.createElement(CategoryBadge,{category:s.filters.category}),
+                    ((s.filters && s.filters.tags) || []).map(t=>React.createElement(TagPill,{key:t,tag:t}))
+                  )
+                ),
+                React.createElement("div",{style:{display:"flex",gap:4,flexShrink:0}},
+                  React.createElement("button",{onClick:()=>handleRunSavedSearch(s.name),title:"Run",style:{...iconBtn,color:theme.accent}},
+                    runningSearch===s.name ? React.createElement(Icons.Loader) : React.createElement(Icons.Play)),
+                  React.createElement("button",{onClick:()=>setDeleteSearchConfirm(s.name),title:"Delete",style:{...iconBtn,color:theme.danger}}, React.createElement(Icons.Trash))
+                )
+              )
+            )),
+            savedSearchStore.searches.length===0 && !savedSearchStore.loading && React.createElement("div",{style:{textAlign:"center",padding:"60px 20px",color:theme.textMuted}},
+              React.createElement("div",{style:{color:theme.textMuted,marginBottom:12,display:"flex",justifyContent:"center"}}, React.createElement(Icons.Bookmark)),
+              React.createElement("div",{style:{fontSize:15,marginBottom:6}},"No saved searches yet"),
+              React.createElement("div",{style:{fontSize:13}},"Search in Browse, then use “Save search” to keep the query and its filters.")
+            )
+          ),
+          // Results of the last run, below the list rather than in a modal:
+          // a saved search is usually run to read the matches, and a dialog
+          // over the list would put them behind a dismiss.
+          savedSearchRun && React.createElement("div",{style:{marginTop:24}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:12,gap:8,flexWrap:"wrap"}},
+              React.createElement("h3",{style:{fontFamily:mono,fontSize:13,fontWeight:600,color:theme.textSecondary,textTransform:"uppercase",letterSpacing:"0.04em",margin:0}},
+                savedSearchRun.error ? "Run failed" : (savedSearchRun.count||0)+" match"+((savedSearchRun.count||0)===1?"":"es")+" for “"+savedSearchRun.name+"”"),
+              React.createElement("button",{onClick:()=>setSavedSearchRun(null),style:{background:"none",border:"none",color:theme.textSecondary,fontSize:12,fontFamily:mono,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}, React.createElement(Icons.X), " Close")
+            ),
+            savedSearchRun.error
+              ? React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono}}, savedSearchRun.error)
+              : React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10}},
+                  (savedSearchRun.results||[]).map(r=>React.createElement(MemoryCard,{key:r.memory.id,memory:r.memory,onEdit:setEditMemory,onDelete:setDeleteConfirm,onTagClick:t=>{setFilterTags([t]);setView("browse")},onRemind:setRemindMemory,expanded:expandedIds.has(r.memory.id),onToggle:()=>toggleExpand(r.memory.id)})),
+                  (savedSearchRun.results||[]).length===0 && React.createElement("div",{style:{fontSize:13,color:theme.textMuted,fontFamily:sans,padding:"8px 2px"}},"Nothing matches this search right now.")
+                )
+          )
+        ) :
         // Stats view
         React.createElement("div",null,
           React.createElement("h2",{style:{fontFamily:sans,fontWeight:700,fontSize:22,marginBottom:20,letterSpacing:"-0.02em"}},"Memory Statistics"),
@@ -925,6 +1337,69 @@ function App() {
               React.createElement("div",null, React.createElement("span",{style:{color:theme.textMuted}},"Search engine: "), React.createElement("code",{style:{color:theme.text}}, "SQLite FTS5")),
               React.createElement("div",null, React.createElement("span",{style:{color:theme.textMuted}},"API: "), React.createElement("code",{style:{color:theme.text}}, window.location.origin))
             )
+          ),
+          // remind_me_digest and remind_me_server_status. Run on demand, not
+          // on page load: a digest builds a vitality report and a sync status
+          // every time, and most visits to this view never look at it.
+          React.createElement("div",{style:{background:theme.surface,border:"1px solid "+theme.border,borderRadius:8,padding:20,marginTop:16}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}},
+              React.createElement("h3",{style:{fontFamily:mono,fontSize:13,fontWeight:600,color:theme.textSecondary,textTransform:"uppercase",letterSpacing:"0.04em",margin:0}},"Digest & Server Status"),
+              React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+                React.createElement("div",{style:{display:"flex",background:theme.bg,borderRadius:6,border:"1px solid "+theme.border,overflow:"hidden"}},
+                  [7,30,90].map(d=>React.createElement("button",{key:d,onClick:()=>{setDigestDays(d); if (ops.digest) ops.run(d);},
+                    style:{padding:"6px 12px",border:"none",fontSize:12,fontFamily:mono,cursor:"pointer",background:digestDays===d?theme.accent:"transparent",color:digestDays===d?"#fff":theme.textSecondary}}, d+"d"))
+                ),
+                React.createElement("button",{onClick:()=>ops.run(digestDays),disabled:ops.running,
+                  style:{display:"flex",alignItems:"center",gap:6,padding:"6px 14px",borderRadius:6,border:"none",background:ops.running?theme.surfaceActive:theme.accent,color:ops.running?theme.textMuted:"#fff",fontSize:12,fontWeight:600,fontFamily:mono,cursor:ops.running?"wait":"pointer"}},
+                  ops.running ? React.createElement(Icons.Loader) : React.createElement(Icons.Play),
+                  ops.digest ? "Re-run" : "Run")
+              )
+            ),
+            ops.error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono,marginBottom:12}}, ops.error),
+            !ops.digest && !ops.error && React.createElement("div",{style:{fontSize:13,color:theme.textMuted,fontFamily:sans,lineHeight:1.6}},
+              "Runs remind_me_digest over the last "+digestDays+" days and remind_me_server_status. Sensitive memories are never included in a digest."
+            ),
+            ops.digest && React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))",gap:20}},
+              React.createElement("div",null,
+                React.createElement("div",{style:labelSt}, (ops.digest.recent_total||0)+" new in "+(ops.digest.since_days||digestDays)+" days"),
+                React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6}},
+                  (ops.digest.recent_memories||[]).map(m=>React.createElement("div",{key:m.id,style:{fontSize:13,fontFamily:sans,color:theme.text,padding:"8px 10px",background:theme.surfaceActive,borderRadius:5,lineHeight:1.5}},
+                    React.createElement(CategoryBadge,{category:m.category}),
+                    React.createElement("div",{style:{marginTop:4,wordBreak:"break-word"}}, m.content.length>160 ? m.content.slice(0,160)+"…" : m.content)
+                  )),
+                  (ops.digest.recent_memories||[]).length===0 && React.createElement("div",{style:{fontSize:13,color:theme.textMuted,fontFamily:sans}},"Nothing new in this window.")
+                )
+              ),
+              React.createElement("div",null,
+                React.createElement("div",{style:labelSt},"Reminders"),
+                React.createElement("div",{style:{fontFamily:mono,fontSize:12,color:theme.textSecondary,lineHeight:1.9,marginBottom:16}},
+                  React.createElement("div",null, (ops.digest.reminders_overdue||[]).length+" overdue · "+(ops.digest.reminders_upcoming||[]).length+" upcoming"),
+                  (ops.digest.reminders_overdue||[]).map(r=>React.createElement("div",{key:"o"+r.id,style:{color:theme.danger,wordBreak:"break-word"}}, "• "+formatWhen(r.remind_at)+" — "+r.content)),
+                  (ops.digest.reminders_upcoming||[]).map(r=>React.createElement("div",{key:"u"+r.id,style:{color:theme.warning,wordBreak:"break-word"}}, "• "+formatWhen(r.remind_at)+" — "+r.content))
+                ),
+                ops.status && React.createElement(React.Fragment,null,
+                  React.createElement("div",{style:labelSt},"Server status"),
+                  React.createElement("div",{style:{fontFamily:mono,fontSize:12,color:theme.textSecondary,lineHeight:1.9}},
+                    React.createElement("div",null,"Version ",React.createElement("code",{style:{color:theme.text}}, ops.status.version)),
+                    React.createElement("div",null,"Memories ",React.createElement("code",{style:{color:theme.text}}, ops.status.memory_count)),
+                    React.createElement("div",{style:{color:ops.status.schema_current?theme.textSecondary:theme.danger}},
+                      "Schema ",React.createElement("code",{style:{color:ops.status.schema_current?theme.text:theme.danger}}, ops.status.schema_version),
+                      ops.status.schema_current ? " (current)" : " — this build expects "+ops.status.expected_schema_version),
+                    React.createElement("div",null,"Backups ",React.createElement("code",{style:{color:theme.text}}, ops.status.backup_count),
+                      ops.status.latest_backup ? " · latest "+formatWhen(ops.status.latest_backup.created_at) : ""),
+                    React.createElement("div",null,"Scheduler ",React.createElement("code",{style:{color:ops.status.scheduler&&ops.status.scheduler.running?theme.success:theme.textMuted}}, ops.status.scheduler&&ops.status.scheduler.running?"running":"stopped")),
+                    React.createElement("div",null,"Watcher ",React.createElement("code",{style:{color:ops.status.watcher&&ops.status.watcher.running?theme.success:theme.textMuted}}, ops.status.watcher&&ops.status.watcher.running?"running":(ops.status.watcher&&ops.status.watcher.enabled?"configured, not running":"off"))),
+                    // A subsystem this build never had reads as
+                    // "not implemented", not as "stopped" -- the server
+                    // reports the distinction, so the panel keeps it.
+                    ["mcp","dashboard","embeddings","sync"].map(k=>ops.status[k] && React.createElement("div",{key:k},
+                      k.charAt(0).toUpperCase()+k.slice(1)+" ",
+                      React.createElement("code",{style:{color:ops.status[k].state==="active"?theme.success:theme.textMuted},title:ops.status[k].reason||""}, ops.status[k].state==="active"?"active":"not implemented")
+                    ))
+                  )
+                )
+              )
+            )
           )
         )
       )
@@ -938,6 +1413,19 @@ function App() {
     ),
     React.createElement(Modal,{open:!!editMemory,onClose:()=>setEditMemory(null),title:"Edit Memory",width:520},
       editMemory && React.createElement(MemoryForm,{initial:editMemory,onSubmit:handleEdit,onCancel:()=>setEditMemory(null)})
+    ),
+    React.createElement(Modal,{open:!!remindMemory,onClose:()=>setRemindMemory(null),title:remindMemory&&remindMemory.remind_at?"Change Reminder":"Set Reminder",width:480},
+      remindMemory && React.createElement(ReminderForm,{memory:remindMemory,onSubmit:handleSetReminder,onCancel:()=>setRemindMemory(null)})
+    ),
+    React.createElement(Modal,{open:!!showSaveSearch,onClose:()=>setShowSaveSearch(null),title:"Save Search",width:520},
+      showSaveSearch && React.createElement(SaveSearchForm,{initial:showSaveSearch,onSubmit:handleSaveSearch,onCancel:()=>setShowSaveSearch(null)})
+    ),
+    React.createElement(Modal,{open:!!deleteSearchConfirm,onClose:()=>setDeleteSearchConfirm(null),title:"Delete Saved Search",width:400},
+      React.createElement("p",{style:{color:theme.textSecondary,fontFamily:sans,fontSize:14,lineHeight:1.6}}, "Delete the saved search ", React.createElement("code",{style:{fontFamily:mono,color:theme.text}},deleteSearchConfirm), ", along with the seen-memory rows its watch tracking accumulated? The memories it matches are not touched."),
+      React.createElement("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:20}},
+        React.createElement("button",{onClick:()=>setDeleteSearchConfirm(null),style:{padding:"8px 16px",borderRadius:6,border:"1px solid "+theme.border,background:"transparent",color:theme.textSecondary,fontSize:13,fontFamily:mono,cursor:"pointer"}},"Cancel"),
+        React.createElement("button",{onClick:()=>handleDeleteSavedSearch(deleteSearchConfirm),style:{padding:"8px 20px",borderRadius:6,border:"none",background:theme.danger,color:"#fff",fontSize:13,fontWeight:600,fontFamily:mono,cursor:"pointer"}},"Delete")
+      )
     ),
     React.createElement(Modal,{open:!!deleteConfirm,onClose:()=>setDeleteConfirm(null),title:"Delete Memory",width:400},
       React.createElement("p",{style:{color:theme.textSecondary,fontFamily:sans,fontSize:14,lineHeight:1.6}}, "Are you sure you want to permanently delete memory ", React.createElement("code",{style:{fontFamily:mono,color:theme.text}},deleteConfirm), "? This cannot be undone."),

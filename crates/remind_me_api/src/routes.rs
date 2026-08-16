@@ -13,13 +13,15 @@ use crate::http::{Body, Request};
 use remind_me_core::db::queries;
 use remind_me_core::entity::{entity_profile, list_entities, traverse_from_name};
 use remind_me_core::import_paths::{self, ImportPathError};
+use remind_me_core::status::SubsystemStatus;
 use remind_me_core::webhook::constant_time_eq;
 use remind_me_core::wiki_fs::{pending_compile_count, Wiki};
 use remind_me_core::{
-    self as core, export, importer, stats, vitality, BulkImportDirInput, BulkTagInput,
-    ChatImportInput, EntityTraverseInput, ExportFormat, ExportInput, MemoryAddInput,
-    MemoryListInput, MemoryUpdateInput, ReclassifyInput, SearchPageInput, UpdateOutcome,
-    BULK_IDS_MAX, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
+    self as core, digest, export, importer, saved_searches, stats, vitality, BulkImportDirInput,
+    BulkTagInput, ChatImportInput, EntityTraverseInput, ExportFormat, ExportInput, MemoryAddInput,
+    MemoryListInput, MemoryUpdateInput, ReclassifyInput, ReminderWindow, SaveSearchInput,
+    SearchPageInput, SetReminderInput, SetReminderOutcome, UpdateOutcome, BULK_IDS_MAX,
+    LIST_LIMIT_MAX, LIST_LIMIT_MIN, REMINDER_LIMIT_MAX, REMINDER_LIMIT_MIN,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -857,6 +859,241 @@ pub fn api_wiki_page(
 }
 
 // ---------------------------------------------------------------------------
+// Reminders, digest, status, saved searches — the MCP tools a human can now
+// also run from the dashboard
+// ---------------------------------------------------------------------------
+//
+// Every handler below defers to the same `remind_me_core` function its MCP
+// tool calls, so a reminder set from the dashboard and one set by Claude go
+// through identical validation and write the same row. Nothing here reproduces
+// the tools' logic — the only things that differ are how input arrives (query
+// string / JSON body instead of a tool-call argument object) and how failure
+// is reported (an HTTP status instead of `isError`).
+//
+// Read routes here sit behind the `/api/` prefix's usual posture: open when
+// `REMIND_ME_API_KEY` is unset, gated once it is set. `/api/status` is the one
+// worth naming explicitly — it reports the database and backup paths, the
+// schema version and subsystem state, which is operational shape rather than
+// memory content, and the same class of thing `/api/stats` already publishes
+// via `db_path`.
+
+/// `reminders::list_reminders`, shared with `remind_me_list_reminders` and
+/// with the ICS feed — one query, so the dashboard, the calendar feed and the
+/// tool cannot disagree about what is overdue.
+///
+/// `when` is `upcoming` (default), `overdue`, or `all`. An unrecognised value
+/// is refused rather than silently defaulted: a typo'd window that quietly
+/// answered "upcoming" would read as "no overdue reminders".
+pub fn api_reminders(
+    conn: &Connection,
+    _wiki: &Wiki,
+    req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    let when = match req.query_str("when").unwrap_or("upcoming") {
+        "upcoming" => ReminderWindow::Upcoming,
+        "overdue" => ReminderWindow::Overdue,
+        "all" => ReminderWindow::All,
+        other => {
+            return err(
+                400,
+                format!(
+                    "Invalid window {:?}: use 'upcoming', 'overdue' or 'all'",
+                    other
+                ),
+            )
+        }
+    };
+    let limit = match int_query(req, "limit", 20) {
+        Ok(v) => (v as i64).clamp(REMINDER_LIMIT_MIN, REMINDER_LIMIT_MAX),
+        Err(e) => return e,
+    };
+    match remind_me_core::reminders::list_reminders(conn, when, limit) {
+        Ok(memories) => ok(json!({
+            "count": memories.len(),
+            "memories": memories,
+        })),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `reminders::set_reminder`, reused verbatim — set a reminder on a memory, or
+/// clear one by omitting `remind_at` (or sending it as `null`, or as an empty
+/// string, which is what a cleared form field sends).
+///
+/// The outcomes core reports are mapped onto the statuses that mean the same
+/// thing over HTTP, rather than answering 200 with an `outcome` field a caller
+/// has to read to notice nothing happened: a missing memory is 404, and a
+/// timestamp that is unparseable or already past is 400. The body still
+/// carries the full `SetReminderOutcome`, so the reason survives.
+pub fn api_set_reminder(
+    conn: &Connection,
+    _wiki: &Wiki,
+    req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    let input: SetReminderInput = match parsed_body(req) {
+        Ok(i) => i,
+        Err(_) => return err(400, "'memory_id' is required"),
+    };
+    if input.memory_id.trim().is_empty() {
+        return err(400, "'memory_id' is required");
+    }
+    match remind_me_core::reminders::set_reminder(
+        conn,
+        &input.memory_id,
+        input.remind_at.as_deref(),
+    ) {
+        Ok(outcome) => {
+            let status = match outcome {
+                SetReminderOutcome::NotFound { .. } => 404,
+                SetReminderOutcome::Rejected { .. } => 400,
+                SetReminderOutcome::Set { .. } | SetReminderOutcome::Cleared { .. } => 200,
+            };
+            (
+                status,
+                Body::Json(serde_json::to_value(outcome).unwrap_or(json!({}))),
+            )
+        }
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `digest::build_digest`, shared with `remind_me_digest` — recent memories,
+/// vitality, reminders on both sides of now, and sync state in one payload.
+///
+/// Sensitive memories are excluded by the core function with no override, and
+/// this route deliberately adds none: a digest is the ambient surface that
+/// flag exists to keep things off, and a dashboard panel is more ambient than
+/// a tool call, not less.
+pub fn api_digest(conn: &Connection, _wiki: &Wiki, req: &Request, _params: &Params) -> (u16, Body) {
+    let since_days = match int_query(req, "since_days", digest::DEFAULT_SINCE_DAYS as usize) {
+        Ok(v) => (v as i64).clamp(digest::DIGEST_SINCE_DAYS_MIN, digest::DIGEST_SINCE_DAYS_MAX),
+        Err(e) => return e,
+    };
+    match digest::build_digest(conn, since_days) {
+        Ok(data) => ok(data),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `status::server_status`, shared with `remind_me_server_status` — the build
+/// actually serving the request, where the database lives, schema currency,
+/// backup state, and which subsystems are running.
+///
+/// One field is overridden, the same way the MCP tool overrides several of
+/// its own: core reports `dashboard` as not-implemented because *it* has no
+/// way to see across processes to the `rusty-remind-me api` daemon. From
+/// inside that daemon the question does not arise — the process answering
+/// this request is the dashboard — so answering "not implemented" here would
+/// be a report contradicted by the fact that it was delivered.
+///
+/// Deliberately *not* by reusing `pid::dashboard_status`, which the MCP tool
+/// uses for the genuinely cross-process case: that probes the recorded URL
+/// over HTTP, and this server answers one connection at a time. A request to
+/// itself could not be accepted until the request making it had finished, so
+/// the probe would block until it timed out. The MCP tool is a different
+/// process and has no such problem.
+pub fn api_status(
+    conn: &Connection,
+    _wiki: &Wiki,
+    _req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    match remind_me_core::status::server_status(conn) {
+        Ok(status) => {
+            let mut report = serde_json::to_value(&status).unwrap_or(json!({}));
+            report["dashboard"] =
+                serde_json::to_value(SubsystemStatus::Active).unwrap_or(json!({}));
+            ok(report)
+        }
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `saved_searches::list_saved_searches`, reused verbatim.
+pub fn api_saved_searches(
+    conn: &Connection,
+    _wiki: &Wiki,
+    _req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    match saved_searches::list_saved_searches(conn) {
+        Ok(searches) => ok(json!({ "count": searches.len(), "saved_searches": searches })),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `saved_searches::save_search`, reused verbatim — create, or update in place
+/// when the name already exists, which is how core defines re-saving a name.
+///
+/// Answers 200 rather than 201 for that reason: this route cannot tell a
+/// caller it created something when the same request may well have updated a
+/// row that was already there.
+pub fn api_save_search(
+    conn: &Connection,
+    _wiki: &Wiki,
+    req: &Request,
+    _params: &Params,
+) -> (u16, Body) {
+    let input: SaveSearchInput = match parsed_body(req) {
+        Ok(i) => i,
+        Err(_) => return err(400, "'name' and 'query' are required"),
+    };
+    if input.name.trim().is_empty() || input.query.trim().is_empty() {
+        return err(400, "'name' and 'query' are required");
+    }
+    match saved_searches::save_search(conn, &input) {
+        Ok(saved) => ok(saved),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `saved_searches::run_saved_search`, reused verbatim.
+///
+/// A `GET`: running a saved search only reads, so it stays available on an
+/// unauthenticated server exactly as `/api/memories/search` does — the stored
+/// query is a shorthand for that same search, and gating one but not the other
+/// would be a distinction without a difference.
+pub fn api_run_saved_search(
+    conn: &Connection,
+    _wiki: &Wiki,
+    _req: &Request,
+    params: &Params,
+) -> (u16, Body) {
+    let name = &params["name"];
+    match saved_searches::get_saved_search(conn, name) {
+        Ok(Some(saved)) => match saved_searches::run_saved_search(conn, &saved) {
+            Ok(results) => ok(json!({
+                "name": saved.name,
+                "query": saved.query,
+                "count": results.len(),
+                "results": results,
+            })),
+            Err(e) => internal_err(e),
+        },
+        Ok(None) => err(404, format!("Saved search {:?} not found", name)),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// `saved_searches::delete_saved_search`, reused verbatim — the stored search
+/// and the seen-memory rows its watch tracking accumulated.
+pub fn api_delete_saved_search(
+    conn: &Connection,
+    _wiki: &Wiki,
+    _req: &Request,
+    params: &Params,
+) -> (u16, Body) {
+    let name = &params["name"];
+    match saved_searches::delete_saved_search(conn, name) {
+        Ok(true) => ok(json!({ "deleted": name })),
+        Ok(false) => err(404, format!("Saved search {:?} not found", name)),
+        Err(e) => internal_err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The route table
 // ---------------------------------------------------------------------------
 //
@@ -905,6 +1142,49 @@ pub const ROUTES: &[Route] = &[
         methods: &["GET"],
         pattern: "/api/vitality",
         handler: api_vitality,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/api/digest",
+        handler: api_digest,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/api/status",
+        handler: api_status,
+    },
+    // `/api/reminders` is three segments; the ICS feed's
+    // `/api/reminders/{token}.ics` is four and is answered before dispatch
+    // ever runs, so the two cannot shadow each other.
+    Route {
+        methods: &["GET"],
+        pattern: "/api/reminders",
+        handler: api_reminders,
+    },
+    Route {
+        methods: &["POST"],
+        pattern: "/api/reminders",
+        handler: api_set_reminder,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/api/saved-searches",
+        handler: api_saved_searches,
+    },
+    Route {
+        methods: &["POST"],
+        pattern: "/api/saved-searches",
+        handler: api_save_search,
+    },
+    Route {
+        methods: &["GET"],
+        pattern: "/api/saved-searches/{name}/run",
+        handler: api_run_saved_search,
+    },
+    Route {
+        methods: &["DELETE"],
+        pattern: "/api/saved-searches/{name}",
+        handler: api_delete_saved_search,
     },
     Route {
         methods: &["GET"],

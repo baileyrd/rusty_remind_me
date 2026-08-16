@@ -2,6 +2,19 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — Reminders, digest, server status and saved searches are runnable from the dashboard
+
+### Added
+- **Nine HTTP routes over `remind_me_core` functions that previously had no surface outside MCP**, in `crates/remind_me_api/src/routes.rs`: `GET`/`POST /api/reminders` (`reminders::list_reminders` / `reminders::set_reminder`), `GET /api/digest` (`digest::build_digest`), `GET /api/status` (`status::server_status`), and `GET`/`POST /api/saved-searches`, `GET /api/saved-searches/{name}/run`, `DELETE /api/saved-searches/{name}` (`saved_searches::*`). Every handler defers to the function its MCP tool already calls rather than reproducing the query — a reminder set from a browser and one set by Claude are the same row through the same validation. The auth posture is the existing one for the `/api/` prefix, deliberately not a new one: reads are open until `REMIND_ME_API_KEY` is set, writes (setting a reminder, saving or deleting a search) are refused without it. Core's outcome enums are mapped onto the HTTP statuses that mean the same thing — a reminder on a missing memory is 404 and a past timestamp is 400, rather than a 200 whose body has to be read to notice nothing happened.
+- **The dashboard now drives all of them** (`crates/remind_me_api/src/dashboard/App.jsx`): a clock button on every memory card opens a set/clear reminder dialog and cards show a reminder badge; a **Reminders** view carries the upcoming/overdue/all windows with an overdue count badged into the header from every view; a **Searches** view lists, runs and deletes saved searches, with "Save search" in Browse prefilled from whatever is on screen; and a digest/server-status panel sits at the foot of **Stats**, run on demand rather than on page load because a digest rebuilds a vitality report and a sync status every call.
+
+### Fixed
+- **`GET /api/status` reported `dashboard` as not-implemented from inside the dashboard process itself.** `status::server_status` says so because, from an MCP process, the `rusty-remind-me api` daemon is a separate process reachable only through its PID file — but the daemon answering this route *is* that dashboard, so the report was contradicted by its own delivery. The route now overrides the field to `active`, the same shape of override `remind_me_server_status` already applies to `sync`, `embeddings` and `dashboard`. Deliberately not by reusing `pid::dashboard_status`: that probes the recorded URL over HTTP, and this server answers one connection at a time, so a request to itself could not be accepted until the request making it had finished.
+
+### Provenance
+
+Verified with `cargo test -p remind_me_api` (17 binaries green, including three new ones — `reminders_test.rs`, `saved_searches_test.rs`, `digest_status_test.rs`, 32 new tests covering the windows, the outcome-to-status mapping, percent-decoded names, clamping and the auth posture on each new write), `cargo clippy --workspace --all-targets` and `cargo fmt --all --check`. `dashboard_test.rs` gained `every_command_endpoint_the_dashboard_calls_is_a_real_route`, which walks the served page for each endpoint literal and confirms a real request to it is not a 404 — the JSX is an opaque string to the Rust build, so nothing else would fail when a route is renamed out from under the page. The dashboard itself was driven end to end in Chromium against a seeded database (set a reminder, list it in the Reminders view, save a search from Browse, run it in the Searches view, run the digest) with no page errors.
+
 ## 2026-08-14 — Version bumped to 0.1.1, the first release the automation from #324 publishes
 
 ### Added
