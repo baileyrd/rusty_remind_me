@@ -634,6 +634,10 @@ surfaces):
 | `GET` | `/api/export` | Export memories |
 | `GET` | `/api/entity`, `/api/entities`, `/api/entity/traverse` | Knowledge-graph entity endpoints |
 | `GET` | `/api/wiki`, `/api/wiki/search`, `/api/wiki/load`, `/api/wiki/status`, `/api/wiki/{slug}` | Markdown wiki endpoints |
+| `POST` | `/api/wiki` | Create or replace a page — `{"title": ..., "content": ..., "log_note": ...}` (`remind_me_wiki_write`) |
+| `DELETE` | `/api/wiki/{slug}` | Delete a page and its index rows (`remind_me_wiki_delete`) |
+| `POST` | `/api/wiki/compile` | Compile brief; `{"mark_integrated": true}` advances the watermark (`remind_me_wiki_compile`) |
+| `GET` | `/api/wiki/schema` | The maintainer schema the compile brief embeds |
 | `GET` | `/api/reminders?when=upcoming\|overdue\|all&limit=...` | Memories with a reminder set, soonest first (`remind_me_list_reminders`) |
 | `POST` | `/api/reminders` | Set or clear a reminder — `{"memory_id": ..., "remind_at": ISO-8601 or null}` (`remind_me_set_reminder`) |
 | `GET` | `/api/digest?since_days=...` | Recent memories, vitality, reminders and sync state (`remind_me_digest`) |
@@ -644,13 +648,32 @@ surfaces):
 | `DELETE` | `/api/saved-searches/{name}` | Delete one, with its watch-tracking rows (`remind_me_delete_saved_search`) |
 | `GET` | `/metrics`, `/manifest.json`, `/` | Metrics, PWA manifest, and the dashboard itself |
 
-Each of the reminder, digest, status and saved-search routes calls the same
-`remind_me_core` function its MCP tool does, so a reminder set from the
+Each of the reminder, digest, status, saved-search and wiki routes calls the
+same `remind_me_core` function its MCP tool does, so a reminder set from the
 dashboard and one set by Claude are the same row, validated the same way. The
 dashboard drives all of them: a clock button on every memory card, a
 **Reminders** view with the upcoming/overdue/all windows, a **Searches** view
 that runs and deletes saved searches, and a digest/server-status panel at the
 bottom of **Stats**.
+
+### Editing the wiki
+
+The wiki is LLM-curated — Claude synthesises pages from your raw memories — but
+you own the vault, so the mechanical operations are yours: the **Wiki** view
+can write a page by hand, edit or delete an existing one, and drive a compile
+pass. `index.md`, `log.md` and `schema.md` are generated and refused as page
+titles; every other title is slugified to `[a-z0-9-]+` before it becomes a
+filename, so a page can only ever land inside the wiki directory.
+
+Compiling stays two-phase, because the synthesis in the middle is a judgment
+call this server cannot make. `POST /api/wiki/compile` returns a **brief** — the
+raw memories since the last watermark, the current page index, and the
+maintainer schema — and advances nothing, so it is safe to call repeatedly. The
+dashboard shows that brief and offers it for copying into a Claude session
+(which then writes the pages with `remind_me_wiki_write`); once the pages
+exist, `{"mark_integrated": true}` moves the watermark past that batch. Marking
+integrated is not reversible from the UI: those memories will not appear in a
+future brief whether they were written up or not.
 
 ---
 
