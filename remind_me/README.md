@@ -72,14 +72,18 @@ and versioning](#releases-and-versioning) below for how those get produced.
 ### 2. Connect it to a client
 
 **Claude Code plugin** (recommended if you're using Claude Code): this repo
-ships its own single-plugin marketplace (`.claude-plugin/marketplace.json`,
-pointing at the plugin manifest described in [Claude Code
-Plugin](#claude-code-plugin) below), so no separate marketplace repo is
-needed —
+ships its own single-plugin marketplace, so no separate marketplace repo is
+needed. Since the `rusty_recall` merge the marketplace manifest lives at the
+*workspace* root (`/.claude-plugin/marketplace.json`) rather than beside this
+README — Claude Code only reads it from a repository's root — and points back
+here via `"source": "./remind_me"`. The plugin's own manifest
+(`.claude-plugin/plugin.json`, described in [Claude Code
+Plugin](#claude-code-plugin) below) stays here with the `commands/`, `hooks/`
+and `.mcp.json` it references.
 
 ```bash
-claude plugin marketplace add baileyrd/rusty_remind_me
-claude plugin install rusty-remind-me@rusty-remind-me
+claude plugin marketplace add baileyrd/rusty_recall
+claude plugin install rusty-remind-me@rusty-recall
 ```
 
 `rusty-remind-me` must already be on `PATH` (step 1) — the plugin's

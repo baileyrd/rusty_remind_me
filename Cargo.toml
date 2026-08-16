@@ -1,0 +1,108 @@
+[workspace]
+resolver = "2"
+members = [
+    # rusty_remind_me — persistent memory engine and MCP server.
+    "remind_me/crates/remind_me_core",
+    "remind_me/crates/remind_me_mcp",
+    "remind_me/crates/remind_me_api",
+    "remind_me/crates/remind_me_cli",
+    "remind_me/crates/remind_me_remote",
+    "remind_me/crates/remind_me_hub",
+
+    # rusty_dbs — incremental multi-source backup system. Every
+    # `dbs-connector-*` is its own binary, spawned as a subprocess rather than
+    # linked into `dbs` (dbs/docs/adr/0001-dynamic-plugin-registry.md).
+    "dbs/crates/dbs-core",
+    "dbs/crates/dbs-connector-support",
+    "dbs/crates/dbs-cli",
+    "dbs/crates/dbs-web",
+    "dbs/crates/dbs-research",
+    "dbs/crates/dbs-connector-raindrop",
+    "dbs/crates/dbs-connector-github",
+    "dbs/crates/dbs-connector-pinboard",
+    "dbs/crates/dbs-connector-readwise",
+    "dbs/crates/dbs-connector-mastodon",
+    "dbs/crates/dbs-connector-bluesky",
+    "dbs/crates/dbs-connector-spotify",
+    "dbs/crates/dbs-connector-pocketcasts",
+    "dbs/crates/dbs-connector-podcast",
+    "dbs/crates/dbs-connector-vimeo",
+    "dbs/crates/dbs-connector-udemy",
+    "dbs/crates/dbs-connector-reddit",
+    "dbs/crates/dbs-connector-skool",
+    "dbs/crates/dbs-connector-youtube",
+]
+
+# One workspace, two products, kept in their own directory trees.
+#
+# `remind_me/` and `dbs/` were separate repositories until they were grafted
+# here (see the two "Graft ..." commits). Their trees stay where they landed
+# rather than being flattened into a single top-level `crates/` for two
+# reasons: the file-level collisions between them are extensive (both shipped
+# a README, ARCHITECTURE, CONTRIBUTING, RELEASE_NOTES, gap-analysis, and a
+# `docs/adr/` numbered from 0001), and keeping the prefixes means `git blame`
+# and `git log --full-history` still resolve against the paths the grafted
+# commits actually used.
+#
+# What *is* unified is the build: one `[workspace]`, one `Cargo.lock`, one
+# `cargo test --workspace`. The two per-repo `Cargo.toml` workspace roots were
+# removed, since a nested `[workspace]` under this one would silently split the
+# build back into two.
+
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+# The oldest toolchain this workspace has actually been observed to build and
+# test with — not a bisected minimum. Inherited from rusty_remind_me, which was
+# developed against 1.94 before `rust-toolchain.toml` pinned 1.97. The true
+# minimum is probably lower; claiming a number nobody has run would be worse
+# than claiming a slightly conservative one.
+#
+# Distinct from `rust-toolchain.toml`, which pins what CI and developers
+# *build* with. This says what a consumer needs.
+rust-version = "1.94"
+# rusty_remind_me declared MIT; rusty_dbs declared UNLICENSED, and neither
+# repo ever shipped a LICENSE file. MIT is now the single answer for both
+# halves, and ./LICENSE is the file that was missing.
+license = "MIT"
+authors = ["rusty_recall contributors"]
+repository = "https://github.com/baileyrd/rusty_recall"
+
+[workspace.dependencies]
+remind_me_core = { path = "remind_me/crates/remind_me_core" }
+remind_me_mcp = { path = "remind_me/crates/remind_me_mcp" }
+remind_me_api = { path = "remind_me/crates/remind_me_api" }
+remind_me_remote = { path = "remind_me/crates/remind_me_remote" }
+remind_me_hub = { path = "remind_me/crates/remind_me_hub" }
+
+# Rusty Mill ecosystem dependencies
+#
+# Intentionally not declared. Every crate in the rusty_remind_me workspace
+# previously listed the `rusty_*` crates as `../Rusty_Mill/...` path
+# dependencies, but no source file referenced any of them — the workspace
+# failed to load because those paths do not exist, without a single call site
+# depending on them.
+#
+# Upstream, Rusty Mill is ~40 standalone repositories (`baileyrd/rusty_db`,
+# `baileyrd/rusty_json`, ...) rather than the monorepo the old paths assumed,
+# so re-adopting a crate means adding it as a git dependency at the point it
+# gains a real call site — not declaring the whole suite up front.
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["full"] }
+# Unified across both halves. rusty_remind_me was on 0.31 and rusty_dbs on
+# 0.32; they cannot simply coexist, because `bundled` pulls in
+# `libsqlite3-sys`, which declares `links = "sqlite3"` — two versions of a
+# `links` crate is a hard error for any artifact that reaches both, and a
+# latent trap for any future crate that comes to depend on both halves.
+# 0.32 is the forward choice; `backup`/`functions` come from the
+# rusty_remind_me side, `bundled` was common to both.
+rusqlite = { version = "0.32", features = ["bundled", "backup", "functions"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+sha256 = "1.5"
+dirs = "5.0"
+parking_lot = "0.12"

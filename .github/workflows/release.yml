@@ -50,7 +50,7 @@ jobs:
         name: Read the workspace version and check for an existing release tag
         run: |
           set -euo pipefail
-          version="$(scripts/get_workspace_version.sh)"
+          version="$(remind_me/scripts/get_workspace_version.sh)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "is_new=false" >> "$GITHUB_OUTPUT"
@@ -121,8 +121,15 @@ jobs:
       # to build -- the heavy optional features (ann, ocr, rerank,
       # local-embed, audio, cloud-backup) each take explicit model/credential
       # setup that a downloaded binary can't carry anyway.
-      - name: Build rusty-remind-me and rusty-remind-me-hub (release)
-        run: cargo build --release --locked --target ${{ matrix.target }} -p rusty-remind-me -p remind_me_hub
+      # `--workspace` rather than the previous `-p rusty-remind-me -p
+      # remind_me_hub`, because this repo now has 17 shippable binaries, not
+      # 2: the two above plus `dbs` and its 14 `dbs-connector-<type>`
+      # subprocess binaries. The connectors are not optional extras — `dbs`
+      # discovers and spawns them at runtime, so a release carrying `dbs`
+      # without them ships a backup tool that can back nothing up
+      # (dbs/docs/adr/0001-dynamic-plugin-registry.md).
+      - name: Build every shippable binary (release)
+        run: cargo build --release --locked --target ${{ matrix.target }} --workspace
 
       - name: Package the archive (Linux / macOS)
         if: runner.os != 'Windows'
@@ -130,10 +137,25 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ needs.detect-version.outputs.version }}"
-          stage="rusty-remind-me-v${version}-${{ matrix.target }}"
+          stage="rusty-recall-v${version}-${{ matrix.target }}"
+          bindir="target/${{ matrix.target }}/release"
           mkdir "$stage"
-          cp "target/${{ matrix.target }}/release/rusty-remind-me" "$stage/"
-          cp "target/${{ matrix.target }}/release/rusty-remind-me-hub" "$stage/"
+          cp "$bindir/rusty-remind-me" "$bindir/rusty-remind-me-hub" "$bindir/dbs" "$stage/"
+          # Globbed rather than listed: the connector set is defined by the
+          # workspace members, and a hand-maintained list here would quietly
+          # stop shipping the 15th connector the day someone adds one. The
+          # `-x` test is what keeps cargo's `.d` depfiles out of the archive.
+          for connector in "$bindir"/dbs-connector-*; do
+            [ -f "$connector" ] && [ -x "$connector" ] && cp "$connector" "$stage/"
+          done
+          # Fail loudly rather than shipping a half-empty archive: `dbs`
+          # without its connectors is a backup tool that cannot reach a single
+          # source, and that is not something to discover from a bug report.
+          shipped="$(find "$stage" -name 'dbs-connector-*' | wc -l)"
+          if [ "$shipped" -ne 14 ]; then
+            echo "expected 14 connector binaries in $stage, found $shipped" >&2
+            exit 1
+          fi
           cp README.md "$stage/"
           tar czf "${stage}.tar.gz" "$stage"
           echo "ASSET_PATH=${stage}.tar.gz" >> "$GITHUB_ENV"
@@ -143,10 +165,19 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ needs.detect-version.outputs.version }}"
-          $stage = "rusty-remind-me-v$version-${{ matrix.target }}"
+          $stage = "rusty-recall-v$version-${{ matrix.target }}"
+          $bindir = "target/${{ matrix.target }}/release"
           New-Item -ItemType Directory -Path $stage | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/rusty-remind-me.exe" "$stage/"
-          Copy-Item "target/${{ matrix.target }}/release/rusty-remind-me-hub.exe" "$stage/"
+          Copy-Item "$bindir/rusty-remind-me.exe" "$stage/"
+          Copy-Item "$bindir/rusty-remind-me-hub.exe" "$stage/"
+          Copy-Item "$bindir/dbs.exe" "$stage/"
+          # Same glob-don't-list reasoning as the Linux/macOS step above.
+          Copy-Item "$bindir/dbs-connector-*.exe" "$stage/"
+          $shipped = (Get-ChildItem "$stage/dbs-connector-*.exe").Count
+          if ($shipped -ne 14) {
+            Write-Error "expected 14 connector binaries in $stage, found $shipped"
+            exit 1
+          }
           Copy-Item README.md "$stage/"
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
           echo "ASSET_PATH=$stage.zip" >> $env:GITHUB_ENV
@@ -173,7 +204,7 @@ jobs:
       # blocked any PR where this drifted, but a release must never ship a
       # plugin archive silently claiming the wrong version.
       - name: Verify plugin.json version matches this release
-        run: scripts/check_plugin_version.sh
+        run: remind_me/scripts/check_plugin_version.sh
 
       - name: Build the plugin archive
         run: |
@@ -181,7 +212,14 @@ jobs:
           version="${{ needs.detect-version.outputs.version }}"
           stage="rusty-remind-me-plugin-v${version}"
           mkdir "$stage"
-          cp -R .claude-plugin commands hooks .mcp.json README.md "$stage/"
+          # The plugin's own surface lives in the rusty_remind_me half, but
+          # the marketplace manifest that points at it has to sit at the
+          # repository root (Claude Code only reads /.claude-plugin/
+          # marketplace.json), so the archive is assembled from both places.
+          cp -R remind_me/.claude-plugin remind_me/commands remind_me/hooks \
+                remind_me/.mcp.json remind_me/README.md "$stage/"
+          mkdir "$stage/marketplace"
+          cp .claude-plugin/marketplace.json "$stage/marketplace/"
           zip -rq "${stage}.zip" "$stage"
           echo "ASSET_PATH=${stage}.zip" >> "$GITHUB_ENV"
 

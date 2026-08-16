@@ -6,7 +6,7 @@
   "author": {
     "name": "rusty_remind_me contributors"
   },
-  "repository": "https://github.com/baileyrd/rusty_remind_me",
+  "repository": "https://github.com/baileyrd/rusty_recall",
   "license": "MIT",
   "keywords": ["memory", "mcp", "recall", "knowledge-graph", "reminders"],
   "mcpServers": "./.mcp.json",

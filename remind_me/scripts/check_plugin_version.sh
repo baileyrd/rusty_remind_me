@@ -12,16 +12,28 @@
 # Exit codes: 0 versions agree, 1 they differ, 2 the check could not run.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cargo_toml="$repo_root/Cargo.toml"
-plugin_json="$repo_root/.claude-plugin/plugin.json"
+# Two different roots since the rusty_recall merge, and conflating them is
+# exactly how this check would silently stop checking anything. The plugin
+# manifest is part of the rusty_remind_me half and stays beside it; the
+# `[workspace.package]` version it is compared against moved up to the merged
+# workspace root, one level further out. Before the merge these were the same
+# directory.
+remind_me_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_root="$(cd "$remind_me_root/.." && pwd)"
+cargo_toml="$workspace_root/Cargo.toml"
+plugin_json="$remind_me_root/.claude-plugin/plugin.json"
+
+if [ ! -f "$cargo_toml" ]; then
+  echo "error: $cargo_toml does not exist" >&2
+  exit 2
+fi
 
 if [ ! -f "$plugin_json" ]; then
   echo "error: $plugin_json does not exist" >&2
   exit 2
 fi
 
-workspace_version="$("$repo_root/scripts/get_workspace_version.sh" "$cargo_toml")"
+workspace_version="$("$remind_me_root/scripts/get_workspace_version.sh" "$cargo_toml")"
 
 plugin_version="$(jq -r '.version' "$plugin_json")"
 if [ -z "$plugin_version" ] || [ "$plugin_version" = "null" ]; then

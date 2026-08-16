@@ -1,0 +1,40 @@
+# Cargo build artifacts.
+#
+# One entry, not two: the merge collapsed the two workspaces into one, so
+# there is a single `target/` here rather than one per half. The subtrees'
+# own .gitignore files still carry their `/target` lines — harmless, and now
+# only meaningful if someone deliberately builds inside a subtree.
+/target/
+**/*.rs.bk
+
+# Local SQLite databases (created at runtime; never a source artifact).
+# From the rusty_remind_me half.
+*.db
+*.db-wal
+*.db-shm
+
+# `dbs init`-generated local scaffolding (manual dbs-cli testing/dev runs).
+# From the rusty_dbs half, re-anchored at the merged root: `dbs init` run from
+# here writes to the repo root, which dbs/.gitignore's root-anchored `/dbs.toml`
+# no longer covers.
+/dbs.toml
+/dbs.sqlite3
+/.env
+/.env.example
+/dbs/dbs.toml
+/dbs/dbs.sqlite3
+/dbs/.env
+/dbs/.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local-only debug scratch (not part of this repo's project)
+/.profile-check.ps1
+/rc/flatbuffers/
+
+# Claude Code agent worktree bookkeeping (not part of this repo's project)
+/.claude/worktrees/

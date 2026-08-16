@@ -2,6 +2,10 @@
 
 Guidance for Claude Code sessions (and any agents they dispatch) working in this repo.
 
+This file came from `rusty_remind_me` and now sits at the merged workspace
+root, so it applies to both halves — the commit-signing rule below is about
+this container, not about either product.
+
 ## Commit signing: retry once, then commit unsigned and say so
 
 This environment signs commits via a helper at `/tmp/code-sign` (a symlink to

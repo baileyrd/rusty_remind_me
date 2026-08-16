@@ -1,5 +1,21 @@
 name: CI
 
+# Covers both halves of the merged workspace.
+#
+# This file started as rusty_remind_me's ci.yml; rusty_dbs's ci-rust.yml was
+# folded into it and deleted rather than kept alongside. That is a real merge
+# and not a drop: ci-rust.yml ran `cargo fmt --all`, `cargo clippy
+# --all-targets --all-features` and `cargo test --all-features` across its
+# whole workspace, and the `check` job below already runs the first two
+# workspace-wide. `--all-features` is the only difference, and it is a no-op
+# for that half — not one `dbs-*` crate declares a `[features]` table, so
+# there is nothing for it to turn on. The optional features this file spends
+# most of its length on are all `remind_me_core`/`remind_me_hub`'s.
+#
+# Two rules of thumb for editing it: anything scoped with `-p` names a crate
+# in one half only, and anything invoking `remind_me/scripts/*.sh` is checking
+# the rusty_remind_me half against its upstream reference.
+
 on:
   push:
     branches: [main]
@@ -33,7 +49,7 @@ jobs:
       # script rather than using a second actions/checkout so the same command
       # works locally, where there is no Actions context to borrow.
       - name: Compare SCHEMA_VERSION against the reference
-        run: scripts/check_schema_drift.sh
+        run: remind_me/scripts/check_schema_drift.sh
 
       # A passing check above only means the version *number* hasn't fallen
       # behind -- it says nothing about whether schema_tables.sql,
@@ -45,7 +61,7 @@ jobs:
       # into a scratch dir and diffs against what's committed, same
       # clone-inside-the-script convention as the step above.
       - name: Regenerate schema_*.sql and diff against committed files
-        run: scripts/check_schema_regen_drift.sh
+        run: remind_me/scripts/check_schema_regen_drift.sh
 
   # Also cheap and toolchain-independent -- catches a version bump that
   # updated Cargo.toml but forgot .claude-plugin/plugin.json (or vice versa)
@@ -57,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Compare .claude-plugin/plugin.json against Cargo.toml
-        run: scripts/check_plugin_version.sh
+        run: remind_me/scripts/check_plugin_version.sh
 
   check:
     name: build / test / clippy / fmt
