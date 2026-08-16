@@ -20,6 +20,57 @@ fn the_dashboard_route_serves_html_embedding_the_vendored_jsx() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// Every command endpoint the dashboard drives is both named in the page it
+/// serves and answered by the route table behind it.
+///
+/// The JSX is a string constant to the Rust build: nothing type-checks that a
+/// path the page fetches is a path this server routes, so a renamed route
+/// would break the dashboard silently and no Rust test would notice. This
+/// walks both halves — the literal appears in the served page, and a real
+/// request to it is not a 404 — which is the cheapest thing that actually
+/// fails when the two drift apart.
+#[test]
+fn every_command_endpoint_the_dashboard_calls_is_a_real_route() {
+    let (server, root) = server("dashboard-endpoints");
+    let page = get(&server, "/").body;
+
+    for path in [
+        "/reminders",
+        "/saved-searches",
+        "/digest",
+        "/status",
+        "/memories",
+        "/stats",
+        "/vitality",
+    ] {
+        assert!(
+            page.contains(&format!("\"{}", path)),
+            "the dashboard no longer references {:?}",
+            path
+        );
+        let response = get(&server, &format!("/api{}", path));
+        assert_ne!(
+            response.status, 404,
+            "the dashboard calls /api{} but nothing routes it",
+            path
+        );
+    }
+
+    // The one path built by concatenation rather than written whole, so the
+    // literal check above cannot see it.
+    assert!(
+        page.contains("\"/saved-searches/\""),
+        "the dashboard no longer builds the run-a-saved-search path"
+    );
+    assert_eq!(
+        get(&server, "/api/saved-searches/nothing-saved/run").status,
+        404,
+        "404 for the absent search, not for an absent route"
+    );
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn the_dashboard_is_unauthenticated_even_when_an_api_key_is_configured() {
     // The reference's own Route("/", index) isn't under
