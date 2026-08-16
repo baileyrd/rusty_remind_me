@@ -1,0 +1,12 @@
+[package]
+name = "remind_me_api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+remind_me_core.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true

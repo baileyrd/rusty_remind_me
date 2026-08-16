@@ -1,0 +1,399 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # The schema-drift job compares this repo against another one, so it can go
+  # from green to red with nothing here changing. A daily run is what turns
+  # that from "discovered by hand, a day late" into a notification.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Cheap and independent of the Rust toolchain, so it reports in seconds
+  # rather than behind a 15-minute build.
+  schema-drift:
+    name: schema version vs. remind_me
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `remind_me` is public, so this needs no token. It clones inside the
+      # script rather than using a second actions/checkout so the same command
+      # works locally, where there is no Actions context to borrow.
+      - name: Compare SCHEMA_VERSION against the reference
+        run: scripts/check_schema_drift.sh
+
+      # A passing check above only means the version *number* hasn't fallen
+      # behind -- it says nothing about whether schema_tables.sql,
+      # schema_indexes.sql and schema_triggers.sql (generated verbatim by
+      # regenerate_schema.py; their headers say "do not hand-edit") actually
+      # match what the generator produces. A hand-edit to one of those files
+      # that didn't match the generator's output passed CI silently as long
+      # as SCHEMA_VERSION itself was untouched (#277). This regenerates them
+      # into a scratch dir and diffs against what's committed, same
+      # clone-inside-the-script convention as the step above.
+      - name: Regenerate schema_*.sql and diff against committed files
+        run: scripts/check_schema_regen_drift.sh
+
+  # Also cheap and toolchain-independent -- catches a version bump that
+  # updated Cargo.toml but forgot .claude-plugin/plugin.json (or vice versa)
+  # before it ever reaches the release workflow, which tags and packages
+  # both from the same PR.
+  plugin-version:
+    name: plugin.json version vs. workspace version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare .claude-plugin/plugin.json against Cargo.toml
+        run: scripts/check_plugin_version.sh
+
+  check:
+    name: build / test / clippy / fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ~10 sequential feature-gated build/test/clippy invocations below
+      # (cloud-backup's AWS SDK, ann's usearch C++ build, rerank/local-embed's
+      # rten+tokenizers, ...) plus this job's own restored cargo cache now
+      # exceed the runner's disk partway through -- observed as both a plain
+      # ENOSPC during the `ann` step's linking and, further down, a SIGBUS on
+      # an unrelated test binary's link (see the `local-embed` step's comment
+      # for that one; it already dodges the linker rather than the disk).
+      # `ubuntu-latest` ships tens of GB of preinstalled tooling this
+      # workspace never touches -- removing it up front buys headroom without
+      # dropping test coverage or restructuring the cache, unlike that
+      # `local-embed` workaround.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install the pinned Rust toolchain
+        # rust-toolchain.toml is the source of truth for the compiler and its
+        # components, so CI and a developer's machine lint identically. Before
+        # this, CI took whatever `stable` was that day and a developer took
+        # whatever they had installed; the gap was invisible until CI failed on
+        # a lint the local toolchain did not have (#213).
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Formatting first: it is the cheapest gate and needs no compilation.
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      # --all-targets so tests and benches are linted too, not just lib/bin.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Optional features are off by default, so the steps above never compile
+      # them. Without this, a feature could rot untested and only break for
+      # whoever actually enabled it.
+      - name: cargo test --features pdf
+        run: cargo test -p remind_me_core --features pdf --locked
+
+      - name: cargo clippy --features pdf
+        run: cargo clippy -p remind_me_core --features pdf --all-targets --locked -- -D warnings
+
+      # The AWS SDK is a large tree, but `put_object`'s request-construction
+      # logic (bucket/key, the custom-endpoint override, region, and the
+      # SDK-error-to-string mapping) is exercised here too, not just by
+      # clippy: none of it needs a network call or a live S3-compatible
+      # server, only a client-side `SdkError` and the pure `plan_put_object`
+      # helper. The plaintext gate that actually matters most is a pure
+      # function of the environment and is covered unconditionally by the
+      # default-feature test run above regardless of this feature.
+      - name: cargo test --features cloud-backup
+        run: cargo test -p remind_me_core --features cloud-backup --locked
+
+      - name: cargo clippy --features cloud-backup
+        run: cargo clippy -p remind_me_core --features cloud-backup --all-targets --locked -- -D warnings
+
+      # Each `cargo test` step above relinks every integration test binary in
+      # remind_me_core/remind_me_hub against that step's own feature set, and
+      # none of those binaries are reused by a later step -- they just sit in
+      # target/debug/deps taking up space. Freeing the runner's preinstalled
+      # tooling (above) wasn't enough headroom on its own to reach the end of
+      # this job; reclaiming the previous steps' now-dead test binaries here
+      # is what actually buys the room the next `cargo test` step needs.
+      # `cargo clean -p` drops incremental state too, so the next build from
+      # here recompiles from scratch -- slower, but correctness over speed.
+      - name: Reclaim disk before the next full test-and-link step
+        run: cargo clean -p remind_me_core -p remind_me_hub
+
+      # usearch builds a C++ library from source (~5 min), so this runs the
+      # tests rather than only clippy: the equivalence check — that narrowing
+      # never drops a row brute force would rank — is the whole reason the
+      # feature is safe to enable, and it has to actually run somewhere.
+      - name: cargo test --features ann
+        run: cargo test -p remind_me_core --features ann --locked
+
+      # OCR and transcription are build+clippy checks rather than test runs:
+      # neither can do its actual job without a model, and downloading one in
+      # CI is precisely the implicit fetch these features are required never
+      # to perform. Everything that *is* checkable without a model — the
+      # feature-off refusals, the model-configuration errors, and the audio
+      # decode/resample arithmetic — runs unconditionally in the default test
+      # run above, so this step is only proving the feature-on code compiles.
+      - name: cargo clippy --features ocr
+        run: cargo clippy -p remind_me_core --features ocr --all-targets --locked -- -D warnings
+
+      - name: cargo clippy --features audio
+        run: cargo clippy -p remind_me_core --features audio --all-targets --locked -- -D warnings
+
+      # Same reclaim as before the `ann` step, and for the same reason: this
+      # is the next full `cargo test` (as opposed to clippy-only) step, and
+      # relinking against `rten`/`tokenizers` on top of `ann`'s leftover
+      # `usearch`-linked binaries is what pushed this job over the runner's
+      # disk (`ld` SIGBUS on an unrelated test binary, not a real code fault).
+      - name: Reclaim disk before the next full test-and-link step
+        run: cargo clean -p remind_me_core -p remind_me_hub
+
+      # This one runs the tests rather than only clippy, unlike ocr/audio
+      # above. The difference is that its feature-on tests assert something a
+      # build check cannot: that compiling the reranker in does *not* turn a
+      # search into a model download, and that a configured-but-unloadable
+      # model still degrades to RRF order. Both are cheap — rten and
+      # tokenizers are pure Rust and the tests need no model.
+      - name: cargo test --features rerank
+        run: cargo test -p remind_me_core --features rerank --locked
+
+      # Unlike `rerank`, this is a build+clippy check rather than a test
+      # run, like `ocr`/`audio` above — not because it needs a model (it
+      # does not; `onnx_embedder_test.rs` covers the graceful-degradation
+      # paths with synthetic files, the same way `reranker_test.rs` does),
+      # but because `cargo test` relinks every integration test binary in
+      # the crate against `rten`/`tokenizers`, and by this point in the job
+      # that exhausted the runner's disk mid-link (`ld` SIGBUS on an
+      # unrelated test binary, not a real code fault — see the fix commit
+      # for a run that failed this way). Clippy's analysis pass never
+      # invokes the linker, so it is unaffected.
+      - name: cargo clippy --features local-embed
+        run: cargo clippy -p remind_me_core --features local-embed --all-targets --locked -- -D warnings
+
+      # Same reclaim as before `ann`/`rerank`. `local-embed` just above is
+      # clippy-only (no linking), but `ocr`/`audio` before it still compiled
+      # `rten`/`tokenizers`/`whisper-rs` object files that never got linked
+      # into a binary and are otherwise still sitting in target/debug.
+      - name: Reclaim disk before the next full test-and-link step
+        run: cargo clean -p remind_me_core -p remind_me_hub
+
+      # Like `rerank` above, this runs the tests rather than only clippy, and
+      # for a stronger reason: the feature's entire claim is that a thread
+      # wedged in CPU-bound code still gets dumped. Only running it can show
+      # that. A compile check would pass against a build that dumps nothing.
+      #
+      # The `apt-get` is the cost this feature carries and no other one here
+      # does -- `rstack-self` links libunwind's ptrace API, a *system* library.
+      # It is installed in this step rather than a global one so the expense
+      # lands on the job that actually needs it, and so its absence keeps
+      # breaking any future step that forgets it.
+      # liblzma-dev is not optional here, and its absence is not obvious.
+      # libunwind-ptrace.so carries undefined lzma_* references; whether they
+      # resolve depends on whether the local libunwind.so happens to declare
+      # DT_NEEDED on liblzma, which differs between builds. remind_me_core's
+      # build.rs asks for -llzma explicitly so it never depends on that
+      # accident -- which means the dev package has to be here.
+      - name: Install libunwind and liblzma (stack-dumps needs both)
+        run: sudo apt-get update && sudo apt-get install -y libunwind-dev liblzma-dev
+
+      - name: cargo test --features stack-dumps
+        run: cargo test -p remind_me_core --features stack-dumps --locked
+
+      - name: cargo clippy --features stack-dumps
+        run: cargo clippy -p remind_me_core --features stack-dumps --all-targets --locked -- -D warnings
+
+  # Every step above enables exactly one optional feature at a time, so a
+  # regression that only shows up when several are compiled *together* has
+  # nothing here to catch it (#279). That gap matters most for `ocr`,
+  # `rerank`, and `local-embed`: per their comments in
+  # `crates/remind_me_core/Cargo.toml`, they deliberately share one `rten`/
+  # `tokenizers` runtime instead of each pulling in its own, specifically so a
+  # "full install" does not carry a second neural-network runtime. Nothing
+  # before this job has ever compiled that combination, so a `rten` upgrade
+  # that changes global state it keeps (its thread pool, say) could break the
+  # combination invisibly -- every feature passes alone, but two
+  # `rten::Model` loads sharing that state at once could race or panic.
+  #
+  # A separate job rather than more `check` steps, on purpose: `check`
+  # already runs right up against the runner's disk building `local-embed`
+  # last (see that step's comment), and this feature set links `rten` and
+  # `tokenizers` into even more test binaries than `local-embed` does alone.
+  # A fresh runner gives it a full disk instead of `check`'s leftovers.
+  #
+  # `ann`/`pdf` ride along too: the issue's "realistic full install" is what a
+  # user who wants everything actually enables, and `pdf`/`ocr`/`audio` are
+  # three parallel branches of the same `import_content` dispatch, so `pdf`
+  # compiling alongside `ocr` here is worth the (cheap, pure-Rust) inclusion.
+  # `audio` and `cloud-backup` are left out: neither shares any runtime with
+  # `ocr`/`rerank`/`local-embed`, so they add compile time without covering
+  # any new cross-feature interaction. `stack-dumps` is left out too -- it is
+  # the one feature here with a *system*-library dependency
+  # (`libunwind-dev`/`liblzma-dev`), off by default for exactly that reason
+  # (see its own step and `docs/adr/0014`), and no combination above installs
+  # or needs those packages, so this job does not either.
+  #
+  # This runs the actual test suite, not just clippy, unlike the `ocr`/
+  # `local-embed` steps above: the whole point is to exercise
+  # `ocr`/`rerank`/`local-embed` initializing and using `rten` in the same
+  # process, which a compile-only check can never do.
+  combined-features:
+    name: build / test / clippy (combined features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-combined-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-combined-
+
+      - name: cargo build --features ann,ocr,rerank,local-embed,pdf
+        run: cargo build -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --locked
+
+      - name: cargo test --features ann,ocr,rerank,local-embed,pdf
+        run: cargo test -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --locked
+
+      - name: cargo clippy --features ann,ocr,rerank,local-embed,pdf
+        run: cargo clippy -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets --locked -- -D warnings
+
+  # A separate job, not more steps on `check`, because it needs a Postgres
+  # service container and the rest of the workspace does not. Keeping it apart
+  # means the main gate is not held up by a database that takes seconds to
+  # become healthy, and a Postgres outage cannot red-X the whole workspace.
+  hub:
+    name: hub (sqlite + postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hubtest
+        ports:
+          - 5432:5432
+        # Without this the job races the database's startup; `pg_isready`
+        # gates on the server actually accepting connections, not just the
+        # container existing.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-hub-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-hub-
+
+      - name: cargo clippy -p remind_me_hub
+        run: cargo clippy -p remind_me_hub --all-targets --locked -- -D warnings
+
+      # No DATABASE_URL: the Postgres tests skip themselves, which is the path
+      # a contributor without a database takes. Running it here proves that
+      # path stays green rather than only ever being claimed.
+      - name: cargo test -p remind_me_hub (sqlite only)
+        run: cargo test -p remind_me_hub --locked
+
+      # The run that matters: the legacy-schema migration and the
+      # both-backends-agree differential only execute with a real server.
+      - name: cargo test -p remind_me_hub (with postgres)
+        env:
+          REMIND_ME_HUB_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/hubtest
+          # A skipped Postgres test reports as *passed* and cargo hides the
+          # SKIP line, so losing the service container here would look
+          # identical to a clean run. This makes that a hard failure instead.
+          REMIND_ME_HUB_REQUIRE_POSTGRES: "1"
+        run: cargo test -p remind_me_hub --locked -- --test-threads=1
+
+      # The SQLite-only build must keep working: it is what a self-hosted hub
+      # that wants no Postgres driver actually compiles, and a `postgres::`
+      # reference leaking outside the feature gate would only show up here.
+      - name: cargo test -p remind_me_hub --no-default-features
+        run: cargo test -p remind_me_hub --no-default-features --locked
+
+  # `remind_me_core` has real Win32 FFI (`sidecars.rs`'s job-object teardown,
+  # `export.rs`'s `\\?\`-prefix stripping — see `Cargo.toml`'s
+  # `[target.'cfg(windows)'.dependencies]`), which every job above compiles
+  # exactly zero lines of: `cfg(windows)` is false on every `ubuntu-latest`
+  # runner in this file. A mistake in that code — even one as basic as a
+  # syntax error — could sit unnoticed indefinitely.
+  #
+  # Scoped to the default build rather than mirroring `check`'s whole feature
+  # matrix: the platform-specific risk lives in the unconditional `windows-sys`
+  # dependency, not in any of the optional features, and several of those
+  # (`stack-dumps`'s `rstack-self` ptrace backend, the `libunwind`/`liblzma`
+  # apt packages) are Linux-only by design and would not even build here.
+  windows:
+    name: build / test / clippy (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

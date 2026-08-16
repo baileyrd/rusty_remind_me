@@ -1,0 +1,15 @@
+[package]
+name = "rusty-remind-me"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+remind_me_core.workspace = true
+remind_me_mcp.workspace = true
+remind_me_api.workspace = true
+remind_me_remote.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true

@@ -1,0 +1,21 @@
+# Cargo build artifacts
+/target/
+**/*.rs.bk
+
+# Local SQLite databases (created at runtime; never a source artifact)
+*.db
+*.db-wal
+*.db-shm
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local-only debug scratch (not part of this repo's project)
+/.profile-check.ps1
+/rc/flatbuffers/
+
+# Claude Code agent worktree bookkeeping (not part of this repo's project)
+/.claude/worktrees/
