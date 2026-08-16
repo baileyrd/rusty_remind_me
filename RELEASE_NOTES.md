@@ -2,6 +2,21 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — CI wall clock cut by caching less and parallelising the feature matrix
+
+### Changed
+- **`actions/cache` over `target/` replaced with `Swatinem/rust-cache`** in all five toolchain jobs. Measured rather than assumed: on run `31951918373`, the `combined-features` job spent **4m49s restoring and 6m59s saving** a cache in order to avoid **5m44s** of compilation — 66% of its wall clock moving a cache that cost more than it saved, and the `windows` job spent 6m40s of 16m42s the same way. `Swatinem/rust-cache` caches the registry and *dependency* artifacts only, pruning both the workspace's own crates (rebuilt every run regardless) and stale entries, which is dramatically smaller and faster. Being smaller also stops this workflow's several multi-GB caches from evicting each other against the repository's 10GB cache budget — which is why `check`'s cache restore was a 5-second miss on that same run.
+- **The ~10 sequential optional-feature steps inside `check` are now a `features` job matrix**, one runner per feature, in parallel. The work is identical; only the wall clock changes — from the sum of every feature's build to the slowest single one (`ann`, whose usearch C++ build dominates). `check` keeps exactly its default-feature fmt/build/test/clippy and its job name, so any required-status-check configuration still matches.
+- **`check`'s "Free disk space" step and all three `cargo clean` steps are gone**, because the thing they worked around is gone. Each existed because consecutive feature steps relinked every integration test binary in `remind_me_core`/`remind_me_hub` against a new feature set and the accumulated dead binaries exhausted the runner's disk mid-link (an ENOSPC during `ann`'s link, and an `ld` SIGBUS during `local-embed`'s). One feature per runner means nothing accumulates. Together those steps cost ~2 minutes per run and forced full recompiles after each `cargo clean`.
+- **CI-only build tuning via `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_{DEV,TEST}_DEBUG=line-tables-only`.** Deliberately workflow env vars rather than a `[profile.*]` block in `Cargo.toml`: the cost is specific to a runner, and putting it in `Cargo.toml` would strip debug info from every contributor's local builds to fix a problem they do not have. Incremental compilation is pure overhead in CI — its state is never reused across runs, so it only writes artifacts nothing reads while inflating `target/`. `line-tables-only` rather than `0` keeps line numbers in a CI backtrace, which is the one place a backtrace must be readable without attaching a debugger.
+
+### Unchanged on purpose
+- **Every feature's test-versus-clippy mapping is preserved exactly**, including the four legs that are clippy-only and the two that run tests without a clippy pass. That mapping is load-bearing and documented per feature (models must never be downloaded in CI; `ann` and `rerank` assert things a compile check cannot). `local-embed` in particular is clippy-only for a reason that a dedicated runner now removes — its own comment says the constraint was disk exhaustion during linking, not a missing model — so it could gain real test coverage. Left as-is here: this change is about how long CI takes, and quietly widening what is verified inside it would make a speed change and a coverage change indistinguishable in the history.
+
+### Provenance
+
+The workflow YAML was parsed and its matrix asserted leg-by-leg against the steps it replaces (all eight features, with identical `test`/`clippy`/`apt` flags). The profile overrides were verified to be read rather than ignored by confirming Cargo rejects an invalid value with a message enumerating `line-tables-only` as valid. Timings quoted above are from the step-level job data of run `31951918373`, not estimates.
+
 ## 2026-08-16 — Version bumped to 0.1.2, releasing the dashboard command surface
 
 ### Added
