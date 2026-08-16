@@ -2,6 +2,20 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — The dashboard's single 1,664-line file is split into seven
+
+### Changed
+- **`crates/remind_me_api/src/dashboard/App.jsx` becomes `theme`, `api`, `stores`, `icons`, `components`, `forms` and `app`.** It had reached 1,664 lines and 41 top-level definitions holding the fetch layer, the icon set, every store, every form and the whole shell in one scope — failing `PHILOSOPHY.md`'s Modularity ("simple parts, clean interfaces") and its "each piece fits in one head" test. The largest file is now `app.jsx` at 582 lines.
+- **A pure move.** Every line of the original is accounted for; the only reordering is the three shared style tokens (`iconBtn`, `inputSt`, `labelSt`), which move up beside the `theme`/`mono`/`sans` they are built from rather than sitting below the icon set they have nothing to do with. Verified by sorting both the original and the concatenated split and diffing: identical, and the same 41 top-level definitions.
+- **`routes.rs` serves each file as its own `<script type="text/babel" data-file="...">` block** rather than one paste. Separate blocks rather than a concatenation so a syntax error or a runtime throw names the file it came from, instead of an offset into a 1,600-line document.
+
+### Added
+- **`the_dashboard_sources_are_served_in_dependency_order`** in `dashboard_test.rs`. There is no bundler here: the blocks share one global scope and run in document order, so a file may reference anything above it and nothing below it. That makes the order of `DASHBOARD_SOURCES` load-bearing in a way nothing else checked — reordering it would leave every test green and the page blank, because the failure is a `ReferenceError` in a browser the suite never opens. The test pins the order and additionally requires the `ReactDOM.createRoot` call to fall in the last block.
+
+### Provenance
+
+`cargo test -p remind_me_api` green (15 dashboard tests, including both endpoint-wiring guards, which independently confirm the served page still carries every endpoint literal across the split), plus `cargo fmt --all --check` and `cargo clippy -p remind_me_api --all-targets`. Each split file was syntax-checked with `node --check`, as was their concatenation. The page was then driven in Chromium against a seeded vault: all six views opened, and a reminder was set from a Browse card and read back in the Reminders view — a path crossing `stores`, `components`, `forms` and `app` — with no page errors.
+
 ## 2026-08-16 — CI caches dependencies instead of the whole target directory
 
 ### Changed

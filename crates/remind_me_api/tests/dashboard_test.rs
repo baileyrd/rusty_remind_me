@@ -20,6 +20,59 @@ fn the_dashboard_route_serves_html_embedding_the_vendored_jsx() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// The dashboard's source files are all served, in dependency order.
+///
+/// There is no bundler here: each file is its own `<script type="text/babel">`
+/// block, and those share one global scope and run in document order. A file
+/// may reference anything declared above it and nothing below it, so the order
+/// of `DASHBOARD_SOURCES` is load-bearing in a way nothing else checks —
+/// reordering it would leave every test green and the page blank, because the
+/// failure is a `ReferenceError` in a browser this suite never opens.
+#[test]
+fn the_dashboard_sources_are_served_in_dependency_order() {
+    let (server, root) = server("dashboard-source-order");
+    let page = get(&server, "/").body;
+
+    // Theme first (everything styles against it), shell last (it references
+    // every hook, component and form declared before it).
+    let expected = [
+        "theme.jsx",
+        "api.jsx",
+        "stores.jsx",
+        "icons.jsx",
+        "components.jsx",
+        "forms.jsx",
+        "app.jsx",
+    ];
+
+    let mut previous = 0;
+    for name in expected {
+        let marker = format!("data-file=\"{}\"", name);
+        let at = page.find(&marker).unwrap_or_else(|| {
+            panic!("the dashboard no longer serves {name}");
+        });
+        assert!(
+            at > previous,
+            "{name} is served out of dependency order — a file can only \
+             reference what loaded before it"
+        );
+        previous = at;
+    }
+
+    // The render call is what turns the definitions above into a page, so it
+    // has to be in the last block rather than merely present somewhere.
+    let render_at = page
+        .find("ReactDOM.createRoot")
+        .expect("the dashboard still mounts itself");
+    let shell_at = page.find("data-file=\"app.jsx\"").expect("the shell block");
+    assert!(
+        render_at > shell_at,
+        "the mount call must live in the last block, after every definition"
+    );
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// Every command endpoint the dashboard drives is both named in the page it
 /// serves and answered by the route table behind it.
 ///
