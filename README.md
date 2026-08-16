@@ -109,6 +109,19 @@ git log --follow -- remind_me/crates/remind_me_core/src/dbs_import.rs
   the note in the root `Cargo.toml`; `libsqlite3-sys` declares
   `links = "sqlite3"`, so two versions of it is a hard error rather than an
   inefficiency, and both halves are on 0.32.)
+- **`dbs-connector-youtube`'s tests carry a latent `ETXTBSY` race, and this
+  workspace makes it more likely to fire.** Several of them write a fake
+  `yt-dlp` shell script and immediately exec it; in a multithreaded program,
+  another thread's `fork`/`exec` can still hold a write handle on that file,
+  and the exec fails with `Text file busy` (`os error 26`). It is unrelated
+  to any dependency version — it is an OS-level exec error — and the tests
+  pass reliably when the crate is run on its own. What changed is scheduling
+  pressure: `cargo test --workspace` here runs 25 crates' test binaries
+  concurrently rather than 19, and it surfaced once in a full run (
+  `a_failed_list_withholds_the_reconcile_marker_but_keeps_the_other_list`).
+  The fix is on the test side — serialize the tests that exec a
+  just-written script — and was left out of the merge because it is a change
+  to how that half tests itself, not to how the two halves fit together.
 - **`release.yml` has not been exercised end to end.** It now builds and
   packages all 17 binaries rather than the original 2, and renames the asset
   from `rusty-remind-me-v*` to `rusty-recall-v*`. Nothing proves that until
