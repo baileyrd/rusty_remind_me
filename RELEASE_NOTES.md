@@ -2,6 +2,19 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — CI runs the optional-feature matrix in parallel
+
+### Changed
+- **The ~10 sequential optional-feature steps inside `check` become a `features` job matrix**, one runner per feature (`pdf`, `cloud-backup`, `ann`, `ocr`, `audio`, `rerank`, `local-embed`, `stack-dumps`). The work is identical; only the wall clock changes — from the sum of every feature's build to the slowest single one (`ann`, whose usearch C++ build dominates). `check` keeps its default-feature fmt/build/test/clippy **and its job name**, so any required-status-check configuration still matches.
+- **`check`'s "Free disk space" step and all three `cargo clean` steps are removed**, because what they worked around is gone. All four existed because consecutive feature steps relinked every integration test binary in `remind_me_core`/`remind_me_hub` against a new feature set, and the accumulated dead binaries exhausted the runner's disk mid-link — an ENOSPC during `ann`'s link, and an `ld` SIGBUS during `local-embed`'s. One feature per runner means nothing accumulates. Together those steps cost ~2 minutes per run and forced a full recompile after each `cargo clean`. If `check` ever hits ENOSPC again, restoring a disk-freeing step there is the fix — it was dropped because its cause moved, not because runners grew.
+
+### Unchanged on purpose
+- **Every feature's test-versus-clippy mapping is preserved exactly**, including the four clippy-only legs and the two that run tests without a clippy pass. That mapping is load-bearing and documented per feature: models must never be downloaded in CI, and `ann`/`rerank`/`stack-dumps` assert things a compile check cannot. `local-embed` is clippy-only for a reason a dedicated runner now removes — its own comment says the constraint was disk exhaustion during linking, explicitly not a missing model — so it could gain real test coverage. Left as-is: this change is about how long CI takes, and quietly widening what is verified inside it would make a speed change and a coverage change indistinguishable in the history.
+
+### Provenance
+
+The workflow YAML was parsed and the matrix asserted leg-by-leg against the steps it replaces — all eight features with identical `test`/`clippy`/`apt` flags. One of three changes split out of the original combined PR per `ATLAS-TOOL-0033` (focused pull request scope); the other two are the cache-action swap and the build-tuning env vars.
+
 ## 2026-08-16 — CI drops incremental compilation and full debug info
 
 ### Changed
