@@ -142,20 +142,52 @@ pub fn api_versions(
 // Dashboard (#78)
 // ---------------------------------------------------------------------------
 
-/// `dashboard/App.jsx`, vendored verbatim from the reference — a
-/// self-contained React component that talks only to
-/// `window.location.origin + "/api"`, so it runs unmodified against this
-/// crate's own `/api/*` routes. Not this crate's file to hand-edit, the same
-/// convention the generated `schema_*.sql` files already established:
-/// regenerate by re-copying from the reference, don't patch the copy.
-const DASHBOARD_JSX: &str = include_str!("dashboard/App.jsx");
+/// The dashboard's source, in dependency order.
+///
+/// This began as a single vendored `App.jsx`, which had grown to 1,664 lines
+/// and 41 top-level definitions holding the fetch layer, the icon set, every
+/// store, every form and the whole shell in one scope. Splitting it is a pure
+/// move — the same definitions, reordered only to put the shared style tokens
+/// beside the theme they are built from.
+///
+/// **The order of this array is load-bearing.** There is no bundler and no
+/// module system here: each entry is emitted as its own
+/// `<script type="text/babel">` block, and those share one global scope and
+/// execute in document order. A file may therefore reference anything declared
+/// by a file above it and nothing below it, which is why the shell comes last
+/// and the theme comes first.
+///
+/// Kept as separate `<script>` blocks rather than concatenated into one: a
+/// syntax error or a runtime throw then names the file it came from, instead
+/// of an offset into a 1,600-line paste.
+const DASHBOARD_SOURCES: &[(&str, &str)] = &[
+    ("theme.jsx", include_str!("dashboard/theme.jsx")),
+    ("api.jsx", include_str!("dashboard/api.jsx")),
+    ("stores.jsx", include_str!("dashboard/stores.jsx")),
+    ("icons.jsx", include_str!("dashboard/icons.jsx")),
+    ("components.jsx", include_str!("dashboard/components.jsx")),
+    ("forms.jsx", include_str!("dashboard/forms.jsx")),
+    ("app.jsx", include_str!("dashboard/app.jsx")),
+];
 
-/// The reference's own `_build_dashboard_html()` wrapper, reproduced
-/// exactly: pinned CDN React/ReactDOM/Babel builds (with the reference's own
-/// Subresource Integrity hashes, HY-04 — a compromised or substituted CDN
-/// response cannot execute), the JSX embedded in a `text/babel` script
-/// block. Requires network access to unpkg.com on first load, same
-/// limitation as the reference: neither vendors the CDN assets themselves.
+/// Every source above as its own Babel script block, each labelled with the
+/// file it came from so a browser-console stack trace points at a real path.
+fn dashboard_scripts() -> String {
+    DASHBOARD_SOURCES
+        .iter()
+        .map(|(name, source)| {
+            format!("<script type=\"text/babel\" data-file=\"{name}\">\n{source}\n</script>")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The reference's own `_build_dashboard_html()` wrapper: pinned CDN
+/// React/ReactDOM/Babel builds (with the reference's own Subresource
+/// Integrity hashes, HY-04 — a compromised or substituted CDN response cannot
+/// execute), then the dashboard's own sources as `text/babel` blocks.
+/// Requires network access to unpkg.com on first load, same limitation as the
+/// reference: neither vendors the CDN assets themselves.
 fn dashboard_html() -> String {
     format!(
         r#"<!DOCTYPE html>
@@ -185,12 +217,10 @@ fn dashboard_html() -> String {
 <script src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"
         integrity="sha384-ezQ6HS3FLspd9te19o2McUV6FAK091+GG7KO54f/R8DKgCDi7fULhapNrd5LY+vG"
         crossorigin="anonymous"></script>
-<script type="text/babel">
-{jsx}
-</script>
+{scripts}
 </body>
 </html>"#,
-        jsx = DASHBOARD_JSX
+        scripts = dashboard_scripts()
     )
 }
 
