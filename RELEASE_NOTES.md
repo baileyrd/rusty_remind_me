@@ -2,6 +2,17 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — CI drops incremental compilation and full debug info
+
+### Changed
+- **`CARGO_INCREMENTAL=0` and `CARGO_PROFILE_{DEV,TEST}_DEBUG=line-tables-only` in `.github/workflows/ci.yml`'s `env` block.** Incremental compilation is pure overhead on a runner: its state is never reused across runs — each starts from a restored dependency cache at best — so it only writes artifacts nothing reads, while inflating `target/`, which this workflow has repeatedly run out of (hence `check`'s disk-freeing step and its three `cargo clean` steps). Full debug info across the workspace's 131 integration-test binaries is a large share of both link time and `target/` size.
+- **Deliberately workflow env vars rather than a `[profile.*]` block in `Cargo.toml`.** The cost being paid is specific to a runner; putting it in `Cargo.toml` would silently strip debug info from every contributor's local builds to fix a problem they do not have.
+- **`line-tables-only` rather than `0`.** Dropping debug info entirely would leave a CI panic with a backtrace and no line numbers, and a CI log is the one place a backtrace has to be readable without attaching a debugger.
+
+### Provenance
+
+Verified that Cargo reads these overrides rather than ignoring them: an invalid value is rejected with a message enumerating `line-tables-only` among the accepted set, so a silent typo cannot leave the setting inert. One of three changes split out of the original combined PR per `ATLAS-TOOL-0033` (focused pull request scope); the other two are the cache-action swap and the optional-feature job matrix.
+
 ## 2026-08-16 — Version bumped to 0.1.2, releasing the dashboard command surface
 
 ### Added

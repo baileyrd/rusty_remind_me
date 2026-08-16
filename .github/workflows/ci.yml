@@ -20,6 +20,25 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+  # Build tuning that applies to CI only. Deliberately env vars here rather
+  # than a `[profile.*]` block in Cargo.toml: the cost being paid is specific
+  # to a runner, and putting it in Cargo.toml would silently strip debug info
+  # from every contributor's local builds to fix a problem they do not have.
+  #
+  # Incremental compilation is pure overhead on a runner. Its state is never
+  # reused across runs -- each starts from a restored dependency cache at
+  # best -- so it only writes artifacts nothing reads, while inflating
+  # `target/`, which this workflow has repeatedly run out of (see `check`'s
+  # disk-freeing and `cargo clean` steps).
+  CARGO_INCREMENTAL: 0
+  # `line-tables-only` rather than `0`: full debug info across this
+  # workspace's 131 integration-test binaries is a large share of both link
+  # time and `target/` size, but dropping it entirely would leave a CI panic
+  # with a backtrace and no line numbers -- and a CI log is the one place a
+  # backtrace has to be readable without attaching a debugger.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
   # Cheap and independent of the Rust toolchain, so it reports in seconds
   # rather than behind a 15-minute build.
