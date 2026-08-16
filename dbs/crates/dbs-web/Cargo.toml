@@ -1,0 +1,24 @@
+[package]
+name = "dbs-web"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Web app skeleton for rusty_dbs, mirroring dbs.web.app in baileyrd/Daily-Backup-System"
+
+[dependencies]
+axum = { version = "0.7", features = ["multipart"] }
+chrono = "0.4"
+dbs-core = { path = "../dbs-core" }
+dbs-research = { path = "../dbs-research" }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+url = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.4", features = ["util"] }

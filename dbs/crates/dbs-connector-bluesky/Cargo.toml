@@ -1,0 +1,17 @@
+[package]
+name = "dbs-connector-bluesky"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bluesky connector for rusty_dbs, mirroring dbs.connectors.bluesky in baileyrd/Daily-Backup-System"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dbs-connector-support = { path = "../dbs-connector-support" }
+dbs-core = { path = "../dbs-core" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "1"
+
+[dev-dependencies]
+mockito = "1"
