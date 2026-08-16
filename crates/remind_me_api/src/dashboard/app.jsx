@@ -34,7 +34,6 @@ function App() {
   const [deleteSearchConfirm, setDeleteSearchConfirm] = useState(null);
   const [savedSearchRun, setSavedSearchRun] = useState(null); // {name, query, count, results}
   const [runningSearch, setRunningSearch] = useState("");
-  const [digestDays, setDigestDays] = useState(7);
   // null when closed; {page: null} for a new page, {page: <the page>} to edit.
   const [wikiEdit, setWikiEdit] = useState(null);
   const [wikiDeleteConfirm, setWikiDeleteConfirm] = useState(null);
@@ -478,11 +477,7 @@ function App() {
             React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:16,flexWrap:"wrap"}},
               React.createElement("h3",{style:{fontFamily:mono,fontSize:13,fontWeight:600,color:theme.textSecondary,textTransform:"uppercase",letterSpacing:"0.04em",margin:0}},"Digest & Server Status"),
               React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
-                React.createElement("div",{style:{display:"flex",background:theme.bg,borderRadius:6,border:"1px solid "+theme.border,overflow:"hidden"}},
-                  [7,30,90].map(d=>React.createElement("button",{key:d,onClick:()=>{setDigestDays(d); if (ops.digest) ops.run(d);},
-                    style:{padding:"6px 12px",border:"none",fontSize:12,fontFamily:mono,cursor:"pointer",background:digestDays===d?theme.accent:"transparent",color:digestDays===d?"#fff":theme.textSecondary}}, d+"d"))
-                ),
-                React.createElement("button",{onClick:()=>ops.run(digestDays),disabled:ops.running,
+                React.createElement("button",{onClick:()=>ops.run(),disabled:ops.running,
                   style:{display:"flex",alignItems:"center",gap:6,padding:"6px 14px",borderRadius:6,border:"none",background:ops.running?theme.surfaceActive:theme.accent,color:ops.running?theme.textMuted:"#fff",fontSize:12,fontWeight:600,fontFamily:mono,cursor:ops.running?"wait":"pointer"}},
                   ops.running ? React.createElement(Icons.Loader) : React.createElement(Icons.Play),
                   ops.digest ? "Re-run" : "Run")
@@ -490,11 +485,11 @@ function App() {
             ),
             ops.error && React.createElement("div",{style:{padding:"10px 14px",borderRadius:6,background:theme.dangerSubtle,border:"1px solid "+theme.danger+"40",color:theme.danger,fontSize:13,fontFamily:mono,marginBottom:12}}, ops.error),
             !ops.digest && !ops.error && React.createElement("div",{style:{fontSize:13,color:theme.textMuted,fontFamily:sans,lineHeight:1.6}},
-              "Runs remind_me_digest over the last "+digestDays+" days and remind_me_server_status. Sensitive memories are never included in a digest."
+              "Runs remind_me_digest and remind_me_server_status. Sensitive memories are never included in a digest."
             ),
             ops.digest && React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))",gap:20}},
               React.createElement("div",null,
-                React.createElement("div",{style:labelSt}, (ops.digest.recent_total||0)+" new in "+(ops.digest.since_days||digestDays)+" days"),
+                React.createElement("div",{style:labelSt}, (ops.digest.recent_total||0)+" new in "+ops.digest.since_days+" days"),
                 React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6}},
                   (ops.digest.recent_memories||[]).map(m=>React.createElement("div",{key:m.id,style:{fontSize:13,fontFamily:sans,color:theme.text,padding:"8px 10px",background:theme.surfaceActive,borderRadius:5,lineHeight:1.5}},
                     React.createElement(CategoryBadge,{category:m.category}),
