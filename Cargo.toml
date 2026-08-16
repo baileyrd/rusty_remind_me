@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 # The oldest toolchain this workspace has actually been observed to build and
 # test with — not a bisected minimum. 1.94 is what this repo was developed
