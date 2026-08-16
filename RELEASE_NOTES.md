@@ -2,6 +2,17 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — Version corrected to 0.2.0; 0.1.2 was misnumbered under ATLAS-EVS-0030
+
+### Fixed
+- **`v0.1.2` was released under the wrong version number and this supersedes it.** `ATLAS-EVS-0030` (Atlas Engineering Standards Library, ATLAS-200 Chapter 4, "The Pre-1.0 Surface Rule") states that while a crate is at `0.y.z`, **any** change to its public API surface — additive or breaking — MUST bump `y`; `z` is reserved for changes touching no public item's shape. #327 and #328 added thirteen public HTTP routes and their `pub` handler functions and constants, so the correct version was `0.2.0`.
+- **The reasoning that produced `0.1.2` was the exact reading the standard names and rejects.** `RELEASE_NOTES.md`'s `0.1.2` entry, #329's description, and its commit message all argued that additive-and-non-breaking means a patch bump under Cargo's 0.x compatibility rules. ATLAS-200 Chapter 4 addresses that directly: it is "stricter than the common 'additive changes are patch-level' reading", because a public surface is consumed from more than one side and additive-for-callers is not additive-for-implementers. That argument was made confidently and was wrong; it is recorded here rather than quietly overwritten.
+- **Superseded rather than retracted.** `v0.1.2`'s tag, release and five attached assets are left in place: `ATLAS-TOOL-0042` forbids rewriting merged history, and deleting a published release is irreversible where publishing a correct successor is not. `v0.1.2` and `v0.2.0` therefore carry the same code; the second is the one whose number is correct.
+
+### Provenance
+
+Verified with `scripts/get_workspace_version.sh` and `scripts/check_plugin_version.sh` (both report `0.2.0` and agree), and `cargo check --workspace` to regenerate `Cargo.lock`'s six workspace-member entries. `remind_me_core::updater::INSTALLED_VERSION` is `env!("CARGO_PKG_VERSION")`, so `/health` and `/api/status` report `0.2.0` without a second edit — asserted by `digest_status_test.rs`. Merging triggers `.github/workflows/release.yml`, which builds the four platform archives and the plugin archive and publishes them as `v0.2.0`.
+
 ## 2026-08-16 — CI runs the optional-feature matrix in parallel
 
 ### Changed
