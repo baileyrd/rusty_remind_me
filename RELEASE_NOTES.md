@@ -2,6 +2,16 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — Version bumped to 0.1.2, releasing the dashboard command surface
+
+### Added
+- **Bumped `[workspace.package].version` in `Cargo.toml` from `0.1.1` to `0.1.2`**, with `.claude-plugin/plugin.json`'s `"version"` alongside it — `scripts/check_plugin_version.sh` fails CI on exactly that mismatch. Merging this triggers `.github/workflows/release.yml`, which builds `rusty-remind-me`/`rusty-remind-me-hub` for Linux, macOS (Intel + Apple Silicon) and Windows, packages the Claude Code plugin archive, and publishes all of it as the `v0.1.2` GitHub Release. Nothing here pushes a tag by hand; the release action creates `v0.1.2` from the version it reads.
+- **Patch rather than minor, deliberately.** Everything shipping in this version is additive — thirteen new HTTP routes and the dashboard surfaces over them — with no existing route, response shape or default changed. Under Cargo's 0.x compatibility rules the *minor* position is the breaking one (`0.1` → `0.2` tells every downstream crate this release is incompatible), so a minor bump here would assert a break that did not happen. `0.1.2` says what is true: new surface, nothing removed or altered.
+
+### Provenance
+
+Verified with `scripts/get_workspace_version.sh` and `scripts/check_plugin_version.sh` (both report `0.1.2`), `cargo check --workspace` (regenerating `Cargo.lock`'s six workspace-member version entries, no dependency-graph changes), plus `cargo test --workspace`, `cargo clippy --workspace --all-targets` and `cargo fmt --all --check`. `remind_me_core::updater::INSTALLED_VERSION` is `env!("CARGO_PKG_VERSION")`, so `/health` and `/api/status` report `0.1.2` without a second edit — confirmed by `digest_status_test.rs`, which asserts the two agree.
+
 ## 2026-08-16 — The wiki is writable from the dashboard
 
 ### Added
