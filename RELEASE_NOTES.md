@@ -2,6 +2,22 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-08-16 — Three loose ends from the standards audit are closed
+
+### Removed
+- **The digest panel's 7d/30d/90d window selector.** `remind_me_digest`, the scheduled digest and this panel now all answer the same question, because the panel no longer asks a different one: `GET /api/digest` with no `since_days` uses `digest::DEFAULT_SINCE_DAYS`, the same default the tool uses. Three buttons and a piece of view state existed so the dashboard could disagree with the rest of the system about what "recent" means. Nothing else in the product offers that choice, and a surface that lets one client redefine a shared term is the kind of growth `PHILOSOPHY.md` warns about. The route still accepts `since_days` and clamps it — the parameter is not gone, only the UI insisting a reader pick one.
+
+### Fixed
+- **`routes.rs`'s wiki section cited a document that does not exist here.** It pointed at "SCHEMA.md's 'you are the disciplined maintainer' framing"; there is no `SCHEMA.md` in this repository and that phrase appears nowhere in it — it names the reference project, which a reader here cannot open. Now cites `wiki_fs::DEFAULT_SCHEMA`, seeded as the vault's `schema.md` on first read, and quotes the two rules it actually carries ("Distil, do not paste", "Revise in place"). Recorded as a loose end in `docs/adr/0019` and closed here.
+- **`RELEASE_NOTES.md` was not in the order its own header promises.** #336's entry sat below #333's and #331's despite merging after both, because it was written against a base predating them and its patch anchored where that base put it. Moved into merge order; the entry's text is untouched. Verified as a pure reordering by sorting the file before and after the move and diffing -- identical, so no line was altered or lost in the process.
+
+### Considered and deliberately not done
+- **Three of the four dashboard surfaces flagged as over-reach survive review.** Re-read against the code rather than against the earlier critique: the **retitle warning** describes a real and non-obvious consequence — saving under a new title writes a *new* page and leaves `[[links]]` pointing at the old one — so removing it would trade a line of text for silent duplicate pages. The **maintainer-schema viewer** in the wiki editor is the only place the curation rules are reachable from the web UI at all, since generated pages are not content pages and do not appear in the page list; it is also lazy-loaded, so it costs nothing until opened. And the **reminder surfaces** are not four surfaces for one capability on inspection — they are a list view, an entry point from a card, and the form that entry point opens. The digest selector was the one that did not survive, and only it was removed.
+
+### Provenance
+
+`cargo test -p remind_me_api` (all 18 binaries, 210 tests), `cargo fmt --all --check` and `cargo clippy -p remind_me_api --all-targets -- -D warnings` all clean. Each dashboard file syntax-checked with `node --check`. The digest route's fallback was read out of `api_digest` (`int_query(req, "since_days", digest::DEFAULT_SINCE_DAYS)`) rather than assumed, so dropping the query parameter provably lands on the shared default rather than on zero.
+
 ## 2026-08-16 — Two decisions taken during this release are written down as ADRs
 
 ### Added
@@ -54,6 +70,20 @@ One caveat stated rather than glossed: run `31951918373` was a PR that touched `
 
 Verified with `scripts/get_workspace_version.sh` and `scripts/check_plugin_version.sh` (both report `0.2.0` and agree), and `cargo check --workspace` to regenerate `Cargo.lock`'s six workspace-member entries. `remind_me_core::updater::INSTALLED_VERSION` is `env!("CARGO_PKG_VERSION")`, so `/health` and `/api/status` report `0.2.0` without a second edit — asserted by `digest_status_test.rs`. Merging triggers `.github/workflows/release.yml`, which builds the four platform archives and the plugin archive and publishes them as `v0.2.0`.
 
+## 2026-08-16 — The embedder availability cache now expires on a config change, not only on time
+
+### Fixed
+- **`available_embedder`'s availability cache outlived the configuration it was a verdict about.** A failed probe is held for `AVAILABILITY_FAILURE_TTL` (30s) so the hot search path does not pay a ping round-trip per call, but the cache was keyed on time alone. Point the backend at a daemon that is actually up after a failed probe and `remind_me_server_status` kept reporting "configured but not answering" for the rest of the TTL, because nothing invalidated the failure the *old* address had earned. `resolve_embedder`'s own documentation promises the opposite — "a configuration change takes effect on the next search rather than requiring a restart" — and the availability-gated resolver quietly did not honour it.
+- **The cache is now keyed on a fingerprint of every environment variable `resolve_embedder` reads** (`REMIND_ME_EMBEDDING_BACKEND`, `_DIM`, `_OLLAMA_URL`, `_OLLAMA_EMBED_MODEL`, `_ONNX_MODEL_PATH`, `_ONNX_TOKENIZER_PATH`), joined on a unit separator so no two distinct configurations can collapse into one key. A verdict expires when its TTL runs out **or** when the configuration changes, whichever comes first.
+- **`EmbeddingIdentity` was the obvious key and would have been wrong.** It carries backend, model and dimension but not the endpoint, so two probes against different daemons on the same model would still have shared a verdict — which is precisely the case that was failing.
+
+### Why it surfaced as a CI flake
+`remind_me_mcp`'s `test_server_status_reports_embeddings_active_when_the_backend_is_configured_and_reachable` binds a fake daemon on a fresh port and asserts `active`. It inherited the stale failure from whichever test had last probed an unreachable backend in the same process, so it passed or failed depending on test scheduling — intermittently, and most often on the slowest runner. The `ENV_LOCK` convention those tests follow serialises the *environment*; a process-global cache is not the environment, so the lock never covered it. The flake was this bug wearing a test's clothes, which is why the fix is in `remind_me_core` rather than in the test.
+
+### Provenance
+
+`crates/remind_me_core/tests/embedder_availability_cache_test.rs` adds two tests: one asserting a failed probe does not answer for a different address (the regression), one asserting a successful probe is *still* cached within one configuration — the stub answers exactly one connection, so a re-probe would find nothing listening and fail. Verified with `cargo test -p remind_me_core`, `cargo clippy -p remind_me_core --all-targets` and `cargo fmt --all --check`.
+
 ## 2026-08-16 — CI runs the optional-feature matrix in parallel
 
 ### Changed
@@ -77,20 +107,6 @@ The workflow YAML was parsed and the matrix asserted leg-by-leg against the step
 ### Provenance
 
 Verified that Cargo reads these overrides rather than ignoring them: an invalid value is rejected with a message enumerating `line-tables-only` among the accepted set, so a silent typo cannot leave the setting inert. One of three changes split out of the original combined PR per `ATLAS-TOOL-0033` (focused pull request scope); the other two are the cache-action swap and the optional-feature job matrix.
-
-## 2026-08-16 — The embedder availability cache now expires on a config change, not only on time
-
-### Fixed
-- **`available_embedder`'s availability cache outlived the configuration it was a verdict about.** A failed probe is held for `AVAILABILITY_FAILURE_TTL` (30s) so the hot search path does not pay a ping round-trip per call, but the cache was keyed on time alone. Point the backend at a daemon that is actually up after a failed probe and `remind_me_server_status` kept reporting "configured but not answering" for the rest of the TTL, because nothing invalidated the failure the *old* address had earned. `resolve_embedder`'s own documentation promises the opposite — "a configuration change takes effect on the next search rather than requiring a restart" — and the availability-gated resolver quietly did not honour it.
-- **The cache is now keyed on a fingerprint of every environment variable `resolve_embedder` reads** (`REMIND_ME_EMBEDDING_BACKEND`, `_DIM`, `_OLLAMA_URL`, `_OLLAMA_EMBED_MODEL`, `_ONNX_MODEL_PATH`, `_ONNX_TOKENIZER_PATH`), joined on a unit separator so no two distinct configurations can collapse into one key. A verdict expires when its TTL runs out **or** when the configuration changes, whichever comes first.
-- **`EmbeddingIdentity` was the obvious key and would have been wrong.** It carries backend, model and dimension but not the endpoint, so two probes against different daemons on the same model would still have shared a verdict — which is precisely the case that was failing.
-
-### Why it surfaced as a CI flake
-`remind_me_mcp`'s `test_server_status_reports_embeddings_active_when_the_backend_is_configured_and_reachable` binds a fake daemon on a fresh port and asserts `active`. It inherited the stale failure from whichever test had last probed an unreachable backend in the same process, so it passed or failed depending on test scheduling — intermittently, and most often on the slowest runner. The `ENV_LOCK` convention those tests follow serialises the *environment*; a process-global cache is not the environment, so the lock never covered it. The flake was this bug wearing a test's clothes, which is why the fix is in `remind_me_core` rather than in the test.
-
-### Provenance
-
-`crates/remind_me_core/tests/embedder_availability_cache_test.rs` adds two tests: one asserting a failed probe does not answer for a different address (the regression), one asserting a successful probe is *still* cached within one configuration — the stub answers exactly one connection, so a re-probe would find nothing listening and fail. Verified with `cargo test -p remind_me_core`, `cargo clippy -p remind_me_core --all-targets` and `cargo fmt --all --check`.
 
 ## 2026-08-16 — Version bumped to 0.1.2, releasing the dashboard command surface
 

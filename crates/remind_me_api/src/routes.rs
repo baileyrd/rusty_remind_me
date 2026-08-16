@@ -797,9 +797,10 @@ pub fn api_export(conn: &Connection, _wiki: &Wiki, req: &Request, _params: &Para
 // Wiki — read paths (FT-08); write paths added below
 // ---------------------------------------------------------------------------
 //
-// The wiki tools are LLM-curated by design (see SCHEMA.md's "you are the
-// disciplined maintainer" framing): Claude writes and browses it, and these
-// read routes exist so a human owner can *see* it outside the MCP tools.
+// The wiki tools are LLM-curated by design (see `wiki_fs::DEFAULT_SCHEMA`,
+// seeded as the vault's `schema.md` on first read: "Distil, do not paste",
+// "Revise in place"): Claude writes and browses it, and these read routes
+// exist so a human owner can *see* it outside the MCP tools.
 //
 // The write paths that follow are a deliberate reversal of this section's
 // original "there is deliberately no POST/PUT/DELETE here", not an oversight

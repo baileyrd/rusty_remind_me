@@ -293,10 +293,13 @@ function useOpsStore() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState(null);
 
-  const run = useCallback(async (sinceDays) => {
+  // No window parameter: the digest's own default is the one the MCP tool and
+  // the scheduled digest use, and a dashboard that could disagree with them
+  // about "recent" would make the same vault report two different answers.
+  const run = useCallback(async () => {
     setRunning(true); setError(null);
     try {
-      const d = await api("/digest?since_days=" + sinceDays);
+      const d = await api("/digest");
       if (d.error) setError(d.error); else setDigest(d);
       const s = await api("/status");
       if (!s.error) setStatus(s);
