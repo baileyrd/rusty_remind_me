@@ -2,6 +2,25 @@
 
 > High-performance, persistent long-term memory engine and Model Context Protocol (MCP) server written in Rust, built on the **Rusty Mill** ecosystem.
 
+> [!IMPORTANT]
+> **This repository is frozen at v0.2.0. Development and releases moved to
+> the Rusty Mill monorepo:
+> [`Rusty-Mill/rusty_mill`](https://github.com/Rusty-Mill/rusty_mill), under
+> [`crates/apps/rusty_remind_me`](https://github.com/Rusty-Mill/rusty_mill/tree/main/crates/apps/rusty_remind_me)**
+> (imported with full history). Open issues and PRs there.
+>
+> - **Plugin users:** nothing to do. This repository's marketplace entry now
+>   points at the monorepo copy, so `rusty-remind-me@rusty-remind-me` keeps
+>   updating. For new installs, prefer
+>   `claude plugin marketplace add Rusty-Mill/rusty_mill` and
+>   `claude plugin install rusty-remind-me@rusty-mill`.
+> - **Releases:** v0.2.1 onward are on the monorepo's Releases page, tagged
+>   `rusty-remind-me-vX.Y.Z`.
+> - **Source clones:** `remind_me_check_update`/`remind_me_self_update`
+>   follow this repository's `main`, which no longer moves. Re-clone
+>   `Rusty-Mill/rusty_mill` and build with
+>   `cargo build --release -p rusty-remind-me`.
+
 `rusty_remind_me` is a native Rust port of `remind-me`. It equips AI assistants (such as Claude Desktop, Antigravity, Cursor, OpenAI Codex, and custom LLM agents) with persistent, searchable memory using SQLite FTS5 full-text search, ACT-R inspired memory vitality decay, Reciprocal Rank Fusion (RRF) search ranking, a structured Knowledge Graph entity system, and automated markdown wiki compilation.
 
 ---
