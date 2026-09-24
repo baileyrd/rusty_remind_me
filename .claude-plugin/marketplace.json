@@ -1,14 +1,19 @@
 {
   "name": "rusty-remind-me",
-  "description": "Marketplace for the rusty_remind_me Claude Code plugin: persistent long-term memory, MCP tools, and slash commands.",
+  "description": "Marketplace for the rusty_remind_me Claude Code plugin: persistent long-term memory, MCP tools, and slash commands. The plugin now lives in the Rusty-Mill/rusty_mill monorepo; this entry points there so existing installs keep updating.",
   "owner": {
     "name": "rusty_remind_me contributors",
-    "url": "https://github.com/baileyrd/rusty_remind_me"
+    "url": "https://github.com/Rusty-Mill/rusty_mill"
   },
   "plugins": [
     {
       "name": "rusty-remind-me",
-      "source": "./",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/Rusty-Mill/rusty_mill.git",
+        "path": "crates/apps/rusty_remind_me",
+        "ref": "main"
+      },
       "description": "Persistent long-term memory for Claude Code: MCP tools for search/recall, a SessionStart hook that surfaces recent memories automatically, and /remember + /recall slash commands for direct CLI-backed writes and searches."
     }
   ]
